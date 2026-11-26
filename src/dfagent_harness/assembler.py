@@ -409,8 +409,25 @@ def _reports(state: dict[str, Any]) -> tuple[str, str]:
     return "\n".join(lines), f"{len(anns)} announcements"
 
 
+def _areas_list(areas: Any) -> Optional[list[dict[str, Any]]]:
+    """Normalise the areas argument to a list (or None).
+
+    Callers pass the areas list, but the spatial cache holds the
+    full derivation dict (areas + graph + surface_blocks + ...);
+    accepting the dict here too means a caller that passes the
+    cache dict cannot break the snapshot with a KeyError from
+    slicing a dict (2026-11-26).
+    """
+    if areas is None:
+        return None
+    if isinstance(areas, dict):
+        return areas.get("areas")
+    return areas
+
+
 def _areas(areas: Optional[list[dict[str, Any]]],
            survey: Optional[dict[str, Any]]) -> tuple[str, str]:
+    areas = _areas_list(areas)
     if areas is None:
         return ("Areas: unavailable (not derived yet).",
                 "unavailable")
@@ -634,6 +651,7 @@ def _reports_trimmed(state: dict[str, Any]) -> str:
 def _areas_compact(areas: Optional[list[dict[str, Any]]],
                    survey: Optional[dict[str, Any]]) -> str:
     """Areas reduced to the count + the survey summary line."""
+    areas = _areas_list(areas)
     if areas is None:
         return "Areas: unavailable (not derived yet)."
     out = f"Areas: {len(areas)} areas (compacted to the count)."

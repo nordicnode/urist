@@ -1079,9 +1079,14 @@ def create_server(
                      else _default_store())
             detector = poller.detector if poller is not None else None
             try:
+                # The areas cache holds the full derivation dict
+                # (areas + graph + surface_blocks + ...); the
+                # assembler takes the areas LIST. Passing the dict
+                # made _areas slice a dict and fail with
+                # KeyError slice(None, 15, None) (2026-11-26).
                 snap = assembler.assemble(
                     state, store=store, detector=detector,
-                    areas=spatial_cache.get("areas"),
+                    areas=(spatial_cache.get("areas") or {}).get("areas"),
                     survey=spatial_cache.get("survey"))
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "SNAPSHOT_FAILED",

@@ -538,7 +538,10 @@ class Daemon:
         cache = getattr(self.server, "spatial_cache", None) \
             if self.server is not None else None
         if cache:
-            areas = cache.get("areas")
+            # The areas cache holds the full derivation dict; the
+            # assembler takes the areas LIST (passing the dict made
+            # _areas slice a dict: KeyError slice(None, 15, None)).
+            areas = (cache.get("areas") or {}).get("areas")
             survey_data = cache.get("survey")
         detector = self.poller.detector if self.poller is not None \
             else None

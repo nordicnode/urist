@@ -106,6 +106,35 @@ class TestAssemble(unittest.TestCase):
         self.assertIn("Erushtathtat", snap["text"])
         self.assertIn("125-06-02", snap["text"])
 
+    def test_areas_cache_dict_accepted(self):
+        # Regression (2026-11-26): the server's spatial cache holds
+        # the full derivation dict (areas + graph + surface_blocks +
+        # ...), and _snapshot passed that dict to assemble(), whose
+        # _areas sliced it as a list — KeyError slice(None, 15,
+        # None). The assembler now unwraps the dict, and the call
+        # sites pass the list; either shape must work.
+        area = {"id": "area_0001", "name": "Surface",
+                "kind": "surface", "blocks": 586,
+                "bbox": {"x0": 0, "y0": 0, "z0": 175,
+                         "x1": 191, "y1": 191, "z1": 175}}
+        cache_dict = {"areas": [area], "graph": {},
+                      "surface_blocks": [1, 2],
+                      "surface_z": 175, "summary": "49 areas"}
+        # A fresh store per shape: the second assemble with the
+        # same state would diff the areas section to "unchanged"
+        # (identical text), hiding the area name.
+        for areas_arg in ([area], cache_dict):
+            tmp = tempfile.TemporaryDirectory()
+            store = Store(Path(tmp.name) / "world.db")
+            try:
+                snap = assemble(_state(), store=store,
+                                detector=_Detector(), areas=areas_arg)
+                self.assertIn("Surface", snap["text"])
+                self.assertIn("areas", snap["sections"])
+            finally:
+                store.close()
+                tmp.cleanup()
+
     def test_snapshot_under_target(self):
         snap = assemble(_state(), store=self.store,
                         detector=_Detector())

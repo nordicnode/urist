@@ -670,6 +670,26 @@ class TestBuild(unittest.TestCase):
         self.assertTrue(self.game.paused)
 
 
+class TestSiteFixHint(unittest.TestCase):
+    # M1 run #5: the model retried the same shrub-blocked still
+    # site twice because the error named the blocker but not the
+    # fix. The hint names the fix.
+    def test_shrub_blocker_names_gather_fix(self):
+        hint = actions._site_fix_hint(
+            ["tile 96,95 is SHRUB; plant at 96,95"])
+        self.assertIn("designate_gather", hint)
+        self.assertIn("96,95", hint)
+
+    def test_unit_blocker_names_wait_or_move(self):
+        hint = actions._site_fix_hint(["tile 97,95 has a unit"])
+        self.assertIn("wait", hint)
+
+    def test_other_blocker_names_different_site(self):
+        hint = actions._site_fix_hint(["tile is solid rock"])
+        self.assertIn("different free 3x3 site", hint)
+
+
+
 class TestLabor(unittest.TestCase):
     def setUp(self):
         self.game = FakeGame()

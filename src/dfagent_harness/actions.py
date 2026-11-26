@@ -956,6 +956,31 @@ def manager_order_remove(client: DFHackClient, order_id: int,
                                  "job_type": out.get("job_type")})
 
 
+def _site_fix_hint(problems: list[str]) -> str:
+    """Actionable fix for a 'site not free' failure.
+
+    M1 run #5: the model tried the same shrub-blocked still site
+    twice and never cleared it or moved, because the error named
+    the blocker but not what to DO about it. The hint names the
+    fix — including the blocked tile, so the model can gather it
+    or move — instead of retrying the same site.
+    """
+    import re
+    text = " ".join(problems or [])
+    lower = text.lower()
+    tiles = re.findall(r"tile (\d+,\d+)", text)
+    tile = f" ({tiles[0]})" if tiles else ""
+    if "shrub" in lower or "plant" in lower:
+        return ("Fix: gather the blocking plant(s) first "
+                f"(designate_gather on a small box covering{tile}), "
+                "then retry the build — or pick a different free "
+                "3x3 site.")
+    if "unit" in lower:
+        return ("Fix: wait for the unit to move, or pick a "
+                "different free 3x3 site.")
+    return "Fix: pick a different free 3x3 site on open ground."
+
+
 def build_workshop(client: DFHackClient, kind: str,
                    pos: tuple[int, int, int],
                    build_timeout: float = DEFAULT_BUILD_TIMEOUT,
@@ -995,8 +1020,10 @@ def build_workshop(client: DFHackClient, kind: str,
         raise _Fail("transport",
                     f"site read-back failed: {site.get('error')}")
     if not site.get("free", False):
+        problems = site.get("problems") or []
         raise _Fail("precondition",
-                    "site not free: " + "; ".join(site.get("problems") or []))
+                    "site not free: " + "; ".join(problems) + ". "
+                    + _site_fix_hint(problems))
     mat = None
     for mat_type in spec.get("materials") or [spec["material"]]:
         probe = _run_helper(client, "probe_material.lua",
@@ -1286,8 +1313,10 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
         raise _Fail("transport",
                     f"site read-back failed: {site.get('error')}")
     if not site.get("free", False):
+        problems = site.get("problems") or []
         raise _Fail("precondition",
-                    "site not free: " + "; ".join(site.get("problems") or []))
+                    "site not free: " + "; ".join(problems) + ". "
+                    + _site_fix_hint(problems))
     before = _read_section(client, "buildings", timeout=timeout)
     out = _helper_or_fail(client, "act_farm.lua",
                           {"x": x, "y": y, "z": z,
@@ -1362,8 +1391,10 @@ def build_furniture(client: DFHackClient, kind: str,
         raise _Fail("transport",
                     f"site read-back failed: {site.get('error')}")
     if not site.get("free", False):
+        problems = site.get("problems") or []
         raise _Fail("precondition",
-                    "site not free: " + "; ".join(site.get("problems") or []))
+                    "site not free: " + "; ".join(problems) + ". "
+                    + _site_fix_hint(problems))
     items = _read_section(client, "items", timeout=timeout)
     have = next((e.get("units", 0)
                  for e in items.get("by_type") or []

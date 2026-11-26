@@ -544,10 +544,20 @@ class Daemon:
         # probe read assignments while the game ticked. The game is
         # unpaused only at the end of the tick, below.
         manager = self._manager_present()
+        sites = self._derive_sites(state)
+        # Cache the derived sites for the snapshot route: the
+        # snapshot (server._snapshot) cannot trigger a scan, but the
+        # M1 model needs a concrete free site coordinate when the
+        # suggestion tells it to build a still. The snapshot reads
+        # this cache (freshness-checked there); the build probe
+        # re-verifies the site at build time, so a stale entry is
+        # handled by the fix hint, not a bad build.
+        self._sites_cache = sites
+        self._sites_cache_at = time.monotonic()
         records = self.planner.tick(
             state, list(self._recent_events),
             manager=manager, dig_site=self._derive_dig_site(state),
-            sites=self._derive_sites(state),
+            sites=sites,
             gather_box=self._derive_gather_box(state))
         print(f"dfh planner: tick {self.planner.ticks} done: "
               f"{len(records)} decision(s), "

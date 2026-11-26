@@ -489,8 +489,25 @@ def _has_workshop(state: dict[str, Any], subtype: str) -> bool:
         for b in lst)
 
 
+def _free_workshop_site(
+        sites: Optional[dict[str, Any]]) -> Optional[tuple[int, int, int]]:
+    """First probe-verified free workshop site, or None.
+
+    The daemon's derived sites dict has "workshop_sites": a list
+    of (x, y, z) 3x3 origins. The suggestion names the first one
+    so the model has a concrete build coordinate.
+    """
+    if not sites:
+        return None
+    for pos in sites.get("workshop_sites") or []:
+        if isinstance(pos, (list, tuple)) and len(pos) == 3:
+            return (int(pos[0]), int(pos[1]), int(pos[2]))
+    return None
+
+
 def suggest(state: dict[str, Any],
-            attention_items: list[dict[str, Any]]) -> Optional[str]:
+            attention_items: list[dict[str, Any]],
+            sites: Optional[dict[str, Any]] = None) -> Optional[str]:
     """The ONE suggested action for the single most urgent problem.
 
     Names the exact tool + parameters + the reason in game terms.
@@ -503,6 +520,12 @@ def suggest(state: dict[str, Any],
     first actionable item: the top item alone is not enough, since
     a non-actionable item (e.g. a new arrival) can sit above a
     critical one (e.g. low drink) and mask it.
+
+    ``sites`` (the daemon's derived sites, probe-verified free
+    workshop sites) supplies a concrete build coordinate when the
+    suggestion is to build a still. Without one the model stalls:
+    M1 run #6, "the observation gives no free ground
+    coordinates".
     """
     if not attention_items:
         return None
@@ -523,13 +546,16 @@ def suggest(state: dict[str, Any],
         # itself, first, and only then the brew task.
         if "drink" in text.lower() or "thirst" in text.lower():
             if not _has_workshop(state, "Still"):
+                site = _free_workshop_site(sites)
+                at = (f" at {site[0]}, {site[1]}, {site[2]}"
+                      if site else "")
                 return ("Suggested action: NO STILL EXISTS, so "
                         "brewing is impossible until you build one. "
                         "Build a still FIRST: build_workshop "
-                        "kind=still, on a free 3x3 site on open "
-                        "ground (query /v1/slice to confirm it is "
-                        "clear; retry elsewhere if 'site not free'). "
-                        "Only then run the brew task.")
+                        f"kind=still{at} (a probe-verified free 3x3 "
+                        "site). If the build reports 'site not free', "
+                        "gather the blocking plant or use the next "
+                        "free site. Only then run the brew task.")
             return ("Suggested action: run the brew task "
                     "(POST /v1/tasks/brew) — the fort is short on "
                     "drink and brewing turns plants into drink.")
@@ -548,6 +574,7 @@ def assemble(state: dict[str, Any],
              surface_z: Optional[int] = None,
              areas: Optional[list[dict[str, Any]]] = None,
              survey: Optional[dict[str, Any]] = None,
+             sites: Optional[dict[str, Any]] = None,
              accountant: Optional[TokenAccountant] = None
              ) -> dict[str, Any]:
     """Build the per-tick snapshot (text first, diff + index).
@@ -584,8 +611,12 @@ def assemble(state: dict[str, Any],
     events_text, events_short = _events(events)
     history_text, history_short = _history(decisions)
 
-    # The suggestion comes from the top attention item.
-    suggestion = suggest(state, att_items)
+    # The suggestion comes from the top attention item. The sites
+    # (probe-verified free workshop sites, derived by the daemon)
+    # give it a concrete build coordinate when it recommends a
+    # still — without one the model stalls ("the observation gives
+    # no free ground coordinates", M1 run #6).
+    suggestion = suggest(state, att_items, sites=sites)
 
     sections = [
         _section("header", header_text, header_short, 99),

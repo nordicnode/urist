@@ -291,6 +291,19 @@ class TestSuggest(unittest.TestCase):
         self.assertIn("run the brew task", out)
         self.assertNotIn("NO STILL EXISTS", out)
 
+    def test_low_drink_no_still_names_free_site(self):
+        # M1 run #6: the model stalled because the observation
+        # gave it no free ground coordinates. When the daemon's
+        # derived sites are passed in, the still-build suggestion
+        # names the concrete coordinate.
+        items = [{"priority": 2, "kind": "needs",
+                  "text": "Drink is low: 9 units left.",
+                  "unit_id": None, "pos": None,
+                  "at_baseline": False}]
+        sites = {"workshop_sites": [(96, 105, 175), (89, 105, 175)]}
+        out = suggest(_state(), items, sites=sites)
+        self.assertIn("build_workshop kind=still at 96, 105, 175", out)
+
     def test_nothing_urgent_no_suggestion(self):
         self.assertIsNone(suggest(_state(), []))
 

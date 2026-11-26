@@ -107,6 +107,22 @@ for _c in ",./;'[]\\-=":
     KEYSYMS.setdefault(_c, ord(_c))
 
 
+def _needs_still_site(state: dict) -> bool:
+    """True when the snapshot's suggestion would be a still build:
+    drink is low and no Still exists. Used by _snapshot to decide
+    whether deriving free workshop sites is worth the ~1 s cost —
+    the snapshot never triggers a scan otherwise."""
+    stocks = state.get("stocks") or {}
+    drink = stocks.get("drink_units")
+    if not isinstance(drink, int) or drink > 20:
+        return False
+    buildings = state.get("buildings") or {}
+    for b in buildings.get("list") or []:
+        if b.get("type") == "Workshop" and b.get("subtype") == "Still":
+            return False
+    return True
+
+
 def _request_id() -> str:
     return uuid.uuid4().hex[:12]
 
@@ -1095,6 +1111,32 @@ def create_server(
                      and getattr(daemon, "store", None) is not None
                      else _default_store())
             detector = poller.detector if poller is not None else None
+            # Free workshop sites for the suggestion: the model
+            # stalls without a concrete build coordinate (M1 run
+            # #6, "the observation gives no free ground
+            # coordinates"). The snapshot never triggers a scan, so
+            # sites come from the daemon's cache (populated by the
+            # planner tick) unless the snapshot actually needs a
+            # still site and the cache is missing or stale — then a
+            # single derivation (~1 s: 2 slices + up to 8 probes)
+            # is worth it, because without a site the model cannot
+            # build the still at all. The build probe re-verifies
+            # the site at build time, so a stale cached site is
+            # handled by the fix hint, not a bad build.
+            sites = None
+            if daemon is not None:
+                sites = getattr(daemon, "_sites_cache", None)
+                cache_at = getattr(daemon, "_sites_cache_at", 0) or 0
+                if (sites is None
+                        or time.monotonic() - cache_at > 120):
+                    if _needs_still_site(state):
+                        try:
+                            with rpc_lock:
+                                sites = daemon._derive_sites(state)
+                            daemon._sites_cache = sites
+                            daemon._sites_cache_at = time.monotonic()
+                        except Exception:  # noqa: BLE001 - no sites
+                            sites = None  # is "no build", not fatal
             try:
                 # The areas cache holds the full derivation dict
                 # (areas + graph + surface_blocks + ...); the
@@ -1104,7 +1146,8 @@ def create_server(
                 snap = assembler.assemble(
                     state, store=store, detector=detector,
                     areas=(spatial_cache.get("areas") or {}).get("areas"),
-                    survey=spatial_cache.get("survey"))
+                    survey=spatial_cache.get("survey"),
+                    sites=sites)
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "SNAPSHOT_FAILED",
                        "assembler failed", {"error": str(exc)})

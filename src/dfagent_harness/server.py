@@ -20,6 +20,10 @@ Routes:
 * ``GET /v1/areas``, ``/v1/area/{id|name}``, ``/v1/path?a&b`` —
   named areas + the connectivity graph (design §3; derived once
   from a full block scan, cached, ``?refresh=1`` re-derives).
+* ``GET /v1/survey[?kind=water|magma|mineral|aquifer|plants|soil]``
+  — resource survey (design §5; one ~25 s scan, cached, stale
+  after one season; ``?refresh=1`` re-scans). Plain-words summary,
+  nearest of each kind, vertical facts, hazards, cost.
 * ``GET /v1/journal`` — daemon journal (decisions + events).
 * ``GET /v1/goals``, ``POST /v1/goals``, ``GET /v1/goals/{id}``,
   ``POST /v1/goals/{id}/done``, ``DELETE /v1/goals/{id}``.
@@ -229,6 +233,70 @@ def create_server(
                     client, x0, y0, z, x1, y1, layer=layer,
                     allow_full=allow_full))
 
+    # -- resource survey (world-model design §5) -----------------------
+    # One full scan (~25 s wall, ~16 s Lua), cached in memory; the
+    # scan is one pass for all kinds, so ?kind= only filters what is
+    # returned. Re-surveyed on demand (?refresh=1) or once a season
+    # (stale after 33,600 ticks). Never per tick. The reachability
+    # proxy needs the surface region (from get_areas) and the depth
+    # to the first cavern (the biggest cavern's top z).
+    spatial_cache["survey"] = None
+
+    def get_survey(refresh: bool = False) -> dict[str, Any]:
+        from . import observe, spatial, survey
+        from .read_safety import paused_read
+        if client is None:
+            raise ConnectionError("no DFHack client")
+        cached = spatial_cache.get("survey")
+        # Current tick (light status read) for the staleness check.
+        with rpc_lock:
+            now_tick = paused_read(
+                client,
+                lambda: (observe.collect(
+                    client, sections=("status",)).get("status") or {}
+                ).get("year_tick"))
+        if cached is not None and not refresh:
+            derived = cached.get("derived_at_tick")
+            stale = (isinstance(now_tick, int)
+                     and isinstance(derived, int)
+                     and now_tick - derived > survey.SEASON_TICKS)
+            out = dict(cached)
+            out["stale"] = stale
+            out["cost"] = {"tokens": spatial.estimate_tokens(
+                str(cached.get("summary", []))),
+                "ms": 0, "scan_seconds": cached.get("scan_seconds"),
+                "cached": True}
+            return out
+        t0 = time.monotonic()
+
+        def _run() -> dict[str, Any]:
+            areas = get_areas()
+            surface_blocks = set(areas.get("surface_blocks") or [])
+            caverns = [a for a in areas.get("areas", [])
+                       if a["kind"] == "cavern"]
+            cavern_top = None
+            if caverns:
+                biggest = max(caverns, key=lambda a: a["blocks"])
+                cavern_top = biggest["bbox"]["z1"]
+            raw = survey.run_survey(client)
+            return survey.build_survey(
+                raw, surface_blocks=surface_blocks,
+                cavern_top_z=cavern_top,
+                tick=areas.get("derived_at_tick"))
+
+        with rpc_lock:
+            built = paused_read(client, _run)
+        built["stale"] = False
+        built["cost"] = {
+            "tokens": spatial.estimate_tokens(str(built.get("summary",
+                                                           []))),
+            "ms": int((time.monotonic() - t0) * 1000),
+            "scan_seconds": built.get("scan_seconds"),
+            "cached": False,
+        }
+        spatial_cache["survey"] = built
+        return built
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -295,6 +363,8 @@ def create_server(
                 self._area(path, query, get_areas, get_slice)
             elif path == "/v1/path":
                 self._path(query, get_areas)
+            elif path == "/v1/survey":
+                self._survey(query, get_survey)
             elif path == "/v1/cursor":
                 self._cursor()
             elif path == "/v1/events":
@@ -693,6 +763,48 @@ def create_server(
                 "path": [{"id": i, "name": by_id[i]["name"],
                           "kind": by_id[i]["kind"],
                           "bbox": by_id[i]["bbox"]} for i in ids]})
+
+        def _survey(self, query: dict[str, list[str]],
+                    survey_fn: Callable[[bool], dict[str, Any]]) -> None:
+            # ?kind= filters what is returned (the scan itself is one
+            # pass for all kinds); ?refresh=1 forces a fresh scan
+            # (~25 s). The response always carries the plain-words
+            # summary, the vertical facts, the hazards, the cost, and
+            # the staleness flag.
+            kind = (query.get("kind") or ["all"])[0].lower()
+            if kind not in ("all", "water", "magma", "mineral",
+                            "aquifer", "plants", "soil"):
+                _error(self, 400, "BAD_REQUEST",
+                       "kind must be all|water|magma|mineral|"
+                       "aquifer|plants|soil")
+                return
+            refresh = query.get("refresh", [""])[0].lower() in (
+                "1", "true")
+            try:
+                out = survey_fn(refresh)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "survey unavailable", {"error": str(exc)})
+                return
+            if kind == "all":
+                _json(self, 200, out)
+                return
+            key = {"water": "water_bodies", "magma": "magma_bodies",
+                   "mineral": "mineral_veins", "aquifer": "aquifer",
+                   "plants": "plants",
+                   "soil": "soil"}[kind]
+            _json(self, 200, {
+                "kind": kind, key: out.get(key),
+                "summary": out.get("summary"),
+                "hazards": out.get("hazards"),
+                "vertical": out.get("vertical"),
+                "stale": out.get("stale"),
+                "derived_at_tick": out.get("derived_at_tick"),
+                "cost": out.get("cost")})
 
         def _cursor(self) -> None:
             if client is None:

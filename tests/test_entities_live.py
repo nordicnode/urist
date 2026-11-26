@@ -135,19 +135,30 @@ class TestLiveEntities(unittest.TestCase):
             self.assertIn("dist_nearest_citizen", w)
             self.assertIsInstance(w["dist_nearest_citizen"], int)
             self.assertGreaterEqual(w["dist_nearest_citizen"], 0)
-        # The cavern wildlife is far from the surface citizens.
+        # Cavern wildlife is far from the surface citizens (the
+        # cavern top is z113, the surface is z167+, so the Chebyshev
+        # distance is 54+). Surface wildlife wanders among the
+        # woodcutters — an elk bird came within 10 tiles on
+        # 2026-11-26 — so no distance floor is asserted for it.
+        cavern = [w for w in u["wildlife"] if w["pos"][2] < 167]
+        self.assertTrue(cavern, "no cavern wildlife to check")
         self.assertTrue(all(
-            w["dist_nearest_citizen"] >= 10 for w in u["wildlife"]))
+            w["dist_nearest_citizen"] >= 10 for w in cavern))
 
     def test_counts_by_race(self):
         u = self._fresh_units()
         by_race = {r["race"]: r["count"]
                    for r in u["wildlife_by_race"]}
         self.assertEqual(sum(by_race.values()), u["wildlife_count"])
-        self.assertIn("CRUNDLE", by_race)
+        # No specific race is asserted: wildlife wanders on and off
+        # the map (the crundles present at the M3 commit had left by
+        # 2026-11-26 09:00 PT — the counts still reconcile, which is
+        # the invariant). Only that some wildlife is present.
+        self.assertGreater(len(by_race), 0)
         by_race = {r["race"]: r["count"]
                    for r in u["livestock_by_race"]}
         self.assertEqual(sum(by_race.values()), u["livestock_count"])
+        # Livestock are fort animals, not wanderers — dogs stay.
         self.assertIn("DOG", by_race)
 
     def test_units_kind_filter_live(self):

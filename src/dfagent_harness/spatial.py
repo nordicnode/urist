@@ -356,11 +356,18 @@ def derive_areas(state: dict[str, Any],
                   reverse=True)
     areas: list[dict[str, Any]] = []
     region_of_block: dict[int, str] = {}
+    surface_blocks: list[int] = []
     for i, (region, bbox, in_region, kind, name, purpose,
             conf) in enumerate(labelled):
         area_id = f"area_{i + 1:04d}"
         for idx in region:
             region_of_block[idx] = area_id
+        if kind == "surface":
+            # The surface region's block set drives the survey's
+            # reachability proxy (water/magma on open surface ground,
+            # mineral veins touching it). Sorted list: small enough
+            # (~600 ints) to ship in the response.
+            surface_blocks = sorted(region)
         from collections import Counter
         contents: dict[str, Any] = {}
         if in_region:
@@ -425,6 +432,7 @@ def derive_areas(state: dict[str, Any],
     return {
         "areas": areas,
         "graph": {k: sorted(v) for k, v in graph.items()},
+        "surface_blocks": surface_blocks,
         "derived_at_tick": _tick(state),
         "surface_z": surface_z,
         "region_count": len(areas),

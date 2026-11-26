@@ -272,10 +272,17 @@ class TestLiveActions(unittest.TestCase):
         self.assertGreaterEqual(
             len(remaining), 1,
             "expected the known stale FellTree job(s) to be reported")
+        # remaining_jobs is game-wide, not per-tree: earlier runs
+        # leave FellTree jobs at other trees (one at (128, 89, 175)
+        # on 2026-11-26). The invariant is that every remaining job
+        # is a FellTree job, and this tree's stale job is among them.
         self.assertTrue(
-            all(j["type"] == "FellTree" and j["pos"] == tree_pos
-                for j in remaining),
+            all(j["type"] == "FellTree" for j in remaining),
             f"unexpected remaining jobs: {remaining!r}")
+        self.assertTrue(
+            any(j["pos"] == tree_pos for j in remaining),
+            f"this tree's stale FellTree job is missing: "
+            f"{remaining!r}")
 
     def test_dig_designate_and_clear(self):
         box = (95, 95, 174, 96, 96, 174)  # 4 soil-wall tiles under the fort

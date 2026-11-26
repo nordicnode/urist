@@ -40,6 +40,17 @@ ATTENTION_WINDOW_TICKS = 1200
 BASELINE_WINDOW_TICKS = 8400
 
 
+def _briefing_for(kind: str) -> dict[str, Any] | None:
+    """The situation briefing for an attention kind (GOAL.md step 5,
+    layer 5). A wiki failure never breaks attention — the briefing
+    is None and the item stands on its own text."""
+    try:
+        from .briefings import brief_for
+        return brief_for(kind)
+    except Exception:  # noqa: BLE001 - briefing is best-effort
+        return None
+
+
 def prettify_race(race: Optional[str]) -> str:
     """Turn a DF race id into plain words.
 
@@ -291,6 +302,7 @@ def build_attention(state: dict[str, Any],
                     f"Keep dwarves away from it.",
             "unit_id": h.get("id"), "pos": pos,
             "at_baseline": False,
+            "briefing": _briefing_for("hostile"),
         })
     # Low stocks (design §6.1: "what is wrong"): low drink/food
     # are the fort's most common killers, and the suggestion maps
@@ -345,6 +357,7 @@ def build_attention(state: dict[str, Any],
             "unit_id": data.get("unit_id"), "pos": data.get("pos"),
             "at_baseline": bool(rec.get("at_baseline")),
             "tick": tick,
+            "briefing": _briefing_for("new_arrival"),
         })
     # P0-first: priority ascending, most recent first within a
     # priority. (Python's sort is stable, so equal keys keep

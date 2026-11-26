@@ -1,9 +1,42 @@
 -- stocks.lua — fortress stocks (IN_PLAY items) + full item-type table.
 -- Prints one JSON object with both "stocks" and "items" sections.
+--
+-- Trader goods are EXCLUDED: a visiting caravan's drink/food/wood
+-- sits in merchant-held barrels and wagons but belongs to the
+-- merchants, not the fort. Verified live 2026-11-26: raw counts read
+-- drink 50u / food 211u / wood 15u while the fort's true stocks were
+-- drink 0u / food 6u / wood 3u (all 50 drink and 205 food units were
+-- in barrels held by merchant units 15390/15393). An item is
+-- trader-held when its container (or itself) is held by a
+-- non-citizen unit, or sits in a Wagon building. Items inside a
+-- container report pos -30000, so position cannot tell them apart —
+-- the container/holder walk is the only reliable test. (The
+-- `category_stacks` counts below stay raw game-category counts.)
 local ok, err = pcall(function()
   local by_type = {}
   local total_stacks, total_units = 0, 0
   local mat_breakdown = {}
+  local function is_trader_held(it)
+    local cont = dfhack.items.getContainer(it)
+    local holder = nil
+    if cont ~= nil then
+      holder = dfhack.items.getHolderUnit(cont)
+    end
+    if holder == nil then
+      holder = dfhack.items.getHolderUnit(it)
+    end
+    if holder ~= nil and not dfhack.units.isCitizen(holder) then
+      return true
+    end
+    local hb = dfhack.items.getHolderBuilding(it)
+    if hb == nil and cont ~= nil then
+      hb = dfhack.items.getHolderBuilding(cont)
+    end
+    if hb ~= nil and hb:getType() == df.building_type.Wagon then
+      return true
+    end
+    return false
+  end
   local function add_mat(itype, it)
     local decoded = dfh_try(function()
       return dfhack.matinfo.decode(it:getMaterial(), it:getMaterialIndex())
@@ -18,6 +51,9 @@ local ok, err = pcall(function()
     end
   end
   for _, it in ipairs(df.global.world.items.other.IN_PLAY) do
+    if is_trader_held(it) then
+      goto continue
+    end
     local t = it:getType()
     local qty = it:getStackSize()
     local e = by_type[t]
@@ -33,6 +69,7 @@ local ok, err = pcall(function()
       or t == df.item_type.CLOTH or t == df.item_type.THREAD then
       add_mat(t, it)
     end
+    ::continue::
   end
   local function get(t)
     local e = by_type[t]

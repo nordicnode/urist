@@ -3,3 +3,6 @@ protobuf>=5
 
 # Dev-only: regenerating the protobuf stubs (scripts/generate_protos.py)
 grpcio-tools>=1.60
+
+# Dev-only: running the test suite
+pytest>=8

@@ -173,18 +173,24 @@ class TestLiveActions(unittest.TestCase):
         before_count = self._buildings()["count"]
         r = actions.act(self.client, "build_workshop", kind="carpenter",
                         pos=site, build_timeout=120.0)
-        self.assertTrue(r.ok, r.reason)
-        bid = r.detail["building_id"]
-        self.assertEqual(r.after["building_count"], before_count + 1)
-        self.assertEqual(r.after["building"]["id"], bid)
-        # Construction really finished: no ConstructBuilding job remains.
-        self.assertFalse(
-            [j for j in self._jobs()["list"]
-             if j["type"] == "ConstructBuilding"],
-            "a ConstructBuilding job is still queued after completion")
-        # Cleanup: deconstruct the workshop again, verify it is gone.
-        self._deconstruct_building(bid)
-        self.assertEqual(self._buildings()["count"], before_count)
+        # Cleanup runs even when the build assertion fails: a placed
+        # workshop left standing would trap a log inside it (and the
+        # next run would find no accessible wood and no wagon).
+        try:
+            self.assertTrue(r.ok, r.reason)
+            bid = r.detail["building_id"]
+            self.assertEqual(r.after["building_count"], before_count + 1)
+            self.assertEqual(r.after["building"]["id"], bid)
+            # Construction really finished: no ConstructBuilding job remains.
+            self.assertFalse(
+                [j for j in self._jobs()["list"]
+                 if j["type"] == "ConstructBuilding"],
+                "a ConstructBuilding job is still queued after completion")
+        finally:
+            if r.ok:
+                # Cleanup: deconstruct the workshop again, verify it is gone.
+                self._deconstruct_building(r.detail["building_id"])
+                self.assertEqual(self._buildings()["count"], before_count)
 
     def test_chop_marks_tree_spawns_job_and_unmarks(self):
         # Tree at 110,98,32 (des tile the same). The unmark succeeds on
@@ -196,6 +202,13 @@ class TestLiveActions(unittest.TestCase):
         # docs/ACTIONS.md. The tree itself must still stand, and the
         # test tolerates a stale FellTree job left by an earlier run.
         box = (108, 96, 32, 112, 100, 32)  # just the tree at 110,98,32
+        # Clear any stale mark first: the reload save can hold a mark
+        # from an interrupted earlier run, and the test asserts a
+        # clean before-state.
+        clear = actions.act(self.client, "designate_chop", box=box,
+                            mark=False)
+        self.assertTrue(clear.ok, clear.reason)
+        self.assertEqual(clear.after, {"total": 1, "marked": 0})
         # The game's designation sweep is slow and variable (a FellTree
         # job took >30s to appear once), so the spawn wait is generous.
         r = actions.act(self.client, "designate_chop", box=box,
@@ -259,9 +272,13 @@ class TestLiveActions(unittest.TestCase):
         for x, y, z in [(92, 79, 42), (70, 87, 42), (85, 44, 42),
                         (51, 90, 42), (73, 95, 42), (59, 100, 42)]:
             b = (x, y, z, x, y, z)
+            # Clear any stale mark first (the reload save can hold one
+            # from an interrupted earlier run).
+            actions.act(self.client, "designate_gather", box=b,
+                        mark=False)
             probe = actions.act(self.client, "designate_gather", box=b,
                                 job_timeout=90.0)
-            if probe.ok:
+            if probe.ok and probe.before == {"total": 1, "marked": 0}:
                 box = b
                 r = probe
                 break

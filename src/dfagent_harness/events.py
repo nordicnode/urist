@@ -845,17 +845,44 @@ def drain_watch_log(path: Path | str,
 
 class WatcherDrainer:
     """Stateful drainer over the watcher JSONL file: remembers the byte
-    offset so no record is delivered twice."""
+    offset so no record is delivered twice.
 
-    def __init__(self, path: Path | str = DEFAULT_WATCH_LOG) -> None:
+    With ``offset_path`` given, the offset is persisted to that file
+    after every drain and restored on construction — a daemon restart
+    resumes where it left off instead of replaying the whole log
+    (phase-3 known limitation, fixed in phase 4). The file holds one
+    JSON object: ``{"offset": <int>}``. A missing/corrupt file starts
+    at 0.
+    """
+
+    def __init__(self, path: Path | str = DEFAULT_WATCH_LOG,
+                 offset_path: Optional[Path | str] = None) -> None:
         self.path = Path(path)
+        self.offset_path = (Path(offset_path) if offset_path else None)
         self.offset = 0
+        if self.offset_path is not None:
+            try:
+                saved = json.loads(self.offset_path.read_text())
+                self.offset = int(saved.get("offset", 0))
+            except (OSError, ValueError, TypeError):
+                self.offset = 0
+
+    def _save_offset(self) -> None:
+        if self.offset_path is None:
+            return
+        try:
+            self.offset_path.parent.mkdir(parents=True, exist_ok=True)
+            self.offset_path.write_text(
+                json.dumps({"offset": self.offset}))
+        except OSError:
+            pass
 
     def drain(self, resolve_unit: Optional[
             Callable[[int], Optional[dict[str, Any]]]] = None
             ) -> list[dict[str, Any]]:
         events, self.offset = drain_watch_log(
             self.path, self.offset, resolve_unit)
+        self._save_offset()
         return events
 
 
@@ -960,13 +987,15 @@ class EventPoller:
                  drainer: Optional[WatcherDrainer] = None,
                  fast_interval: float = 2.0,
                  paused_interval: float = 10.0,
-                 slow_interval: float = 30.0) -> None:
+                 slow_interval: float = 30.0,
+                 lock: Optional[threading.RLock] = None) -> None:
         self.client = client
         self.bus = bus
         self.drainer = drainer
         self.fast_interval = fast_interval
         self.paused_interval = paused_interval
         self.slow_interval = slow_interval
+        self.lock = lock or threading.RLock()
         self.detector = DiffDetector()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -988,9 +1017,16 @@ class EventPoller:
         sections (plus slow ones when due), diff, publish. Returns the
         events published this cycle. Raises nothing — an RPC failure
         emits ``daemon_error`` (rate-limited to one per minute) and
-        returns whatever the watcher drain produced."""
+        returns whatever the watcher drain produced. The whole cycle
+        holds the poller's lock, so the daemon's single RPC connection
+        is never shared with a concurrent HTTP handler call.
+        """
         from . import observe  # deferred: avoid a cycle at import time
 
+        with self.lock:
+            return self._poll_once_locked(observe)
+
+    def _poll_once_locked(self, observe) -> list[dict[str, Any]]:
         published: list[dict[str, Any]] = []
         # Deaths resolve against the PREVIOUS snapshot (the unit was
         # alive then; it is gone from the game now).

@@ -72,6 +72,10 @@ __all__ = [
     "ACTIONS",
     "DIG_MODES",
     "WORKSHOP_CATALOG",
+    "JOB_SPECS",
+    "FURNITURE_ITEMS",
+    "NOBLE_POSITIONS",
+    "NOBLES_SCREEN_ORDER",
     "act",
     "designate_dig",
     "designate_chop",
@@ -80,6 +84,11 @@ __all__ = [
     "manager_order_remove",
     "build_workshop",
     "labor_toggle",
+    "queue_job",
+    "build_farm_plot",
+    "build_furniture",
+    "deconstruct_building",
+    "nobles",
     "get_paused",
     "set_paused",
 ]
@@ -99,16 +108,85 @@ DIG_MODES: dict[str, str] = {
 
 #: Workshop kind -> building definition. ``material`` is the df.item_type
 #: whose accessible stock the precondition checks (see probe_material).
+#: NOTE (phase 4, verified live 2026-11-26): the still accepts WOOD —
+#: still #10 was built from a log with no stone in stock. The catalog
+#: keeps the stone option too; the check passes when ANY listed
+#: material is accessible.
 WORKSHOP_CATALOG: dict[str, dict[str, Any]] = {
     "carpenter": {"type": "Workshop", "subtype": "Carpenters",
-                  "width": 3, "height": 3, "material": "WOOD"},
+                  "width": 3, "height": 3, "material": "WOOD",
+                  "materials": ["WOOD"]},
     "mason": {"type": "Workshop", "subtype": "Masons",
-              "width": 3, "height": 3, "material": "BOULDER"},
+              "width": 3, "height": 3, "material": "BOULDER",
+              "materials": ["BOULDER"]},
     "still": {"type": "Workshop", "subtype": "Still",
-              "width": 3, "height": 3, "material": "BOULDER"},
+              "width": 3, "height": 3, "material": "BOULDER",
+              "materials": ["BOULDER", "WOOD"]},
     "kitchen": {"type": "Workshop", "subtype": "Kitchen",
-                "width": 3, "height": 3, "material": "BOULDER"},
+                "width": 3, "height": 3, "material": "BOULDER",
+                "materials": ["BOULDER"]},
 }
+
+#: Queueable workshop jobs (phase 4). Workshop item jobs are REACTIONS
+#: in 0.47.05 (see the reaction catalog probed live 2026-11-26:
+#: df.reaction.find(44) == BREW_DRINK_FROM_PLANT; MAKE WOODEN BED == 2).
+#: ``job_type`` 211 is CustomReaction; ``reaction_name`` selects the
+#: reaction. Plain jobs (PrepareMeal, MakeBarrel) need no reaction.
+#: ``skill`` is the labor-relevant skill (informational).
+JOB_SPECS: dict[str, dict[str, Any]] = {
+    # Still (needs a brewable plant + an empty barrel per job).
+    "brew": {"job_type": 211, "reaction_name": "BREW_DRINK_FROM_PLANT",
+             "skill": "BREWING"},
+    "brew_fruit": {"job_type": 211,
+                   "reaction_name": "BREW_DRINK_FROM_PLANT_GROWTH",
+                   "skill": "BREWING"},
+    # Kitchen.
+    "cook": {"job_type": 115, "reaction_name": None, "skill": "COOK"},
+    # Carpenter (one log per job).
+    "make_bed": {"job_type": 211, "reaction_name": "MAKE WOODEN BED",
+                 "skill": "CARPENTRY"},
+    "make_table": {"job_type": 211, "reaction_name": "MAKE WOODEN TABLE",
+                   "skill": "CARPENTRY"},
+    "make_chair": {"job_type": 211, "reaction_name": "MAKE WOODEN CHAIR",
+                   "skill": "CARPENTRY"},
+    "make_door": {"job_type": 211, "reaction_name": "MAKE WOODEN DOOR",
+                  "skill": "CARPENTRY"},
+    "make_barrel": {"job_type": 211, "reaction_name": "MAKE WOODEN BARREL",
+                    "skill": "CARPENTRY"},
+    "make_bucket": {"job_type": 211, "reaction_name": "MAKE WOODEN BUCKET",
+                    "skill": "CARPENTRY"},
+    "make_bin": {"job_type": 211, "reaction_name": "MAKE WOODEN BIN",
+                 "skill": "CARPENTRY"},
+    "make_chest": {"job_type": 211, "reaction_name": "MAKE WOODEN CHEST",
+                   "skill": "CARPENTRY"},
+    "make_cabinet": {"job_type": 211,
+                     "reaction_name": "MAKE WOODEN CABINET",
+                     "skill": "CARPENTRY"},
+}
+
+#: Furniture kind -> item type that must exist in stock to place it
+#: (the Construct<kind> job consumes the item).
+FURNITURE_ITEMS: dict[str, str] = {
+    "Bed": "BED", "Table": "TABLE", "Chair": "CHAIR", "Door": "DOOR",
+    "Coffin": "COFFIN", "Chest": "CHEST", "Cabinet": "CABINET",
+    "ArmorStand": "ARMORSTAND", "WeaponRack": "WEAPONRACK",
+    "Statue": "STATUE", "Floodgate": "FLOODGATE", "Hatch": "HATCH",
+    "Grate": "GRATE",
+}
+
+#: Noble responsibility -> raw position id (probed live 2026-11-26
+#: from entity_raw.positions; used only for display — appointment
+#: itself is UI-only, see ui.py).
+NOBLE_POSITIONS: dict[str, int] = {
+    "manager": 10, "broker": 12, "bookkeeper": 13,
+}
+
+#: Order of positions on the nobles screen (n key), top to bottom —
+#: verified live 2026-11-26 (screenshot). Used by ui.appoint_noble.
+NOBLES_SCREEN_ORDER: list[str] = [
+    "expedition_leader", "militia_commander", "sheriff", "hammerer",
+    "manager", "chief_medical_dwarf", "broker", "bookkeeper",
+]
 
 #: Job types the game spawns from a plant designation.
 _PLANT_JOBS = {"tree": "FellTree", "shrub": "GatherPlants"}
@@ -258,8 +336,21 @@ def set_paused(client: DFHackClient, paused: bool) -> bool:
     """Set the pause flag via RFR SetPauseState; verify by re-reading.
 
     Returns the verified state. Raises _Fail('verification') when the
-    flag does not stick.
+    flag does not stick. Known flake (ACTIONS.md): after a world
+    reload, SetPauseState(False) sometimes fails to stick twice in a
+    row; a Space keypress restores it. So on a failed set we send one
+    Space keypress via PassKeyboardEvent and retry once — that is the
+    observed recovery, not a blind retry loop.
     """
+    try:
+        client.call("SetPauseState", rfr.SingleBool(Value=paused),
+                    core.EmptyMessage)
+        actual = get_paused(client)
+        if actual == paused:
+            return actual
+    except Exception:
+        pass
+    _send_space_key(client)
     client.call("SetPauseState", rfr.SingleBool(Value=paused),
                 core.EmptyMessage)
     actual = get_paused(client)
@@ -267,6 +358,20 @@ def set_paused(client: DFHackClient, paused: bool) -> bool:
         raise _Fail("verification",
                     f"pause flag did not stick: wanted {paused}, got {actual}")
     return actual
+
+
+def _send_space_key(client: DFHackClient) -> None:
+    """Send one Space keypress (down + up) via RFR PassKeyboardEvent.
+
+    Space is the game's pause toggle; used only as the recovery for
+    a SetPauseState that did not stick after a reload.
+    """
+    for ev_type, state in ((2, 1), (3, 0)):
+        client.call("PassKeyboardEvent",
+                    rfr.KeyboardEvent(type=ev_type, sym=32, state=state,
+                                      unicode=32, scancode=0, mod=0),
+                    core.EmptyMessage)
+        time.sleep(0.05)
 
 
 @contextmanager
@@ -764,16 +869,21 @@ def build_workshop(client: DFHackClient, kind: str,
     if not site.get("free", False):
         raise _Fail("precondition",
                     "site not free: " + "; ".join(site.get("problems") or []))
-    mat = _run_helper(client, "probe_material.lua",
-                      {"item_type": spec["material"]}, timeout=timeout)
-    if not mat.get("ok", False):
-        raise _Fail("transport",
-                    f"material read-back failed: {mat.get('error')}")
-    if mat.get("accessible", 0) < 1:
+    mat = None
+    for mat_type in spec.get("materials") or [spec["material"]]:
+        probe = _run_helper(client, "probe_material.lua",
+                            {"item_type": mat_type}, timeout=timeout)
+        if not probe.get("ok", False):
+            raise _Fail("transport",
+                        f"material read-back failed: {probe.get('error')}")
+        if probe.get("accessible", 0) >= 1:
+            mat = probe
+            break
+    if mat is None:
         raise _Fail(
             "precondition",
-            f"no accessible {spec['material']} for a {kind} workshop "
-            f"({mat.get('total', 0)} in stock, all inside buildings — "
+            f"no accessible material for a {kind} workshop (tried "
+            f"{', '.join(spec.get('materials') or [spec['material']])} — "
             f"deconstruct the wagon or chop a tree first)")
     before = _read_section(client, "buildings", timeout=timeout)
     out = _helper_or_fail(client, "act_build.lua",
@@ -907,6 +1017,310 @@ def _find_citizen(units_section: dict[str, Any],
     return None
 
 
+def _wait_construction(client: DFHackClient, building_id: int,
+                       build_timeout: float,
+                       timeout: float = 30.0) -> dict[str, Any] | None:
+    """Wait (unpaused) for a building's ConstructBuilding job to clear.
+
+    Returns ``{"building": <buildings entry>}`` when the building stands
+    with no construction job left, ``{"cancelled": True}`` when the
+    building vanished (game cancelled it), or None on timeout.
+    """
+    def _done() -> Any:
+        cur = _read_section(client, "buildings", timeout=timeout)
+        b = next((x for x in cur.get("list") or []
+                  if x.get("id") == building_id), None)
+        if b is None:
+            return {"cancelled": True}
+        jobs = _read_section(client, "jobs", timeout=timeout)
+        mine = [j for j in jobs.get("list") or []
+                if j.get("type") == "ConstructBuilding"
+                and j.get("pos") == b.get("center")]
+        if not mine:
+            return {"building": b}
+        return None
+
+    with _unpaused_for_ticks(client):
+        return _wait_for(_done, build_timeout, interval=2.0)
+
+
+def _cancel_reason(client: DFHackClient, timeout: float = 30.0) -> str:
+    """Newest matching cancellation announcement, if any."""
+    try:
+        reps = _read_section(client, "reports", timeout=timeout)
+        texts = [a.get("text", "")
+                 for a in reps.get("announcements") or []]
+        cancel = next((t for t in reversed(texts)
+                       if "cancels" in t or "unable to complete" in t),
+                      None)
+        return f": {cancel!r}" if cancel else ""
+    except _Fail:
+        return ""
+
+
+def queue_job(client: DFHackClient, building_id: int, job: str,
+              count: int = 1, timeout: float = 30.0) -> ActionResult:
+    """Queue ``count`` copies of a workshop job on a building.
+
+    ``job`` is a :data:`JOB_SPECS` name (``brew``, ``cook``,
+    ``make_bed``, ...). Verification: the returned job ids appear in
+    the world jobs list. The job being *worked* is not part of this
+    action — the planner watches job_completed events for that.
+    """
+    started = time.monotonic()
+    spec = JOB_SPECS.get(job)
+    if spec is None:
+        raise _Fail("precondition",
+                    f"unknown job {job!r} (choose from "
+                    f"{', '.join(sorted(JOB_SPECS))})")
+    if count < 1:
+        raise _Fail("precondition", f"count must be >= 1, got {count}")
+    before = _read_section(client, "buildings", timeout=timeout)
+    target = next((b for b in before.get("list") or []
+                   if b.get("id") == building_id), None)
+    if target is None:
+        raise _Fail("precondition", f"no building #{building_id}")
+    out = _helper_or_fail(client, "act_job.lua",
+                          {"building_id": building_id,
+                           "job_type": spec["job_type"],
+                           "reaction_name": spec["reaction_name"],
+                           "count": count},
+                          timeout=timeout)
+    after = _read_section(client, "jobs", timeout=timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    listed = {j.get("id") for j in after.get("list") or []}
+    missing = [jid for jid in out.get("job_ids") or []
+               if jid not in listed]
+    base = {"building_id": building_id, "job": job, "count": count,
+            "job_ids": out.get("job_ids"),
+            "reaction_name": spec["reaction_name"]}
+    if missing:
+        return ActionResult(
+            ok=False, action="queue_job",
+            before={"job_count": before.get("count")},
+            after={"job_count": after.get("count")},
+            reason=(f"queued {job} x{count} on building #{building_id} "
+                    f"but job ids {missing} not found in the world job "
+                    f"list on re-read"),
+            error_kind="verification", took_ms=took_ms, detail=base)
+    return ActionResult(
+        ok=True, action="queue_job",
+        before={"job_count": before.get("count")},
+        after={"job_count": after.get("count")},
+        reason=(f"queued {job} x{count} on building #{building_id} "
+                f"(jobs {out.get('job_ids')})"),
+        took_ms=took_ms, detail=base)
+
+
+def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
+                    width: int = 3, height: int = 3,
+                    build_timeout: float = DEFAULT_BUILD_TIMEOUT,
+                    timeout: float = 30.0) -> ActionResult:
+    """Place a farm plot and wait for its construction to finish.
+
+    Verification: the plot appears in the buildings list, then its
+    ConstructBuilding job clears while it remains. A plot on unsuitable
+    ground (no soil) is cancelled by the game — reported as a
+    verification failure with the cancellation text.
+    """
+    started = time.monotonic()
+    if width < 1 or height < 1:
+        raise _Fail("precondition",
+                    f"bad farm size {width}x{height} (want >= 1)")
+    site = _run_helper(client, "probe_site.lua",
+                       {"x": x, "y": y, "z": z,
+                        "width": width, "height": height},
+                       timeout=timeout)
+    if not site.get("ok", False):
+        raise _Fail("transport",
+                    f"site read-back failed: {site.get('error')}")
+    if not site.get("free", False):
+        raise _Fail("precondition",
+                    "site not free: " + "; ".join(site.get("problems") or []))
+    before = _read_section(client, "buildings", timeout=timeout)
+    out = _helper_or_fail(client, "act_farm.lua",
+                          {"x": x, "y": y, "z": z,
+                           "width": width, "height": height},
+                          timeout=timeout)
+    building_id = out["id"]
+    after_place = _read_section(client, "buildings", timeout=timeout)
+    placed = next((b for b in after_place.get("list") or []
+                   if b.get("id") == building_id), None)
+    if placed is None:
+        raise _Fail("verification",
+                    f"farm plot #{building_id} placed but not found in "
+                    f"buildings on re-read")
+    done = _wait_construction(client, building_id, build_timeout,
+                              timeout=timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    base = {"pos": [x, y, z], "size": [width, height],
+            "building_id": building_id}
+    if done is None:
+        return ActionResult(
+            ok=False, action="build_farm_plot",
+            before={"building_count": before.get("count")},
+            after={"building_count": after_place.get("count"),
+                   "building": placed},
+            reason=(f"farm plot #{building_id} placed but construction "
+                    f"did not finish within {build_timeout}s"),
+            error_kind="timeout", took_ms=took_ms, detail=base)
+    if done.get("cancelled"):
+        return ActionResult(
+            ok=False, action="build_farm_plot",
+            before={"building_count": before.get("count")},
+            after={"building_count": after_place.get("count")},
+            reason=(f"farm plot #{building_id} placed but the game "
+                    f"cancelled its construction"
+                    f"{_cancel_reason(client, timeout=timeout)}"),
+            error_kind="verification", took_ms=took_ms, detail=base)
+    return ActionResult(
+        ok=True, action="build_farm_plot",
+        before={"building_count": before.get("count")},
+        after={"building_count": after_place.get("count"),
+               "building": done["building"]},
+        reason=(f"farm plot #{building_id} built at "
+                f"{done['building'].get('center')} ({width}x{height})"),
+        took_ms=took_ms, detail=base)
+
+
+def build_furniture(client: DFHackClient, kind: str,
+                    pos: tuple[int, int, int],
+                    build_timeout: float = DEFAULT_BUILD_TIMEOUT,
+                    timeout: float = 30.0) -> ActionResult:
+    """Place one furniture building (bed, table, chair, ...) and wait
+    for its construction to finish.
+
+    Precondition: a matching item exists in stock (the Construct job
+    consumes it — e.g. a bed item from the carpenter). Verification:
+    the building appears in the buildings list, then its construction
+    job clears while it remains.
+    """
+    started = time.monotonic()
+    item_type = FURNITURE_ITEMS.get(kind)
+    if item_type is None:
+        raise _Fail("precondition",
+                    f"unknown furniture kind {kind!r} (choose from "
+                    f"{', '.join(sorted(FURNITURE_ITEMS))})")
+    if len(pos) != 3 or not all(isinstance(v, int) for v in pos):
+        raise _Fail("precondition", f"bad pos: {pos!r} (want 3 ints)")
+    site = _run_helper(client, "probe_site.lua",
+                       {"x": pos[0], "y": pos[1], "z": pos[2],
+                        "width": 1, "height": 1},
+                       timeout=timeout)
+    if not site.get("ok", False):
+        raise _Fail("transport",
+                    f"site read-back failed: {site.get('error')}")
+    if not site.get("free", False):
+        raise _Fail("precondition",
+                    "site not free: " + "; ".join(site.get("problems") or []))
+    items = _read_section(client, "items", timeout=timeout)
+    have = next((e.get("units", 0)
+                 for e in items.get("by_type") or []
+                 if e.get("type") == item_type), 0)
+    if have < 1:
+        raise _Fail("precondition",
+                    f"no {item_type} item in stock to place a {kind} "
+                    f"(make one at the carpenter first)")
+    before = _read_section(client, "buildings", timeout=timeout)
+    out = _helper_or_fail(client, "act_furniture.lua",
+                          {"kind": kind, "x": pos[0], "y": pos[1],
+                           "z": pos[2]},
+                          timeout=timeout)
+    building_id = out["id"]
+    after_place = _read_section(client, "buildings", timeout=timeout)
+    placed = next((b for b in after_place.get("list") or []
+                   if b.get("id") == building_id), None)
+    if placed is None:
+        raise _Fail("verification",
+                    f"{kind} #{building_id} placed but not found in "
+                    f"buildings on re-read")
+    done = _wait_construction(client, building_id, build_timeout,
+                              timeout=timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    base = {"kind": kind, "pos": list(pos), "building_id": building_id}
+    if done is None:
+        return ActionResult(
+            ok=False, action="build_furniture",
+            before={"building_count": before.get("count")},
+            after={"building_count": after_place.get("count"),
+                   "building": placed},
+            reason=(f"{kind} #{building_id} placed but construction did "
+                    f"not finish within {build_timeout}s"),
+            error_kind="timeout", took_ms=took_ms, detail=base)
+    if done.get("cancelled"):
+        return ActionResult(
+            ok=False, action="build_furniture",
+            before={"building_count": before.get("count")},
+            after={"building_count": after_place.get("count")},
+            reason=(f"{kind} #{building_id} placed but the game "
+                    f"cancelled its construction"
+                    f"{_cancel_reason(client, timeout=timeout)}"),
+            error_kind="verification", took_ms=took_ms, detail=base)
+    return ActionResult(
+        ok=True, action="build_furniture",
+        before={"building_count": before.get("count")},
+        after={"building_count": after_place.get("count"),
+               "building": done["building"]},
+        reason=(f"{kind} #{building_id} built at "
+                f"{done['building'].get('center')}"),
+        took_ms=took_ms, detail=base)
+
+
+def deconstruct_building(client: DFHackClient, building_id: int,
+                         timeout: float = 30.0,
+                         wait_timeout: float = 60.0) -> ActionResult:
+    """Mark a building for deconstruction and wait until it is gone.
+
+    Verification: the building disappears from the buildings list.
+    The footprint's stale occupancy flag is cleared by the helper, so
+    the site is reusable immediately (phase-2 finding).
+    """
+    started = time.monotonic()
+    before = _read_section(client, "buildings", timeout=timeout)
+    target = next((b for b in before.get("list") or []
+                   if b.get("id") == building_id), None)
+    if target is None:
+        raise _Fail("precondition", f"no building #{building_id}")
+    _helper_or_fail(client, "act_deconstruct.lua",
+                    {"building_id": building_id}, timeout=timeout)
+
+    def _gone() -> bool:
+        cur = _read_section(client, "buildings", timeout=timeout)
+        return not any(b.get("id") == building_id
+                       for b in cur.get("list") or [])
+
+    with _unpaused_for_ticks(client):
+        gone = _wait_for(_gone, wait_timeout, interval=0.5)
+    took_ms = round((time.monotonic() - started) * 1000)
+    after = _read_section(client, "buildings", timeout=timeout)
+    if not gone:
+        return ActionResult(
+            ok=False, action="deconstruct_building",
+            before={"building_count": before.get("count")},
+            after={"building_count": after.get("count")},
+            reason=(f"building #{building_id} marked for deconstruction "
+                    f"but still present after {wait_timeout}s"),
+            error_kind="timeout", took_ms=took_ms,
+            detail={"building_id": building_id,
+                    "type": target.get("type")})
+    return ActionResult(
+        ok=True, action="deconstruct_building",
+        before={"building_count": before.get("count")},
+        after={"building_count": after.get("count")},
+        reason=(f"building #{building_id} ({target.get('type')}) "
+                f"deconstructed"),
+        took_ms=took_ms,
+        detail={"building_id": building_id, "type": target.get("type")})
+
+
+def nobles(client: DFHackClient,
+           timeout: float = 30.0) -> dict[str, Any]:
+    """Read noble appointments (read-only probe). Returns the raw
+    probe result: ``{"ok": true, "nobles": {responsibility: [...]}}``.
+    """
+    return _run_helper(client, "probe_nobles.lua", {}, timeout=timeout)
+
+
 # -- entry point ------------------------------------------------------------
 
 ACTIONS: dict[str, Callable[..., ActionResult]] = {
@@ -917,6 +1331,10 @@ ACTIONS: dict[str, Callable[..., ActionResult]] = {
     "manager_order_remove": manager_order_remove,
     "build_workshop": build_workshop,
     "labor_toggle": labor_toggle,
+    "queue_job": queue_job,
+    "build_farm_plot": build_farm_plot,
+    "build_furniture": build_furniture,
+    "deconstruct_building": deconstruct_building,
 }
 
 

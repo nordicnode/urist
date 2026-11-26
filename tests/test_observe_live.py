@@ -82,7 +82,11 @@ class TestLiveObserve(unittest.TestCase):
 
     def test_stocks_are_plausible(self):
         stocks = self.state["stocks"]
-        self.assertGreater(stocks["drink_units"], 0)
+        # Drink may legitimately be 0 — the fort drank its last units
+        # during the unpaused build windows, and that is exactly the
+        # condition the phase-4 planner must fix. The observation
+        # layer's job is to report the true number, not a healthy one.
+        self.assertGreaterEqual(stocks["drink_units"], 0)
         self.assertGreater(stocks["food_units"], 0)
         self.assertGreater(stocks["barrels"], 0)
         self.assertGreaterEqual(stocks["wood_units"], 0)

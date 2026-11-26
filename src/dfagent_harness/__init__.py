@@ -17,7 +17,14 @@ ordered, deduplicated, replayable stream on :class:`EventBus`, served
 over SSE by :mod:`dfagent_harness.server`.
 """
 
-from .actions import ACTIONS, ActionResult, act
+from .actions import (
+    ACTIONS,
+    ActionResult,
+    JOB_SPECS,
+    act,
+    nobles,
+)
+from .daemon import Daemon, DaemonConfig
 from .events import (
     DiffDetector,
     EventBus,
@@ -30,9 +37,13 @@ from .events import (
     watcher_status,
 )
 from .observe import SECTIONS, collect, measure_fps, render_text
+from .planner import Journal, Planner, decide, state_summary
+from .ui import appoint_noble, create_stockpile
 
-__all__ = ["ACTIONS", "ActionResult", "act",
+__all__ = ["ACTIONS", "ActionResult", "JOB_SPECS", "act", "nobles",
            "SECTIONS", "collect", "measure_fps", "render_text",
            "DiffDetector", "EventBus", "EventPoller", "WatcherDrainer",
            "collect_mandates", "install_watcher", "make_event",
-           "uninstall_watcher", "watcher_status"]
+           "uninstall_watcher", "watcher_status",
+           "Daemon", "DaemonConfig", "Journal", "Planner", "decide",
+           "state_summary", "appoint_noble", "create_stockpile"]

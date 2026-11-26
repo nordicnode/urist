@@ -1,0 +1,284 @@
+# DF Agent Harness — Observation Layer (Phase 1)
+
+Read-only state dump of a live Dwarf Fortress 0.47.05 + DFHack 0.47.05-r8
+fort, as structured JSON and as a compact text rendering. Verified live
+on the fort **Athelunol** ("Ringedsouls", world "Mitom Kodor", save
+`region1`): 7 starting dwarves, Spring 306.
+
+## Running it
+
+```sh
+# Full dump (all fast sections), JSON on stdout:
+.venv/bin/python scripts/dfh-observe.py
+
+# Compact text (what an LLM agent reads first):
+.venv/bin/python scripts/dfh-observe.py --format text
+
+# One section only:
+.venv/bin/python scripts/dfh-observe.py --section units
+.venv/bin/python scripts/dfh-observe.py --section stocks,items --format text
+
+# Include the slow designation scan (~4 s), and measure FPS (1 s sample,
+# only while unpaused):
+.venv/bin/python scripts/dfh-observe.py --section all,designations --fps
+
+# Write to a file instead of stdout:
+.venv/bin/python scripts/dfh-observe.py --format json --output /tmp/state.json
+```
+
+Exit 0 on success (even if individual sections fail — see `errors`).
+Exit 1 with a JSON error on stderr when the game is not reachable.
+Exit 2 for bad flags (e.g. unknown `--section`).
+
+The game does not need to be paused; the dump reads live state. It is
+safe to run while unpaused, but a snapshot taken while running may span
+a tick boundary (dates/ticks can differ between sections by a tick).
+
+## How it works
+
+```
+scripts/dfh-observe.py
+  -> dfagent_harness.observe.collect(client, sections)
+    -> one Lua helper per section, via DFHackClient.run_lua_json()
+       (RunCommand("lua", <prelude + helper>); helper prints one JSON object)
+    -> sections assembled into one state document (dict)
+  -> render_text(state) for --format text
+```
+
+- **Transport:** the existing `dfhack_rpc` client (no duplication).
+  One TCP connection, calls serialized.
+- **Lua helpers:** `src/dfagent_harness/lua/*.lua`. Each prints exactly
+  one JSON object. A shared prelude (`lua/json.lua`, a minimal JSON
+  encoder — DFHack's Lua has no `json` module) is prepended by the
+  Python side before execution. Helpers never write files, never call
+  mutating APIs, and wrap their body in `pcall`: on any Lua error they
+  print `{"ok": false, "error": "..."}` and the Python side records it
+  under `errors` instead of failing the whole dump.
+- **Dev helper:** `scripts/lua_probe.py <file.lua>` runs an arbitrary Lua
+  file against the live game and prints its output (used while probing
+  the API; not part of the shipped CLI).
+
+## Schema (state document, `schema_version: 1`)
+
+Top level: `meta`, `errors`, plus one key per collected section.
+`errors` is a list of `{"section", "error"}` for helpers that failed;
+missing sections are reported there, never silently dropped.
+
+### `meta`
+
+| Field | Meaning |
+|---|---|
+| `schema_version` | 1 |
+| `collected_at` | Unix epoch seconds (wall clock) when collection started |
+| `took_ms` | Wall time for the whole collection |
+| `version` | RFR `GetVersionInfo`: `dwarf_fortress_version`, `dfhack_version`, `remote_fortress_reader_version` (or `{"error": ...}` if the call failed) |
+| `fps` / `fps_measured` | Ticks/second over a 1 s sample, only with `--fps` and only while unpaused; `null`/`false` otherwise (ticks do not advance while paused) |
+
+### `status`
+
+| Field | Meaning |
+|---|---|
+| `year`, `year_tick` | In-game year and tick within the year (403200 ticks/year) |
+| `season`, `season_index`, `season_tick` | Season name (Spring/Summer/Autumn/Winter), 0-3, tick within the season |
+| `month`, `day`, `date` | Derived from `year_tick` (28-day months, 1200 ticks/day): `date` is `"306-01-16"` style. Verified against the UI date display. |
+| `paused` | `df.global.pause_state` |
+| `gametype` | e.g. `DWARF_MAIN` (fortress mode) |
+| `focus` | `dfhack.gui.getCurFocus()`, e.g. `dwarfmode/Default` |
+| `fort_name` | Fort site name (the unique type-0 site in `world_data`), e.g. `Athelunol` |
+| `save_dir` | Save folder, e.g. `region1` |
+| `population` | `{citizens, jobless, animals, total_active_units, threats}`. `jobless` = citizens with no `current_job`. `threats` = active units that are `isOpposedToLife` or have `flags1.active_invader`. `animals` = active units where `isAnimal` (includes pets, livestock, and wild animals on the map). |
+
+### `units`
+
+| Field | Meaning |
+|---|---|
+| `citizens` | One object per citizen (see below), in `world.units.active` order |
+| `citizen_count`, `hostiles`, `hostile_count` | Hostiles are active units matching the same threat test as `population.threats`, with `{id, name, race, pos}` |
+
+Per citizen:
+
+| Field | Meaning |
+|---|---|
+| `id`, `name`, `race`, `profession`, `profession_id` | `name` is the translated visible name; CP437 bytes are decoded to Unicode (ä, ò, â, ë — verified on real names) |
+| `sex` | 0 = female, 1 = male (DF convention) |
+| `age` | Years (float, from `dfhack.units.getAge`) |
+| `pos` | `[x, y, z]` tile coordinates |
+| `idle` | `true` when `job.current_job` is null |
+| `job` | `null`, or `{type, id, pos}` — `type` is the `df.job_type` name |
+| `mood`, `mood_name` | `-1`/`"none"` when no strange mood, else the `df.mood_type` name |
+| `stress` | `{level, category}` — raw `personality.stress_level` and `dfhack.units.getStressCategory` (0 = most stressed, 6 = least; cutoffs from `getStressCutoffs`) |
+| `counters` | `{hunger, thirst, sleepiness}` — raw `counters2` timers (ticks since last satisfied; thresholds are **not** defined in phase 1 — see Limitations) |
+| `needs` | All needs: `{need, level, focus}` — `need` is the `df.need_type` name, `level` is `need_level`, `focus` is `focus_level` (more negative = more unmet). The text renderer shows the 3 worst by `focus`. |
+| `skills` | Skills with `rating > 0`: `{skill, rating, rating_num, experience}` — `skill` is the `df.job_skill` name, `rating` the `df.skill_rating` name |
+| `labors` | Enabled labor names, sorted |
+| `wounds`, `wound_count` | `{id, parts}` per wound in `body.wounds` (count of affected body parts). A healthy dwarf has `[]`. `unit.health` does not exist as a field in this DFHack build — wounds are the health signal. |
+| `goal` | `{type, name}` — the dwarf's dream goal via `getGoalType(u, 0)` / `getGoalName(u, 0)`, e.g. `Master a Skill`; `null` when absent |
+
+### `stocks`
+
+Headline fortress stocks, counted over `world.items.other.IN_PLAY`
+(items actually in play at the fort, not world-gen leftovers).
+`units` = sum of stack sizes; `stacks` = number of item stacks.
+
+| Field | Meaning |
+|---|---|
+| `drink_stacks`, `drink_units` | Drink items |
+| `food_stacks`, `food_units` | MEAT + FISH + FISH_RAW + PLANT + CHEESE + EGG, summed |
+| `seeds_stacks`, `seeds_units` | Seeds |
+| `wood_stacks`, `wood_units` | Wood logs |
+| `stone_stacks`, `stone_units` | BOULDER + ROUGH + BLOCKS |
+| `cloth_units`, `thread_units` | Cloth / thread |
+| `metal_bar_stacks`, `metal_bar_units` | Metal bars (`BAR`) |
+| `barrels`, `bins`, `buckets` | Container counts |
+| `category_stacks` | Raw `items.other` category counts for the headline categories DF players use: `ANY_GOOD_FOOD`, `ANY_COOKABLE`, `ANY_EDIBLE_RAW`, `ANY_DRINK`, `WOOD`, `BAR`, `CLOTH`, `SEEDS`. Note `ANY_GOOD_FOOD` (50 stacks at embark) counts more than the `food_*` sum — it is DFHack's own category, not a subset of the food types above. |
+| `by_material` | `[{type, material, units}]`, sorted by units desc. `material` is the `dfhack.matinfo` token, e.g. `PLANT:GRASS_WHEAT_CAVE:DRINK`, `CREATURE:SPIDER_CAVE_GIANT:SILK`. Items whose material cannot be decoded (e.g. fish) are omitted here, not guessed. |
+
+### `items`
+
+| Field | Meaning |
+|---|---|
+| `total_stacks`, `total_units` | Totals over IN_PLAY |
+| `by_type` | `[{type, stacks, units}]` for every item type present, sorted by units desc |
+
+### `buildings`
+
+| Field | Meaning |
+|---|---|
+| `list` | One object per building: `{id, type, type_id, x1, y1, x2, y2, z, center, construction_stage, jobs, contained_items}`. `type` is the `df.building_type` name (e.g. `Wagon`). `jobs` is the count of queued jobs on the building (`null` if the field is absent); `contained_items` the count of items inside it. |
+| `count`, `summary` | Total count and `[{type, count}]` sorted by count desc |
+
+### `jobs`
+
+| Field | Meaning |
+|---|---|
+| `list` | Queued jobs from the `world.jobs` linked list: `{id, type, pos, suspend, repeat_}`. `type` is the `df.job_type` name. |
+| `count`, `counts_by_type` | Total and `[{type, count}]` |
+| `manager_orders`, `manager_order_count` | Manager orders from `world.manager_orders`. Each order is a generic scalar dump of its struct fields plus `job_type_name` where readable. **Unverified on a non-empty list** — no orders existed on the fresh fort (see Limitations). |
+
+### `reports`
+
+| Field | Meaning |
+|---|---|
+| `announcements`, `announcement_count` | Last 20 announcements (oldest→newest of the tail) + total count. Each entry is a generic scalar dump of its struct fields plus best-effort `text`, `year`, `year_tick`, `pos`. **Unverified on non-empty lists** (fresh fort: 0). |
+| `reports`, `report_count` | Same, for combat reports in `world.status.reports`. |
+
+### `map`
+
+| Field | Meaning |
+|---|---|
+| `size_tiles` | `[x_count, y_count]` in tiles, e.g. `[192, 192]` (12×12 blocks) |
+| `z_levels` | `z_count`, e.g. 58 |
+| `region_x`, `region_y` | `world.map` region coordinates (opaque; not world-tile coords) |
+| `plants_total`, `trees`, `shrubs` | Plant counts (`is_shrub` splits trees/shrubs) |
+
+### `designations` (opt-in only)
+
+Full map-block scan: counts of `dig` designations by `df.tile_dig_designation`
+name (`Default`, `Channel`, `Ramp`, `UpDownStair`, `DownStair`, `UpStair`),
+`smooth_total`, `dig_total`, and `scan_seconds`. **~4 s on a 192×192×58
+embark** — this is why it is not in the default set.
+
+## Text rendering
+
+`render_text(state)` prints sections in order: header (fort, date,
+season, tick, pause, focus, versions), population, FPS line (only when
+measured or when paused), stocks + material breakdown (top 12), items
+(top 15 types), citizens (one line each: name, profession, age, sex,
+job/pos, stress, hunger/thirst/sleepiness timers, mood, wounds, worst 3
+needs, top 4 skills; plus a labors line), hostiles if any, buildings,
+jobs (+ first 15) and manager orders, announcements/combat reports,
+map, designations (if present), then any `SECTION FAILED` lines.
+Example dumps: `tests/fixtures/observe-athelunol.txt` (and `.json`).
+
+## Tests
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v   # 48 tests
+```
+
+- `tests/test_observe.py` — offline unit tests against the recorded
+  fixture: schema shape, text rendering, section assembly (incl. the
+  shared `stocks.lua` call and the items-only no-leak case), unknown
+  section rejection, failed-section handling.
+- `tests/test_observe_live.py` — integration test against the live game;
+  **skips itself when no game answers on 127.0.0.1:5000**
+  (`DFH_TEST_LIVE=0` forces the skip). Asserts the real fort's
+  population/stocks, JSON serializability, and the designations scan.
+- `tests/test_client.py` — includes the CP437 TEXT-fragment regression
+  test (see below).
+
+## Known limitations / quirks found live
+
+1. **Live verification (phase 1).** Handshake + 8-byte framing accepted
+   by the real r8 server; `GetVersionInfo` returns DF 0.47.05 / DFHack
+   0.47.05-r8 / RFR 0.21.0; `RunCommand("lua", ...)` returns TEXT.
+   `SetPauseState` works and sticks (verified by re-reading
+   `GetPauseState`). See PROTOCOL.md §8 for the resolved open questions.
+   Note: PROTOCOL.md says DFHack r5 in places; the installed server is
+   **r8** — the wire protocol is unchanged.
+2. **CP437 in RPC TEXT fragments (client bug, fixed).** The protobuf
+   runtime returns `bytes` (not `str`) for a `string` field whose bytes
+   are not valid UTF-8. DF sends CP437 bytes (dwarf names: 0x84 = ä),
+   so `run_lua` crashed with `TypeError: sequence item 0: expected str
+   instance, bytes found` on any output containing a non-ASCII name.
+   Fixed in `dfhack_rpc/client.py` (`_collect_reply` decodes each
+   fragment with `decode_df_string`); regression test in
+   `tests/test_client.py`. The Lua JSON encoder maps CP437 bytes to
+   Unicode in the JSON itself, so observe output was never affected —
+   only raw `print()` output was.
+3. **UI "Idlers" ≠ jobless count (open).** The UI status bar shows
+   `Idlers: 2` while all 7 citizens have no `current_job` and no path,
+   and the count stays 2 after 2.5 game days of running. The UI's
+   definition of "idler" is unknown (possibly excludes dwarves in
+   non-job activities such as socializing). The layer therefore reports
+   `population.jobless` (citizens with no `current_job` — precisely
+   defined) and does **not** claim to match the UI number.
+4. **Hunger/thirst/sleepiness thresholds unknown.** `counters2` timers
+   are reported raw (ticks since last satisfied). What values mean
+   "hungry" / "thirsty" / "exhausted" is not established — do not
+   invent thresholds until phase 3 measures them on a live fort.
+5. **Manager orders, announcements, combat reports unverified on
+   non-empty data.** Both lists are empty on a fresh fort, so their
+   struct fields could not be probed live. The helpers dump every
+   scalar field generically (`dfh_dump`) plus best-effort named fields,
+   so they will surface data rather than crash — but the exact field
+   names/shapes need a live check once the fort has orders/reports
+   (phase 2 work will exercise them).
+6. **Jobs enumeration verified only on an empty list.** The
+   `world.jobs` linked-list walk (`.item` / `.next`) is structurally
+   confirmed (empty head node has `item=nil, next=nil`), but no job
+   has existed yet to walk. Phase 2 (first designation) will verify it
+   on a non-empty list.
+7. **Designation scan is slow (~4 s).** Full block scan, 8352 blocks ×
+   256 tiles. Opt-in only. Job counts by type are the cheap proxy for
+   designation activity in the default dump.
+8. **FPS is ticks/second, not a game counter.** No FPS value is exposed
+   by DFHack r8's Lua (`df.global.fps` does not exist,
+   `dfhack.getFPS` does not exist). `--fps` samples `cur_year_tick`
+   twice 1 s apart while unpaused. It measured ~117/s on this VM at
+   this fort size (above the nominal 100 cap — the cap setting was not
+   investigated). While paused it is `null`.
+9. **Quicksave blocks RPC for ~30-40 s.** While a `quicksave` is
+   writing, the RPC server stops answering (observed: version call
+   timed out after 30 s, a section returned empty text). The collector
+   survives this — failed sections land in `errors`, exit code stays
+   0 — but do not observe concurrently with a save, and treat a
+   timeout during a save as "game busy", not "game dead".
+10. **DFHack Lua is slow at function calls.** Measured in-game:
+    arithmetic is fast, but each Lua function call costs ~75 µs
+    (and per-byte `string.sub` ~80 µs/byte — 10 k subs ≈ 0.8 s).
+    Consequences: the JSON encoder uses `gsub` (not per-byte loops)
+    and skips key-sorting and array-detection passes. Full default
+    observe still takes ~1.6 s (units ~0.9 s, stocks ~0.5 s, the rest
+    ~0.1 s). Per-section timings are in the phase-1 log.
+11. **Map summary is shallow.** No water-tile counts, no cavern info,
+    no site features: those need a block scan (slow, see 7) or struct
+    fields that were not found (`world.map.features`,
+    `world.map.underground_regions` do not exist in this build).
+    `region_x`/`region_y` are reported as-is; they are **not** world
+    map tile coordinates (values 12, 92 exceed the 65×65 world).
+12. **embark-assistant's info overlay overlaps DF's own panel text**
+    at 1024×768, making its resource lines hard to read in
+    screenshots. The finder itself works (see the phase-1 log for its
+    key bindings — `f` opens the *assistant* finder from the plain
+    embark screen, lowercase `f` starts the search, **not** `F`).

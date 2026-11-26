@@ -1,0 +1,28 @@
+Athelunol — 306-01-18 Spring, tick 21290, PAUSED, focus dwarfmode/Default, DF 0.47.05 / DFHack 0.47.05-r8
+Pop: 7 citizens (7 jobless), 33 animals, 63 units active, 0 threats
+FPS: n/a (paused)
+Stocks: drink 60u (12 stacks), food 45u (9 stacks), seeds 30, wood 3, stone 0u, cloth 5, thread 389, metal bars 0, barrels 15, bins 0
+  by material: THREAD CREATURE:SPIDER_CAVE_GIANT:SILK x255, THREAD CREATURE:SPIDER_CAVE:SILK x111, DRINK PLANT:GRASS_WHEAT_CAVE:DRINK x20, DRINK PLANT:MUSHROOM_HELMET_PLUMP:DRINK x20, DRINK PLANT:GRASS_TAIL_PIG:DRINK x20, THREAD CREATURE:DEMON_13:SILK x18, PLANT PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL x15, MEAT CREATURE:DRUNIAN:SPLEEN x15, SEEDS PLANT:GRASS_TAIL_PIG:SEED x5, CLOTH PLANT:GRASS_TAIL_PIG:THREAD x5, THREAD PLANT:GRASS_TAIL_PIG:THREAD x5, SEEDS PLANT:POD_SWEET:SEED x5
+Items: 620 stacks / 746 units in play; THREAD 389, DRINK 60, AMMO 48, SEEDS 30, SHOES 28, GLOVES 28, ARMOR 21, FISH 15, PLANT 15, MEAT 15, BARREL 15, HELM 14, WEAPON 14, BOX 11, PANTS 7
+Citizens (7):
+  Udil Sodelkosh (expedition leader, 73y, F) idle @[95,95,42] | stress 3/6 (lvl 24) | hunger 4490 thirst 4490 sleep 5495 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, HelpSomebody focus -128 | skills: MINING Adequate, POETRY Novice, SPEAKING Competent, DANCE Novice
+    labors: BUILD_CONSTRUCTION, BUILD_ROAD, CLEAN, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, MINE, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION
+  Rimtar Stinthädmebzuth (Stoneworker, 69y, F) idle @[93,94,42] | stress 3/6 (lvl 5) | hunger 4490 thirst 4490 sleep 6748 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, StayOccupied focus -128 | skills: DETAILSTONE Novice, MASONRY Novice, MECHANICS Novice, DESIGNBUILDING Novice
+    labors: ARCHITECT, BUILD_CONSTRUCTION, BUILD_ROAD, CLEAN, DETAIL, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, MASON, MECHANIC, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION
+  Mebzuth Matulònul (Jeweler, 71y, M) idle @[93,95,42] | stress 3/6 (lvl -20) | hunger 4490 thirst 4490 sleep 7001 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, EatGoodMeal focus -128 | skills: CUTGEM Novice, ENCRUSTGEM Novice, WOODCRAFT Novice, STONECRAFT Novice
+    labors: BONE_CARVE, BUILD_CONSTRUCTION, BUILD_ROAD, CLEAN, CUT_GEM, ENCRUST_GEM, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION, STONE_CRAFT, WOOD_CRAFT
+  Deduk Stâkudunib (Woodworker, 81y, F) idle @[94,98,42] | stress 3/6 (lvl 20) | hunger 4490 thirst 4490 sleep 7343 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, StayOccupied focus -128 | skills: CARPENTRY Novice, BOWYER Novice, POETRY Adequate, SPEAKING Adequate
+    labors: BOWYER, BUILD_CONSTRUCTION, BUILD_ROAD, CARPENTER, CLEAN, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION
+  Dastot Mebzuthedëm (Fish Cleaner, 67y, F) idle @[95,99,42] | stress 3/6 (lvl 32) | hunger 4490 thirst 4490 sleep 6807 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, StayOccupied focus -128 | skills: PROCESSFISH Novice, BUTCHER Novice, TANNER Novice, WEAVING Novice
+    labors: BUILD_CONSTRUCTION, BUILD_ROAD, BUTCHER, CLEAN, CLEAN_FISH, CLOTHESMAKER, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, LEATHER, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION, TANNER, WEAVER
+  Bomrek Kadoltekkud (Woodcutter, 63y, F) idle @[92,92,42] | stress 3/6 (lvl 0) | hunger 4490 thirst 4490 sleep 4784 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CauseTrouble focus -320, CraftObject focus -320 | skills: WOODCUTTING Novice, BREWING Novice, COOK Novice, PLANT Novice
+    labors: BREWER, BUILD_CONSTRUCTION, BUILD_ROAD, BURN_WOOD, CLEAN, COOK, CUTWOOD, FEED_WATER_CIVILIANS, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, HERBALIST, LYE_MAKING, PLANT, POTASH_MAKING, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION, SMELT
+  Sodel Mengdallith (Fisherdwarf, 61y, F) idle @[93,98,42] | stress 3/6 (lvl 38) | hunger 4490 thirst 4490 sleep 8265 | mood none | wounds 0 | needs: DrinkAlcohol focus -640, CraftObject focus -320, StayOccupied focus -128 | skills: FISH Novice, POETRY Adequate, SPEAKING Competent, DANCE Adequate
+    labors: BUILD_CONSTRUCTION, BUILD_ROAD, CLEAN, FEED_WATER_CIVILIANS, FISH, HANDLE_VEHICLES, HAUL_ANIMALS, HAUL_BODY, HAUL_FOOD, HAUL_FURNITURE, HAUL_ITEM, HAUL_REFUSE, HAUL_STONE, HAUL_TRADE, HAUL_WATER, HAUL_WOOD, PULL_LEVER, RECOVER_WOUNDED, REMOVE_CONSTRUCTION
+Buildings (1): Wagon x1
+  Wagon #0 @[95,95,42] stage 3 jobs 0 items 59
+Jobs queued: 0 (none)
+Manager orders: 0
+Announcements (0 total, last 0):
+Combat reports (0 total, last 0):
+Map: [192, 192] tiles, 58 z-levels, region 12,92, plants 2449 (trees 1027, shrubs 1422)

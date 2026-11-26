@@ -10,6 +10,7 @@ Everything here runs offline (mock server only); no DF install needed.
 import socket
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -156,6 +157,12 @@ class TestClientAgainstMock(unittest.TestCase):
     def test_quit_sent_on_context_exit(self):
         with self._client():
             pass
+        # The quit header is sent before the socket closes, but the
+        # mock server reads it on its accept thread — wait briefly
+        # for it to be processed instead of racing that thread.
+        deadline = time.monotonic() + 2.0
+        while not self.server.quit_received and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertTrue(self.server.quit_received)
 
     def test_connection_refused_is_transport_error(self):

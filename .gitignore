@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 third_party/df_47_05/
 *.log
+scratch/

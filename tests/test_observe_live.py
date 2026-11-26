@@ -40,7 +40,7 @@ def _game_is_up():
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestLiveObserve(unittest.TestCase):
-    """Verified live against the Dakasdoma fort (region2, Ilassil)."""
+    """Verified live against the Erushtathtat fort (region2, Ilassil)."""
 
     @classmethod
     def setUpClass(cls):
@@ -62,8 +62,8 @@ class TestLiveObserve(unittest.TestCase):
 
     def test_fort_and_population(self):
         st = self.state["status"]
-        self.assertEqual(st["fort_name"], "Dakasdomas")
-        # Dakasdoma was embarked in year 125; the year advances as the
+        self.assertEqual(st["fort_name"], "Erushtathtat")
+        # Erushtathtat was embarked in year 125; the year advances as the
         # game runs, so only the floor is pinned.
         self.assertGreaterEqual(st["year"], 125)
         # 7 founders at embark; migrants arrive over time, so only the
@@ -95,7 +95,7 @@ class TestLiveObserve(unittest.TestCase):
 
     def test_text_rendering_covers_the_fort(self):
         text = render_text(self.state)
-        self.assertIn("Dakasdomas", text)
+        self.assertIn("Erushtathtat", text)
         for c in self.state["units"]["citizens"]:
             self.assertIn(c["name"], text)
 

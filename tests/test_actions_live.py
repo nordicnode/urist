@@ -49,7 +49,7 @@ def _game_is_up():
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestLiveActions(unittest.TestCase):
-    """Verified live against the Dakasdoma fort (region2, Ilassil)."""
+    """Verified live against the Erushtathtat fort (region2, Ilassil)."""
 
     @classmethod
     def setUpClass(cls):

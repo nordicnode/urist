@@ -1530,6 +1530,20 @@ def create_server(
                 return {"ok": True, "action": "command",
                         "detail": f"ran DFHack command {cmd!r}",
                         "evidence": {"text": text}, "took_ms": 0}
+            # Registry names: the catalog (GET /v1/catalog) lists the
+            # ACTIONS registry names (designate_gather, labor_toggle,
+            # build_farm_plot, ...), so accept them here too, not just
+            # the short aliases above. The model follows the catalog
+            # and was getting "unknown action" for every catalog name
+            # (M1, 2026-11-26). Coerce coordinate params from JSON
+            # lists to tuples, as the alias branches do.
+            from .actions import ACTIONS
+            if name in ACTIONS:
+                kwargs = dict(body)
+                for key in ("box", "pos"):
+                    if isinstance(kwargs.get(key), list):
+                        kwargs[key] = tuple(kwargs[key])
+                return _action_envelope(act(client, name, **kwargs))
             raise ValueError(f"unknown action {name!r}")
 
         def _send_keys(self, keys: list[str]) -> dict[str, Any]:

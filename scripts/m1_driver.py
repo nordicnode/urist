@@ -242,6 +242,11 @@ class M1Driver:
         self.catalog_text: str | None = None
         self.actions_taken = 0
         self.idle_ticks = 0
+        # Outcomes of the previous tick's actions, fed back to the
+        # model in the next prompt so it learns from failures (a
+        # wrong action name, a missing parameter, a verification
+        # failure) instead of repeating them blind.
+        self.last_action_results: list[str] = []
         # Calibrated game-tick rate (ticks per wall second), used by
         # _advance_clock. Starts at a measured-typical 50/s and is
         # re-estimated from every window actually run.
@@ -272,6 +277,11 @@ class M1Driver:
             user_parts.append("--- QUERY RESULTS (from your last turn) ---\n"
                               + "\n".join(self.query_results[-3:]))
             self.query_results = []
+        if self.last_action_results:
+            user_parts.append(
+                "--- LAST TURN'S ACTION OUTCOMES ---\n"
+                + "\n".join(self.last_action_results[-4:]))
+            self.last_action_results = []
         if self.stall_ticks >= STALL_ESCALATE_TICKS:
             user_parts.append(
                 "--- ESCALATION ---\n"
@@ -373,6 +383,18 @@ class M1Driver:
             return 2
         self.start_tick = snap0.get("tick") or 0
         self.end_tick = self.start_tick + int(self.args.days * TICKS_PER_DAY)
+        # snap0 itself stores a fresh baseline, so the tick-1
+        # snapshot would diff against it and come back mostly
+        # "unchanged" one-liners (the model stalled on exactly that,
+        # 2026-11-26). Clear again so tick 1 is full too.
+        try:
+            from dfagent_harness.store import Store, default_world_db_path
+            n = Store(default_world_db_path()).clear_snapshots()
+            print(f"m1: cleared {n} snapshot baselines (post-snap0)",
+                  flush=True)
+        except Exception as exc:
+            print(f"m1: post-snap0 baseline clear failed "
+                  f"(continuing): {exc}", flush=True)
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
                   date=(snap0.get("sections") or {}).get("status", "")[:80])
@@ -454,11 +476,17 @@ class M1Driver:
                                       ok=res.get("ok"),
                                       reason=str(res.get("reason")
                                                  or res.get("detail", ""))[:200])
+                            self.last_action_results.append(
+                                f"{kind}:{name} -> "
+                                f"{'OK' if res.get('ok') else 'FAILED'}: "
+                                f"{str(res.get('reason') or res.get('detail', ''))[:200]}")
                             self.actions_taken += 1
                         except Exception as exc:
                             self._log("action_error",
                                       name=f"{kind}:{name}",
                                       error=str(exc)[:300])
+                            self.last_action_results.append(
+                                f"{kind}:{name} -> ERROR: {str(exc)[:200]}")
                         self.stall_ticks = 0
             else:
                 self.stall_ticks = 0
@@ -474,10 +502,16 @@ class M1Driver:
                                   ok=res.get("ok"),
                                   reason=str(res.get("reason"))[:300],
                                   model_reason=a.get("reason", "")[:200])
+                        self.last_action_results.append(
+                            f"{a['action']} -> "
+                            f"{'OK' if res.get('ok') else 'FAILED'}: "
+                            f"{str(res.get('reason') or res.get('detail', '') or res.get('fix', ''))[:250]}")
                         self.actions_taken += 1
                     except Exception as exc:
                         self._log("action_error", name=a["action"],
                                   error=str(exc)[:300])
+                        self.last_action_results.append(
+                            f"{a['action']} -> ERROR: {str(exc)[:250]}")
             self._advance_clock(tick + self.args.window, tick)
         # unreachable
         return 0

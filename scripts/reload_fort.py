@@ -90,9 +90,17 @@ def main() -> int:
     env["DISPLAY"] = ":99"
     env["TERM"] = "xterm"
     log = open(HARNESS / "logs" / "dfhack.log", "ab")
+    # Detach fully: new session (setsid) + stdin from /dev/null +
+    # SIGHUP ignored. Without this DF dies ~20 s after this script
+    # exits (observed 2026-11-26 x3); a manual `setsid nohup`
+    # launch survives. The Popen object is intentionally not kept.
+    def _detach() -> None:
+        import signal
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     subprocess.Popen(["./dfhack"], cwd=DF_DIR, env=env,
+                     stdin=subprocess.DEVNULL,
                      stdout=log, stderr=subprocess.STDOUT,
-                     start_new_session=True)
+                     start_new_session=True, preexec_fn=_detach)
     client = wait_rpc()
     print("RPC up; skipping intro ...", flush=True)
     time.sleep(5)

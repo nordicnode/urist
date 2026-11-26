@@ -10,6 +10,33 @@
 local ok, err = pcall(function()
   local citizens = dfh_arr()
   local hostiles = dfh_arr()
+  local wildlife = dfh_arr()
+  local visitors = dfh_arr()
+  local livestock = dfh_arr()
+  local function compact(u, kind, role)
+    return {
+      id = u.id,
+      name = dfhack.TranslateName(dfhack.units.getVisibleName(u)),
+      race = dfhack.units.getRaceName(u),
+      pos = dfh_arr({u.pos.x, u.pos.y, u.pos.z}),
+      kind = kind, role = role,
+    }
+  end
+  local function visitor_role(u)
+    if dfh_try(function() return u.flags1.merchant end, false) then
+      return 'merchant', 'trading'
+    end
+    if dfh_try(function() return u.flags1.diplomat end, false) then
+      return 'diplomat', 'diplomacy'
+    end
+    local prof = dfhack.units.getProfessionName(u)
+    if prof == 'Performer' or prof == 'Bard' then
+      return 'performer', 'performing'
+    end
+    if prof == 'Scholar' then return 'scholar', 'studying' end
+    if prof == 'Mercenary' then return 'mercenary', 'mercenary work' end
+    return 'visitor', 'visiting'
+  end
   for _, u in ipairs(df.global.world.units.active) do
     if dfhack.units.isOpposedToLife(u)
       or dfh_try(function() return u.flags1.active_invader end, false) then
@@ -58,7 +85,28 @@ local ok, err = pcall(function()
         wound_count = wounds,
       }
     end
+    -- Neither citizen nor hostile: wildlife, visitor, or livestock.
+    local is_host = dfhack.units.isOpposedToLife(u)
+      or dfh_try(function() return u.flags1.active_invader end, false)
+    if not is_host and not dfhack.units.isCitizen(u) then
+      local is_an = dfh_try(
+        function() return dfhack.units.isAnimal(u) end, false)
+      if is_an then
+        if dfh_try(function() return dfhack.units.isTame(u) end,
+                   false) then
+          livestock[#livestock+1] = compact(u, 'livestock', 'pet')
+        else
+          wildlife[#wildlife+1] = compact(u, 'wildlife', 'wild')
+        end
+      else
+        local role, purpose = visitor_role(u)
+        local rec = compact(u, 'visitor', role)
+        rec.purpose = purpose
+        visitors[#visitors+1] = rec
+      end
+    end
   end
+  local total = #df.global.world.units.active
   result = {
     ok = true, section = 'units',
     units = {
@@ -66,6 +114,15 @@ local ok, err = pcall(function()
     citizen_count = #citizens,
     hostiles = hostiles,
     hostile_count = #hostiles,
+    wildlife = wildlife,
+    wildlife_count = #wildlife,
+    visitors = visitors,
+    visitor_count = #visitors,
+    livestock = livestock,
+    livestock_count = #livestock,
+    total_active_units = total,
+    reconciled = (#citizens + #hostiles + #wildlife + #visitors
+                  + #livestock) == total,
     },
   }
 end)

@@ -1,8 +1,49 @@
--- units.lua — every citizen in full + hostile units.
+-- units.lua — every citizen in full + hostile units + the other
+-- classes (wildlife, visitors, livestock) as compact records.
+-- World-model design §4. All classes come from the same iteration
+-- over df.global.world.units.active; the fix is additive (new
+-- lists), not a new scan. The reconciliation invariant: citizens +
+-- hostiles + wildlife + visitors + livestock = total_active_units
+-- (no unit is dropped silently).
 -- Prints one JSON object: {"ok": true, "section": "units", ...}
 local ok, err = pcall(function()
   local citizens = dfh_arr()
   local hostiles = dfh_arr()
+  local wildlife = dfh_arr()
+  local visitors = dfh_arr()
+  local livestock = dfh_arr()
+  local citizen_pos = dfh_arr()
+  -- Compact record for a non-citizen unit (design §4.1): five
+  -- fields, ~15 tokens each.
+  local function compact(u, kind, role)
+    return {
+      id = u.id,
+      name = dfhack.TranslateName(dfhack.units.getVisibleName(u)),
+      race = dfhack.units.getRaceName(u),
+      pos = dfh_arr({u.pos.x, u.pos.y, u.pos.z}),
+      kind = kind, role = role,
+    }
+  end
+  -- Visitor role: merchant/diplomat flags first, then profession,
+  -- then the generic fallback (the "remaining humanoid" cascade).
+  -- Verified live 2026-11-26: flags1.merchant and flags1.diplomat
+  -- read cleanly. No visitor is on the fort yet, so the role
+  -- mapping is best-effort and is refined when one arrives.
+  local function visitor_role(u)
+    if dfh_try(function() return u.flags1.merchant end, false) then
+      return 'merchant', 'trading'
+    end
+    if dfh_try(function() return u.flags1.diplomat end, false) then
+      return 'diplomat', 'diplomacy'
+    end
+    local prof = dfhack.units.getProfessionName(u)
+    if prof == 'Performer' or prof == 'Bard' then
+      return 'performer', 'performing'
+    end
+    if prof == 'Scholar' then return 'scholar', 'studying' end
+    if prof == 'Mercenary' then return 'mercenary', 'mercenary work' end
+    return 'visitor', 'visiting'
+  end
   for _, u in ipairs(df.global.world.units.active) do
     if dfhack.units.isOpposedToLife(u)
       or dfh_try(function() return u.flags1.active_invader end, false) then
@@ -14,6 +55,7 @@ local ok, err = pcall(function()
       }
     end
     if dfhack.units.isCitizen(u) then
+      citizen_pos[#citizen_pos+1] = {u.pos.x, u.pos.y, u.pos.z}
       local soul = u.status.current_soul
       local needs = dfh_arr()
       local stress_level, stress_category = nil, nil
@@ -95,7 +137,58 @@ local ok, err = pcall(function()
         goal = goal,
       }
     end
+    -- Neither citizen nor hostile: wildlife, visitor, or livestock.
+    -- (isCitizen / isOpposedToLife are re-checked here; the calls
+    -- are cheap C predicates and the citizen block above is long
+    -- enough not to re-indent for the sake of hoisting them.)
+    local is_host = dfhack.units.isOpposedToLife(u)
+      or dfh_try(function() return u.flags1.active_invader end, false)
+    if not is_host and not dfhack.units.isCitizen(u) then
+      local is_an = dfh_try(
+        function() return dfhack.units.isAnimal(u) end, false)
+      if is_an then
+        if dfh_try(function() return dfhack.units.isTame(u) end,
+                   false) then
+          livestock[#livestock+1] = compact(u, 'livestock', 'pet')
+        else
+          wildlife[#wildlife+1] = compact(u, 'wildlife', 'wild')
+        end
+      else
+        local role, purpose = visitor_role(u)
+        local rec = compact(u, 'visitor', role)
+        rec.purpose = purpose
+        visitors[#visitors+1] = rec
+      end
+    end
   end
+  -- Distance from each wildlife unit to its nearest citizen
+  -- (Chebyshev, +10 when the z differs — the same rule as the
+  -- hostile threat distance). The exception list ("eagle 12 tiles
+  -- from the woodcutter") reads this field.
+  for _, w in ipairs(wildlife) do
+    local best = nil
+    for _, cp in ipairs(citizen_pos) do
+      local d = math.max(math.abs(w.pos[1] - cp[1]),
+                         math.abs(w.pos[2] - cp[2]))
+      if w.pos[3] ~= cp[3] then d = d + 10 end
+      if best == nil or d < best then best = d end
+    end
+    w.dist_nearest_citizen = best
+  end
+  -- Counts by race, for the per-tick push (counts, not lists).
+  local function counts_by_race(list)
+    local counts = {}
+    for _, rec in ipairs(list) do
+      counts[rec.race] = (counts[rec.race] or 0) + 1
+    end
+    local out = dfh_arr()
+    for race, n in pairs(counts) do
+      out[#out+1] = {race = race, count = n}
+    end
+    table.sort(out, function(a, b) return a.count > b.count end)
+    return out
+  end
+  local total = #df.global.world.units.active
   result = {
     ok = true, section = 'units',
     units = {
@@ -103,6 +196,19 @@ local ok, err = pcall(function()
     citizen_count = #citizens,
     hostiles = hostiles,
     hostile_count = #hostiles,
+    wildlife = wildlife,
+    wildlife_count = #wildlife,
+    wildlife_by_race = counts_by_race(wildlife),
+    visitors = visitors,
+    visitor_count = #visitors,
+    livestock = livestock,
+    livestock_count = #livestock,
+    livestock_by_race = counts_by_race(livestock),
+    total_active_units = total,
+    -- Reconciliation: the class counts sum to the game's count.
+    -- If this is false, a unit was dropped silently (a bug).
+    reconciled = (#citizens + #hostiles + #wildlife + #visitors
+                  + #livestock) == total,
     },
   }
 end)

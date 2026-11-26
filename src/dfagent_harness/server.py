@@ -442,16 +442,56 @@ def create_server(
                 return
             units = state.get("units") or {}
             citizens = units.get("citizens") or []
-            if query.get("citizens_only", [""])[0].lower() in ("1", "true"):
+            # kind filter (design §4.2): citizens | hostiles |
+            # wildlife | visitors | livestock. Default: citizens +
+            # hostiles (the old behaviour).
+            kind = (query.get("kind") or [""])[0].lower()
+            by_kind = {
+                "citizens": citizens,
+                "hostiles": units.get("hostiles") or [],
+                "wildlife": units.get("wildlife") or [],
+                "visitors": units.get("visitors") or [],
+                "livestock": units.get("livestock") or [],
+            }
+            if kind:
+                if kind not in by_kind:
+                    _error(self, 400, "BAD_REQUEST",
+                           "kind must be citizens, hostiles, wildlife, "
+                           "visitors, or livestock")
+                    return
+                out = list(by_kind[kind])
+            elif query.get("citizens_only", [""])[0].lower() in (
+                    "1", "true"):
                 out = citizens
             else:
                 out = citizens + (units.get("hostiles") or [])
+            # region filter: region=x0,y0,z0,x1,y1,z1 (inclusive box).
+            region = (query.get("region") or [""])[0]
+            if region:
+                try:
+                    rx0, ry0, rz0, rx1, ry1, rz1 = (
+                        int(v) for v in region.split(","))
+                except ValueError:
+                    _error(self, 400, "BAD_REQUEST",
+                           "region must be x0,y0,z0,x1,y1,z1 integers")
+                    return
+                out = [rec for rec in out
+                       if len(rec.get("pos") or []) == 3
+                       and rx0 <= rec["pos"][0] <= rx1
+                       and ry0 <= rec["pos"][1] <= ry1
+                       and rz0 <= rec["pos"][2] <= rz1]
             try:
                 limit = int(query.get("limit", ["100"])[0])
             except ValueError:
                 limit = 100
-            _json(self, 200, {"units": out[:max(1, min(limit, 1000))],
-                              "citizen_count": len(citizens)})
+            limit = max(1, min(limit, 1000))
+            _json(self, 200, {
+                "units": out[:limit],
+                "count": len(out),
+                "citizen_count": len(citizens),
+                "total_active_units": units.get("total_active_units"),
+                "reconciled": units.get("reconciled"),
+            })
 
         def _unit(self, path: str,
                   get_state_fn: Callable[[], dict[str, Any]]) -> None:
@@ -461,8 +501,24 @@ def create_server(
                 _error(self, 400, "BAD_REQUEST",
                        f"bad unit id: {path!r}")
                 return
+            # The full record for one unit of any class (design §4.2):
+            # a single-unit probe, cheap, through the read-safety
+            # gate. Citizens get the full record (profession, needs,
+            # skills); other classes get the compact record plus
+            # wounds, job and owner where applicable.
+            if client is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "no DFHack client")
+                return
             try:
-                state = get_state_fn()
+                from .actions import _run_helper
+                from .read_safety import paused_read
+                with rpc_lock:
+                    out = paused_read(
+                        client,
+                        lambda: _run_helper(
+                            client, "probe_unit.lua",
+                            {"id": unit_id}, timeout=30.0))
             except ReadRefused as exc:
                 _error(self, 503, "READ_REFUSED", str(exc),
                        {"error": str(exc)})
@@ -472,17 +528,15 @@ def create_server(
                        "DFHack RPC is not reachable",
                        {"error": str(exc)})
                 return
-            units = state.get("units") or {}
-            found = next((c for c in (units.get("citizens") or [])
-                          if c.get("id") == unit_id), None)
-            if found is None:
-                found = next((h for h in (units.get("hostiles") or [])
-                              if h.get("id") == unit_id), None)
-            if found is None:
-                _error(self, 404, "NOT_FOUND",
-                       f"no unit with id {unit_id}")
+            if not out.get("ok", False):
+                if out.get("kind") == "not_found":
+                    _error(self, 404, "NOT_FOUND",
+                           f"no unit with id {unit_id}")
+                    return
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       f"unit probe failed: {out.get('error')}")
                 return
-            _json(self, 200, found)
+            _json(self, 200, out["unit"])
 
         def _section(self, section: str,
                      collect_fn: Callable[[str], dict[str, Any]]) -> None:

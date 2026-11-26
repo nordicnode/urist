@@ -382,6 +382,8 @@ class M1Driver:
             failures.append(f"daemon loop not paused "
                             f"(loop_paused={loop_paused})")
         return failures
+
+    def _model_decide(self, snap: dict) -> tuple[str, list[dict]]:
         if self.args.mock:
             # Plumbing test only: run the snapshot's suggestion (a
             # task or a query), never a raw action. If there is no

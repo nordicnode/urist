@@ -1,0 +1,8 @@
+{"ts": "2026-11-26T22:21:44.158821+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-26T22:21:46.967226+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 100800, "end_tick": 102000, "date": "Population: 7 citizens (2 idle, 1 wounded), 25 animals, 0 hostiles, 37 active un"}
+{"ts": "2026-11-26T22:21:49.591628+00:00", "tick_no": 1, "kind": "model_failure", "error": "'M1Driver' object has no attribute '_model_decide'", "consecutive": 1}
+{"ts": "2026-11-26T22:22:03.078950+00:00", "tick_no": 2, "kind": "model_failure", "error": "'M1Driver' object has no attribute '_model_decide'", "consecutive": 2}
+{"ts": "2026-11-26T22:22:13.498560+00:00", "tick_no": 3, "kind": "model_failure", "error": "'M1Driver' object has no attribute '_model_decide'", "consecutive": 3}
+{"ts": "2026-11-26T22:22:24.839550+00:00", "tick_no": 4, "kind": "model_failure", "error": "'M1Driver' object has no attribute '_model_decide'", "consecutive": 4}
+{"ts": "2026-11-26T22:22:35.306652+00:00", "tick_no": 5, "kind": "model_failure", "error": "'M1Driver' object has no attribute '_model_decide'", "consecutive": 5}
+{"ts": "2026-11-26T22:22:35.306883+00:00", "tick_no": 5, "kind": "run_end", "reason": "model failed 5 ticks in a row"}

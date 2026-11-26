@@ -128,7 +128,11 @@ NOTES: dict[str, dict[str, Any]] = {
         "params": {
             "unit": "A dwarf's id (or name).",
             "labor": "A labor name, e.g. MINER, CARPENTER, MASON, "
-                     "BREWER, WOODCUTTER, PLANT_GATHERER.",
+                     "BREWER, WOODCUTTER, HERBALIST. (The plant-"
+                     "gathering labor is HERBALIST, not "
+                     "PLANT_GATHERER — the catalog wrongly listed "
+                     "PLANT_GATHERER until 2026-11-26, and the "
+                     "model's attempt failed with 'unknown labor'.)",
         },
         "example": {"unit": 1, "labor": "BREWER", "enable": True},
     },

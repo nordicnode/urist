@@ -22,6 +22,30 @@ JWT from ~/.free-pi/agent/jwt.txt. Use --mock to drive the loop
 with the snapshot's own suggestion instead of a model call (plumbing
 test only — never a substitute for a real M1 run).
 
+M1 start procedure (guards added 2026-11-26, after the drink-0
+incident — a reload loaded the drink-0 backup and the game ran free
+unpaused with no driver):
+  1. Reload the save EXPLICITLY, naming it with --exact:
+         .venv/bin/python scripts/reload_fort.py \\
+             region2-00125-04-01 --exact
+     Never use a bare region name for an M1 start while the newest
+     backup is a bad state. reload_fort.py verifies the game ends
+     paused (GUARD 1) and refuses a save with drink < 10 unless
+     --force (GUARD 2, exit 3).
+  2. Start the daemon, then pause its loop at once:
+         .venv/bin/python scripts/dfh.py daemon --port 8765 \\
+             --df-port 5000
+         curl -X POST .../v1/control/daemon/pause
+     The daemon's pause guard (GUARD 4) re-pauses the game within
+     one planner interval if the loop is paused but the game is
+     running.
+  3. Run the driver. It runs its pre-flight (GUARD 3) before the
+     model is consulted: game paused (fresh RPC read), drink >= 10,
+     citizens > 0, daemon loop paused. Any failure refuses the run
+     (exit 2). On exit — normal, error, or crash — the driver
+     re-pauses the game and verifies the pause stuck. It never
+     exits with the game running, and never resumes the daemon loop.
+
 Usage:
     .venv/bin/python scripts/m1_driver.py [--days 1] [--window 150]
         [--max-ticks N] [--mock] [--model ID] [--out logs/m1-<ts>.jsonl]
@@ -51,6 +75,9 @@ DEFAULT_WINDOW = 150  # game ticks advanced per driver tick
 MAX_ACTIONS_PER_TICK = 2
 STALL_ESCALATE_TICKS = 3   # no actions -> sharper prompt
 STALL_FALLBACK_TICKS = 6   # still stalled -> run the suggestion
+# GUARD 3 — pre-flight drink floor. A run needs ~5 drink/day (measured
+# M1 burn); 10 is ~2 days of headroom. Refuse to start below it.
+MIN_DRINK = 10
 
 SYSTEM_PROMPT = """You are the overseer of a Dwarf Fortress fort. You know NOTHING about Dwarf Fortress or its mechanics. Do not use any prior knowledge of the game. Everything you need is in the observation below and the action catalog.
 
@@ -124,6 +151,9 @@ class DaemonClient:
 
     def resume_daemon_loop(self) -> dict:
         return self.post("/v1/control/daemon/resume")
+
+    def daemon_control(self) -> dict:
+        return self.get("/v1/control/daemon", timeout=15)
 
     def set_paused(self, paused: bool) -> dict:
         return self.do_action("pause", {"paused": paused})
@@ -294,7 +324,64 @@ class M1Driver:
         return [{"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": "\n\n".join(user_parts)}]
 
-    def _model_decide(self, snap: dict) -> tuple[str, list[dict]]:
+    def _preflight(self, snap: dict) -> list[str]:
+        """GUARD 3 — pre-flight check. Before a run starts, verify:
+        game paused, drink >= MIN_DRINK, citizens > 0, daemon loop
+        paused. Returns the list of failures (empty = pass). A run
+        must never start on a drink-0 or running fort (2026-11-26:
+        the game ran free unpaused on drink 0 with no driver)."""
+        failures: list[str] = []
+        status = snap.get("sections") or {}
+        status_text = status.get("status", "")
+        # Paused: fresh RPC read via GET /v1/pause. The snapshot
+        # cannot answer this — paused_read restores the entry pause
+        # state after the collect — and /v1/status is the poller's
+        # cached state, which only updates while paused. Both would
+        # lie about a running game.
+        try:
+            paused = self.daemon.get("/v1/pause",
+                                     timeout=15).get("paused")
+        except Exception as exc:
+            failures.append(f"pause flag unreadable: {exc}")
+            paused = None
+        if paused is not True:
+            failures.append(f"game not paused (paused={paused})")
+        # Drink and citizens come from the snapshot sections. The
+        # stocks section is rendered text; parse the drink units out
+        # of it, and the citizen count out of the status text.
+        import re as _re
+        stocks_text = status.get("stocks", "")
+        m = _re.search(r"drink[^0-9]*(\d+)", stocks_text, _re.I)
+        drink = int(m.group(1)) if m else None
+        if drink is None:
+            # Fall back to the status route's drink figure.
+            try:
+                drink = self.daemon.status().get("drink")
+            except Exception:
+                drink = None
+        if drink is None:
+            failures.append("drink unreadable")
+        elif drink < MIN_DRINK:
+            failures.append(
+                f"drink {drink} < {MIN_DRINK} floor")
+        m = _re.search(r"(\d+) citizens", status_text)
+        citizens = int(m.group(1)) if m else None
+        if citizens is None:
+            try:
+                citizens = self.daemon.status().get("population")
+            except Exception:
+                citizens = None
+        if not citizens:
+            failures.append(f"citizens {citizens} (fort dead/empty)")
+        try:
+            loop_paused = self.daemon.daemon_control().get("loop_paused")
+        except Exception as exc:
+            failures.append(f"daemon loop state unreadable: {exc}")
+            loop_paused = None
+        if loop_paused is not True:
+            failures.append(f"daemon loop not paused "
+                            f"(loop_paused={loop_paused})")
+        return failures
         if self.args.mock:
             # Plumbing test only: run the snapshot's suggestion (a
             # task or a query), never a raw action. If there is no
@@ -395,6 +482,19 @@ class M1Driver:
         except Exception as exc:
             print(f"m1: post-snap0 baseline clear failed "
                   f"(continuing): {exc}", flush=True)
+        # GUARD 3 — pre-flight. Refuse to start unless the game is
+        # paused, drink >= MIN_DRINK, citizens > 0, and the daemon
+        # loop is paused. Say which check failed. The game is left
+        # paused; the run does not start.
+        failures = self._preflight(snap0)
+        if failures:
+            self._log("preflight_refused", failures=failures)
+            print(f"m1: PRE-FLIGHT REFUSED — {'; '.join(failures)}",
+                  flush=True)
+            return 2
+        print("m1: pre-flight OK — game paused, drink >= "
+              f"{MIN_DRINK}, citizens > 0, daemon loop paused",
+              flush=True)
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
                   date=(snap0.get("sections") or {}).get("status", "")[:80])
@@ -546,11 +646,24 @@ def main() -> int:
         # a mock run's exit resumed the loop and the fort ran 19
         # in-game days to drink 0 before anyone noticed. Leave the
         # game paused and the loop paused; the parent decides when
-        # to resume.
-        try:
-            driver.daemon.set_paused(True)
-        except Exception:
-            pass
+        # to resume. GUARD 3 — verify the pause stuck (read it back
+        # via GET /v1/pause); retry once if it did not.
+        paused_ok = False
+        for attempt in range(2):
+            try:
+                driver.daemon.set_paused(True)
+                paused = driver.daemon.get("/v1/pause",
+                                           timeout=15).get("paused")
+                if paused is True:
+                    paused_ok = True
+                    break
+            except Exception:
+                pass
+        if paused_ok:
+            print("m1: exit — game verified PAUSED", flush=True)
+        else:
+            print("m1: exit — WARNING: pause could not be verified; "
+                  "the game may still be running", flush=True)
 
 
 if __name__ == "__main__":

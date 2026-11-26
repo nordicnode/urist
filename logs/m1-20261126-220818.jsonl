@@ -1,0 +1,4 @@
+{"ts": "2026-11-26T22:08:19.432714+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-26T22:08:22.123673+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 101101, "end_tick": 102301, "date": "Population: 7 citizens (3 idle, 2 wounded), 25 animals, 0 hostiles, 37 active un"}
+{"ts": "2026-11-26T22:09:19.198832+00:00", "tick_no": 1, "kind": "idle_tick", "reasoning": "Drink stock is the top priority and dwarves are already 'very thirsty'; brewing is already underway (CustomReaction job), but I need the workshop's id/position to queue more brew work. Querying the ov", "stall_ticks": 1}
+{"ts": "2026-11-26T22:09:56.336177+00:00", "tick_no": 2, "kind": "action", "name": "labor_toggle", "ok": true, "reason": "labor BREWER enabled on Olon Medtobalod", "model_reason": "Make sure at least one citizen can work a still so drink production can continue; a jeweler is expendable for this."}

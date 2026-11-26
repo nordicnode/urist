@@ -384,9 +384,32 @@ class Daemon:
             self._recent_events = self._recent_events[-200:]
 
     # -- planner loop ----------------------------------------------------
+    def _pause_guard(self) -> None:
+        """GUARD 4 — while the daemon loop is paused, the game must
+        be paused. If the loop is paused but the game is running,
+        re-pause it at once and log an anomaly. This closes the
+        'game running free with no driver' hole (2026-11-26: a
+        reload loaded the drink-0 backup and the game ran unpaused
+        with no driver). A failed guard read must not kill the loop;
+        the next iteration retries."""
+        if not self._loop_paused or self.client is None:
+            return
+        try:
+            if not get_paused(self.client):
+                with self.lock:
+                    set_paused(self.client, True)
+                self.journal.log_event(
+                    "pause_guard",
+                    "loop paused but game was running; re-paused")
+                print("dfh pause_guard: game was running while loop "
+                      "paused; re-paused", flush=True)
+        except Exception as exc:  # noqa: BLE001 - retry next tick
+            print(f"dfh pause_guard: check failed: {exc}", flush=True)
+
     def _planner_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                self._pause_guard()
                 self._planner_tick()
             except Exception as exc:  # noqa: BLE001 - loop must not die
                 self.journal.log_event("daemon_error",

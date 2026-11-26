@@ -1,0 +1,3 @@
+{"ts": "2026-11-26T21:40:43.330054+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-26T21:40:45.944542+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 101115, "end_tick": 102315, "date": "Population: 7 citizens (2 idle, 2 wounded), 25 animals, 0 hostiles, 37 active un"}
+{"ts": "2026-11-26T21:41:42.065585+00:00", "tick_no": 1, "kind": "idle_tick", "reasoning": "The observation is entirely 'unchanged' and gives no coordinates or suggested action, so I need layout detail before committing to a build. I'll pull the overview and unit list to find valid sites and", "stall_ticks": 1}

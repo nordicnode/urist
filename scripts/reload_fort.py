@@ -169,6 +169,10 @@ def main() -> int:
     ap.add_argument("--list", action="store_true",
                     help="list save folders (in-game date, world.sav "
                          "mtime/size) and exit")
+    ap.add_argument("--force", action="store_true",
+                    help="load even if the save is below the drink "
+                         "floor (drink < 10); otherwise a low-drink "
+                         "save is refused")
     args = ap.parse_args()
 
     if args.list:
@@ -216,15 +220,62 @@ def main() -> int:
     st = state.get("status") or {}
     pop = st.get("population") or {}
     sk = state.get("stocks") or {}
+    # GUARD 1 — pause verification after every load. A reload must
+    # never leave the game running, even for a moment (2026-11-26:
+    # a reload left the game unpaused and it ran free on drink 0).
+    # set_paused verifies by re-reading and falls back to a Space
+    # keypress if the flag does not stick; re-verify here and fail
+    # loudly if it still does not stick.
+    from dfagent_harness.actions import set_paused
+    paused = st.get("paused")
+    if not paused:
+        print("reload: GUARD 1 — game came up UNPAUSED; pausing at "
+              "once", flush=True)
+        try:
+            paused = set_paused(client, True)
+        except Exception as exc:
+            print(f"reload: GUARD 1 FAILED — could not pause: {exc}",
+                  flush=True)
+            return 4
+    # Re-read the flag to verify the pause stuck (set_paused already
+    # verifies, but the flag is re-checked here as the load's final
+    # word, independent of the setter's return).
+    from dfagent_harness.actions import get_paused
+    try:
+        paused_now = get_paused(client)
+    except Exception as exc:
+        print(f"reload: GUARD 1 FAILED — could not read pause flag: "
+              f"{exc}", flush=True)
+        return 4
+    if not paused_now:
+        print("reload: GUARD 1 FAILED — pause flag did not stick "
+              "after load; leaving DF paused is not verified",
+              flush=True)
+        return 4
     print(f"loaded: focus={st.get('focus')} date={st.get('date')} "
-          f"paused={st.get('paused')} citizens={pop.get('citizens')} "
+          f"paused={paused_now} citizens={pop.get('citizens')} "
           f"drink={sk.get('drink_units')} food={sk.get('food_units')} "
           f"wood={sk.get('wood_units')}", flush=True)
-    # The fort sometimes comes up UNPAUSED — re-pause by hand.
-    if not st.get("paused"):
-        from dfagent_harness.actions import set_paused
-        set_paused(client, True)
-        print("re-paused (came up unpaused)", flush=True)
+    print(f"reload: GUARD 1 OK — post-load pause state verified: "
+          f"paused={paused_now}", flush=True)
+    # GUARD 2 — refuse bad saves. A save below the drink floor must
+    # never be silently landed on (2026-11-26: the newest backup was
+    # a drink-0 state and a bare-region reload landed the fort on it).
+    # Floor is drink < 10 (~2 days at the measured M1 burn of
+    # ~5/day). Refusal exits non-zero with the game left PAUSED
+    # (safe); --force overrides for a deliberate low-drink load.
+    drink = sk.get("drink_units")
+    citizens = pop.get("citizens")
+    if drink is not None and drink < 10 and not args.force:
+        print(f"reload: GUARD 2 REFUSAL — {region} has drink "
+              f"{drink} (< 10 floor), date {st.get('date')}, "
+              f"{citizens} citizens. Refusing to hand this save to "
+              f"a run; re-run with --force to override. Game left "
+              f"PAUSED.", flush=True)
+        return 3
+    print(f"reload: GUARD 2 OK — drink {drink} >= 10 floor "
+          f"(date {st.get('date')}, {citizens} citizens)",
+          flush=True)
     return 0
 
 

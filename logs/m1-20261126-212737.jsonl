@@ -1,0 +1,4 @@
+{"ts": "2026-11-26T21:27:37.910561+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": true}
+{"ts": "2026-11-26T21:27:41.022631+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 103299, "end_tick": 104499, "date": "Population: 7 citizens (6 idle, 6 wounded), 28 animals, 0 hostiles, 49 active un"}
+{"ts": "2026-11-26T21:27:43.078160+00:00", "tick_no": 1, "kind": "idle_tick", "reasoning": "mock: no suggestion", "stall_ticks": 1}
+{"ts": "2026-11-26T21:27:54.052028+00:00", "tick_no": 2, "kind": "run_end", "reason": "max_ticks reached"}

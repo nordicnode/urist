@@ -487,6 +487,21 @@ def create_server(
                 self._attention()
             elif path == "/v1/snapshot":
                 self._snapshot()
+            elif path == "/v1/pause":
+                # Fresh RPC read of the pause flag (not the poller's
+                # cached state, which only updates while paused).
+                # Used by run-script pre-flight checks.
+                if client is None:
+                    _error(self, 503, "GAME_NOT_RUNNING",
+                           "no DFHack client")
+                else:
+                    try:
+                        with rpc_lock:
+                            paused = get_paused(client)
+                        _json(self, 200, {"paused": paused})
+                    except Exception as exc:  # noqa: BLE001
+                        _error(self, 503, "RPC_ERROR",
+                               f"pause read failed: {exc}")
             elif path == "/v1/cursor":
                 self._cursor()
             elif path == "/v1/events":

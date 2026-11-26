@@ -114,6 +114,54 @@ queueing → 30 s timeouts → stale replies).
    A critical threat (hostile ≤5 tiles) returns early and holds the
    game paused instead.
 
+## Pause guard (added 2026-11-26, after the drink-0 incident)
+
+While the daemon loop is paused, the game must be paused. The
+planner loop runs `_pause_guard()` every iteration (every
+`planner_interval`, 30 s): if the loop is paused but the game is
+running, it re-pauses the game at once and logs a `pause_guard`
+anomaly in the journal (`daemon_events`). This closes the "game
+running free with no driver" hole: on 2026-11-26 a reload loaded
+the drink-0 backup and the game came up unpaused, and ran free
+with drink 0 and no driver until the parent paused it by hand.
+A failed guard read never kills the loop; the next iteration
+retries. Verified live 2026-11-26: a manually unpaused game was
+re-paused by the guard within one interval, twice (the daemon-start
+race and the manual unpause), with 2 `pause_guard` rows logged.
+
+## Reload and run guards (added 2026-11-26, same incident)
+
+- **reload_fort.py, GUARD 1 — pause verification after every load.**
+  After any load, the pause flag is re-read; if the game came up
+  unpaused, `set_paused(True)` pauses it at once (Space-key
+  fallback, verified by re-reading) and the pause is re-verified.
+  A reload must never leave the game running, even for a moment.
+  The post-load pause state is logged every time.
+- **reload_fort.py, GUARD 2 — refuse bad saves.** After loading,
+  drink/citizens/date are read and reported. A save with drink < 10
+  (~2 days at the measured M1 burn of ~5/day) is refused — exit 3,
+  game left PAUSED — unless `--force` is passed. A bare region name
+  must never silently land the fort on a drink-0 state again.
+- **m1_driver.py, GUARD 3 — pre-flight check.** Before a run starts
+  the driver verifies: game paused (fresh RPC read via
+  `GET /v1/pause`, not the poller's cached state), drink >= 10,
+  citizens > 0, daemon loop paused. Any failure refuses the run
+  (exit 2) and says which check failed. On exit — normal, error, or
+  crash — the driver re-pauses the game and verifies the pause stuck
+  via `GET /v1/pause`, retrying once. The driver never exits with
+  the game running.
+- **M1 start procedure.** Always name the save explicitly with
+  `--exact` (e.g. `scripts/reload_fort.py region2-00125-04-01
+  --exact`). Never use a bare region name for an M1 start while the
+  newest backup is a bad state. The driver runs its pre-flight
+  against that save before the model is consulted.
+- **`GET /v1/pause`** returns the fresh RPC pause flag
+  (`{"paused": bool}`), for run-script pre-flight checks. The
+  snapshot cannot answer this (`paused_read` restores the entry
+  pause state after the collect) and `/v1/status` is the poller's
+  cached state, which only updates while paused — both would lie
+  about a running game.
+
 ## RPC robustness (learned live 2026-11-26)
 
 - **Stream poisoning:** a call that times out mid-reply leaves a

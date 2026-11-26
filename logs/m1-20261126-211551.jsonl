@@ -1,0 +1,3 @@
+{"ts": "2026-11-26T21:15:51.640284+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": true}
+{"ts": "2026-11-26T21:15:55.357492+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 178140, "end_tick": 179340, "date": "Population: 10 citizens (8 idle, 0 wounded), 20 animals, 0 hostiles, 41 active u"}
+{"ts": "2026-11-26T21:15:58.497608+00:00", "tick_no": 1, "kind": "run_end", "reason": "fort dead", "tick": 178140}

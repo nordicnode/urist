@@ -1,0 +1,2 @@
+{"ts": "2026-11-26T22:19:16.058181+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-26T22:19:20.367415+00:00", "tick_no": 0, "kind": "preflight_refused", "failures": ["drink 0 < 10 floor"]}

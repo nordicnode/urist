@@ -495,6 +495,14 @@ def create_server(
                 self._daemon_control()
             elif path == "/v1/journal":
                 self._journal(query)
+            elif path == "/v1/diary":
+                self._diary()
+            elif path == "/v1/diary.html":
+                self._diary_html()
+            elif path.startswith("/v1/memory/why/"):
+                self._memory_why(path)
+            elif path == "/v1/memory/summary":
+                self._memory_summary()
             elif path == "/v1/goals":
                 self._goals_list()
             elif path.startswith("/v1/goals/"):
@@ -1119,6 +1127,99 @@ def create_server(
                              if d.get("domain") == kind]
             _json(self, 200, {"decisions": decisions,
                               "counts": daemon.journal.decision_counts()})
+
+        # -- diary + memory (GOAL.md step 4) --------------------------
+        def _diary(self) -> None:
+            # The diary: entries parsed from diary.md in the daemon
+            # state dir. No game read.
+            from .daemon import default_state_dir
+            from .diary import diary_md_path, parse_entries
+            state_dir = daemon.state_dir if daemon is not None \
+                else default_state_dir()
+            md_path = diary_md_path(state_dir)
+            entries = parse_entries(md_path.read_text()) \
+                if md_path.exists() else []
+            _json(self, 200, {"entries": entries,
+                              "count": len(entries)})
+
+        def _diary_html(self) -> None:
+            # Serve the generated diary.html as a page.
+            from .daemon import default_state_dir
+            from .diary import diary_html_path
+            state_dir = daemon.state_dir if daemon is not None \
+                else default_state_dir()
+            html_path = diary_html_path(state_dir)
+            if not html_path.exists():
+                _error(self, 404, "NOT_FOUND",
+                       "no diary yet — the fort has not lived a day")
+                return
+            body = html_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _memory_why(self, path: str) -> None:
+            # Death investigation: why did this dwarf die? The
+            # Store's death record + diagnosis + the unit's history,
+            # in plain words. No game read.
+            try:
+                unit_id = int(path[len("/v1/memory/why/"):])
+            except ValueError:
+                _error(self, 400, "BAD_REQUEST",
+                       "unit id must be an integer")
+                return
+            store = daemon.store if daemon is not None \
+                else _default_store()
+            deaths = [d for d in store.deaths()
+                      if d.get("unit_id") == unit_id]
+            if not deaths:
+                _error(self, 404, "NOT_FOUND",
+                       f"no death recorded for unit {unit_id}")
+                return
+            death = deaths[-1]
+            history = store.unit_history(unit_id)
+            _json(self, 200, {
+                "unit_id": unit_id,
+                "death": death,
+                "history": history,
+                "answer": (
+                    f"Unit {unit_id} died at tick "
+                    f"{death.get('tick')} ({death.get('cause')}). "
+                    f"History: {len(history)} daily samples; "
+                    f"last sample {history[-1] if history else None}."),
+            })
+
+        def _memory_summary(self) -> None:
+            # Re-grounding: the current situation + open problems +
+            # recent failures, for a new session or a compacted
+            # context. No game read — Store + Journal.
+            store = daemon.store if daemon is not None \
+                else _default_store()
+            journal = daemon.journal if daemon is not None else None
+            summary: dict[str, Any] = {
+                "deaths": store.deaths()[-5:],
+                "trends": {},
+            }
+            for metric in ("drink", "food", "wood", "population"):
+                pts = store.trend_samples(metric)
+                if pts:
+                    summary["trends"][metric] = {
+                        "latest": pts[-1][1],
+                        "days_remaining": store.days_remaining(
+                            metric, pts[-1][0]),
+                    }
+            if journal is not None:
+                summary["recent_decisions"] = \
+                    journal.recent_decisions(limit=10)
+                summary["recent_events"] = journal.recent_events(
+                    limit=10)
+                # Failures: decisions that did not work, most recent.
+                summary["failures"] = [
+                    d for d in journal.recent_decisions(limit=100)
+                    if d.get("ok") is False][:5]
+            _json(self, 200, summary)
 
         # -- goals ------------------------------------------------------
         def _goals_list(self) -> None:

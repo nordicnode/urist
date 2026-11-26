@@ -632,6 +632,13 @@ class Journal:
                 "reason", "action", "goal_key", "ok", "result", "took_ms")
         return [dict(zip(keys, r)) for r in rows]
 
+    def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        rows = self._db.execute(
+            "SELECT at, tick, kind, detail FROM daemon_events "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        keys = ("at", "tick", "kind", "detail")
+        return [dict(zip(keys, r)) for r in rows]
+
     def decision_counts(self) -> dict[str, int]:
         rows = self._db.execute(
             "SELECT domain, COUNT(*) FROM decisions GROUP BY domain"

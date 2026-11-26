@@ -42,6 +42,7 @@ from dfhack_rpc import DFHackClient
 
 from . import observe
 from .actions import act, get_paused, set_paused
+from .assembler import TICKS_PER_DAY
 from .events import (
     DEFAULT_WATCH_LOG,
     EventBus,
@@ -532,8 +533,26 @@ class Daemon:
             self.journal.log_event("snapshot_error",
                                    f"assemble failed: {exc}")
             return
-        sample_daily(state, self.store)
+        sampled = sample_daily(state, self.store)
         tick = (state.get("status") or {}).get("year_tick")
+        # Diary (GOAL.md step 4): when a new day is sampled, the day
+        # that just ended gets its entry. The entry is built only
+        # from the Store + Journal for that day's tick range, so
+        # every claim traces to a recorded event, decision, or
+        # observation. Failures are logged, never fatal to the tick.
+        if sampled and isinstance(tick, int) and tick >= TICKS_PER_DAY:
+            try:
+                from .diary import (TICKS_PER_DAY as _TPD,
+                                    build_daily_summary, write_entry)
+                prev_start = (tick // _TPD - 1) * _TPD
+                fort = (state.get("status") or {}).get("fort_name") or ""
+                year = (state.get("status") or {}).get("year") or 0
+                summary = build_daily_summary(
+                    self.store, self.journal, prev_start, fort, year)
+                write_entry(self.state_dir, summary)
+            except Exception as exc:  # noqa: BLE001 - never kill tick
+                self.journal.log_event(
+                    "diary_error", f"diary write failed: {exc}")
         reports = (state.get("reports") or {}).get("announcements") \
             or []
         for ev in self._recent_events:

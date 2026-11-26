@@ -24,8 +24,8 @@ from __future__ import annotations
 from typing import Any, Optional
 
 __all__ = [
-    "prettify_race", "describe_arrival", "build_attention",
-    "ATTENTION_WINDOW_TICKS",
+    "prettify_race", "describe_arrival", "describe_unit",
+    "build_attention", "ATTENTION_WINDOW_TICKS",
 ]
 
 # An arrival stays in attention for one in-game day after its tick,
@@ -54,6 +54,141 @@ def prettify_race(race: Optional[str]) -> str:
 
 def _cheb3(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
+
+
+# Job-type verbs for the citizen description. Only the common ones
+# are mapped; anything else falls back to the raw type name, never
+# an invented verb.
+_JOB_VERBS = {
+    "Dig": "digging", "FellTree": "cutting down a tree",
+    "Eat": "eating", "Drink": "drinking", "Drink2": "drinking",
+    "Sleep": "sleeping", "HaulStone": "hauling stone",
+    "HaulWood": "hauling wood", "HaulItem": "hauling an item",
+    "HaulBody": "hauling a body", "HaulFood": "hauling food",
+    "HaulFurniture": "hauling furniture",
+    "ConstructBuilding": "constructing a building",
+    "CustomReaction": "working a reaction",
+    "PrepareMeal": "cooking a meal", "MakeBarrel": "making a barrel",
+    "MakeBucket": "making a bucket", "PlantSeeds": "planting seeds",
+    "HarvestPlants": "harvesting plants",
+    "GatherPlants": "gathering plants", "Fish": "fishing",
+    "Hunt": "hunting", "TrainAnimal": "training an animal",
+    "ButcherAnimal": "butchering an animal", "MilkCreature": "milking",
+    "ShearCreature": "shearing", "Clean": "cleaning",
+    "Rest": "resting", "SeekArtifact": "seeking an artifact",
+    "StoreItemInStockpile": "storing an item",
+    "RemoveConstruction": "removing a construction",
+    "DestroyBuilding": "destroying a building",
+}
+
+
+def _counter_words(counters: dict[str, Any]) -> list[str]:
+    """Plain words for hunger/thirst/sleepiness, from the measured
+    live thresholds (hunger eats at ~40,000, thirst drinks at
+    ~20,000, sleepiness sleeps at ~50,000)."""
+    out = []
+    hunger = counters.get("hunger")
+    if isinstance(hunger, int):
+        if hunger >= 40000:
+            out.append("very hungry")
+        elif hunger >= 30000:
+            out.append("hungry")
+        elif hunger >= 20000:
+            out.append("getting hungry")
+    thirst = counters.get("thirst")
+    if isinstance(thirst, int):
+        if thirst >= 20000:
+            out.append("very thirsty")
+        elif thirst >= 15000:
+            out.append("thirsty")
+        elif thirst >= 10000:
+            out.append("getting thirsty")
+    sleepiness = counters.get("sleepiness")
+    if isinstance(sleepiness, int):
+        if sleepiness >= 50000:
+            out.append("exhausted, needs sleep")
+        elif sleepiness >= 40000:
+            out.append("very tired")
+        elif sleepiness >= 30000:
+            out.append("getting tired")
+    return out
+
+
+def describe_unit(rec: dict[str, Any],
+                  surface_z: Optional[int] = None,
+                  fort_centre: Optional[tuple[int, int, int]] = None
+                  ) -> str:
+    """One plain-words sentence (or two) for any unit record.
+
+    Citizens get name, profession, what they are doing, where they
+    are, and their state (hunger/thirst/sleepiness/stress/wounds)
+    in words, not raw numbers. Compact records (wildlife, visitors,
+    livestock, hostiles) get class, race in plain words, position,
+    and distance to the nearest dwarf where known. The raw record
+    stays alongside; this is the readable form.
+    """
+    pos = rec.get("pos") or [None, None, None]
+    where = _where((pos[0], pos[1], pos[2]), surface_z)
+    at = f"at ({pos[0]}, {pos[1]}, z{pos[2]})"
+    loc = f"{where}, {at}" if where else at
+    kind = rec.get("kind")
+    name = rec.get("name") or ""
+    # Citizens: the full record (profession, job, counters, stress).
+    if kind is None and rec.get("profession"):
+        prof = rec["profession"]
+        who = f"{name}, a citizen dwarf ({prof.lower()})" \
+            if name else f"A citizen dwarf ({prof.lower()})"
+        doing = ""
+        job = rec.get("job") or {}
+        if rec.get("idle"):
+            doing = "idle"
+        elif job.get("type"):
+            doing = _JOB_VERBS.get(job["type"],
+                                   f"doing {job['type']}")
+        state = _counter_words(rec.get("counters") or {})
+        stress = rec.get("stress") or {}
+        cat = stress.get("category")
+        if isinstance(cat, int):
+            if cat <= 1:
+                state.append("highly stressed")
+            elif cat == 2:
+                state.append("stressed")
+        wounds = rec.get("wound_count")
+        if isinstance(wounds, int) and wounds > 0:
+            state.append(f"wounded ({wounds} wound"
+                         f"{'s' if wounds != 1 else ''})")
+        mood_name = rec.get("mood_name")
+        if mood_name and mood_name != "none":
+            state.append(f"in a {mood_name.lower()} mood")
+        text = f"{who} is {loc}"
+        if doing:
+            text += f", {doing}"
+        if state:
+            joined = "; ".join(state)
+            text += ". " + joined[0].upper() + joined[1:]
+        return text + "."
+    # Compact records and hostiles.
+    race = prettify_race(rec.get("race"))
+    if kind == "visitor":
+        role = rec.get("role") or ""
+        what = role if role and role != "visitor" else "visitor"
+        noun = f"a {race} ({what})"
+    elif kind == "livestock":
+        noun = f"a {race} (pet)"
+    elif kind == "wildlife":
+        noun = f"a {race} (wild animal)"
+    elif kind == "hostile":
+        noun = f"a {race} (HOSTILE)"
+    else:
+        noun = f"a {race}"
+    if name and name.lower() not in (race, "unit"):
+        noun = f"{name}, {noun}"
+    text = f"{noun} is {loc}"
+    dist = rec.get("dist_nearest_citizen")
+    if isinstance(dist, int):
+        text += (f", {dist} tile{'s' if dist != 1 else ''} from "
+                 f"the nearest dwarf")
+    return text + "."
 
 
 def _where(pos: tuple[int, int, int],

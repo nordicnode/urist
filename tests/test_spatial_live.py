@@ -202,3 +202,78 @@ class TestLiveSpatial(unittest.TestCase):
                              "gate did not restore running")
         finally:
             actions.set_paused(self.client, True)
+
+    def test_slice_has_rulers_landmarks_and_above_below(self):
+        # Interpretability pass: coordinate rulers, the fort-centre
+        # landmark, the areas in the rect, and what is directly
+        # above and below the slice. The areas first, so the slice
+        # can list the areas in its rect.
+        self._get("/v1/areas")
+        status, data = self._get(
+            "/v1/slice?x0=77&y0=77&z=175&x1=116&y1=116&layer=terrain")
+        self.assertEqual(status, 200, data)
+        labeled = data["grid_labeled"]
+        self.assertEqual(len(labeled), 42)  # 2 rulers + 40 rows
+        self.assertTrue(labeled[0].startswith("    777"))
+        self.assertTrue(labeled[2].startswith(" 77 "))
+        # The fort centre (97, 97, z175) is in the rect.
+        marks = [m for m in data["markers"] if m["char"] == "F"]
+        self.assertEqual(len(marks), 1)
+        self.assertEqual((marks[0]["x"], marks[0]["y"]), (97, 97))
+        self.assertIn("fort centre", marks[0]["what"])
+        self.assertIn("F", "\n".join(labeled))
+        # Areas in the rect (from the cache — the areas test above
+        # ran first and populated it).
+        self.assertIn("areas_in_rect", data)
+        self.assertTrue(any(a["kind"] == "surface"
+                            for a in data["areas_in_rect"]))
+        # Above and below are stated in plain words. The level
+        # directly below the surface slice is all unrevealed rock
+        # — the slice is honest about that and routes the agent to
+        # the column probe for the geology (the column, not the
+        # slice, answers what is actually down there).
+        self.assertIn("Below (z174):", data["below_text"])
+        self.assertIn("1600 hidden (unrevealed) tiles",
+                      data["below_text"])
+        self.assertIn("use /v1/column", data["below_text"])
+        self.assertIn("Above (z176):", data["above_text"])
+        self.assertIn("below", data["summary"].lower())
+        self.assertIn("above", data["summary"].lower())
+
+    def test_overview_shows_the_shape_of_the_world(self):
+        status, data = self._get("/v1/overview")
+        self.assertEqual(status, 200, data)
+        # 13 block rows of z (197 levels / 16), top first.
+        self.assertEqual(len(data["cross_section"]), 13)
+        self.assertEqual(len(data["top_down"]), 12)
+        # The fort's block, the magma sea at the bottom, and open
+        # cavern bands deep down are all visible at a glance.
+        flat = "\n".join(data["cross_section"])
+        self.assertIn("F", flat)
+        self.assertIn("!", data["cross_section"][-1])
+        self.assertIn(".", flat)
+        self.assertIn("summary", data)
+        self.assertIn("cost", data)
+
+    def test_areas_carry_plain_words_descriptions(self):
+        # The survey first: area descriptions are enriched with
+        # its vertical facts (magma, aquifer) only when it is
+        # cached.
+        self._get("/v1/survey")
+        status, data = self._get("/v1/areas")
+        self.assertEqual(status, 200, data)
+        self.assertIn("summary", data)
+        self.assertTrue(any("Surface" in ln for ln in data["summary"]))
+        for a in data["areas"]:
+            self.assertIn("description", a)
+            self.assertIn(a["name"], a["description"])
+            self.assertIn("spans x", a["description"])
+        surface = [a for a in data["areas"]
+                   if a["kind"] == "surface"][0]
+        self.assertIn("Above it is open sky.", surface["description"])
+        self.assertIn("magma sea", surface["description"])
+        cavern = [a for a in data["areas"]
+                  if a["kind"] == "cavern"][0]
+        self.assertIn("From the Surface: no path",
+                      cavern["description"])
+        self.assertIn("magma sea", cavern["description"])

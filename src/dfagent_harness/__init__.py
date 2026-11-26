@@ -24,8 +24,19 @@ from .actions import (
     act,
     nobles,
 )
-from .attention import build_attention, describe_arrival, prettify_race
+from .attention import (
+    build_attention,
+    describe_arrival,
+    describe_unit,
+    prettify_race,
+)
+from .column import column_response, dig_down, read_column
 from .daemon import Daemon, DaemonConfig
+from .spatial import (
+    area_descriptions,
+    describe_area,
+    render_overview,
+)
 from .events import (
     DiffDetector,
     EventBus,
@@ -46,7 +57,10 @@ __all__ = ["ACTIONS", "ActionResult", "JOB_SPECS", "act", "nobles",
            "DiffDetector", "EventBus", "EventPoller", "WatcherDrainer",
            "collect_mandates", "install_watcher", "make_event",
            "uninstall_watcher", "watcher_status",
-           "build_attention", "describe_arrival", "prettify_race",
+           "build_attention", "describe_arrival", "describe_unit",
+           "prettify_race", "read_column", "column_response",
+           "dig_down", "describe_area", "area_descriptions",
+           "render_overview",
            "Daemon", "DaemonConfig", "Journal", "Planner", "decide",
            "state_summary", "appoint_noble", "create_stockpile",
            "dismiss_dialog", "DIALOG_KEYS"]

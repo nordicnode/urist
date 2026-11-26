@@ -92,6 +92,74 @@ class TestDescribeArrival(unittest.TestCase):
         self.assertNotIn("surface", text)
 
 
+class TestDescribeUnit(unittest.TestCase):
+    def test_citizen_idle_with_state(self):
+        text = at.describe_unit({
+            "id": 2, "name": "Udil Sodelkosh", "profession": "Miner",
+            "pos": [97, 91, 175], "idle": True,
+            "counters": {"hunger": 25000, "thirst": 12000,
+                         "sleepiness": 10000},
+            "stress": {"category": 4}, "wound_count": 0},
+            surface_z=175)
+        self.assertIn("Udil Sodelkosh, a citizen dwarf (miner)",
+                      text)
+        self.assertIn("on the surface, at (97, 91, z175)", text)
+        self.assertIn("idle", text)
+        self.assertIn("Getting hungry", text)
+        self.assertIn("getting thirsty", text)
+
+    def test_citizen_working_and_wounded(self):
+        text = at.describe_unit({
+            "id": 3, "name": "Mistem", "profession": "Woodcutter",
+            "pos": [100, 93, 175], "idle": False,
+            "job": {"type": "FellTree", "id": 10,
+                    "pos": [100, 93, 175]},
+            "counters": {"hunger": 5000, "thirst": 5000,
+                         "sleepiness": 5000},
+            "stress": {"category": 0}, "wound_count": 2},
+            surface_z=175)
+        self.assertIn("cutting down a tree", text)
+        self.assertIn("Highly stressed", text)
+        self.assertIn("wounded (2 wounds)", text)
+
+    def test_citizen_very_thirsty(self):
+        text = at.describe_unit({
+            "id": 4, "name": "Aban", "profession": "Brewer",
+            "pos": [97, 97, 175], "idle": True,
+            "counters": {"hunger": 1000, "thirst": 21000,
+                         "sleepiness": 1000},
+            "stress": {"category": 5}, "wound_count": 0},
+            surface_z=175)
+        self.assertIn("Very thirsty", text)
+
+    def test_wildlife_compact(self):
+        text = at.describe_unit({
+            "id": 7001, "race": "CRUNDLE", "pos": [38, 176, 124],
+            "kind": "wildlife", "dist_nearest_citizen": 120},
+            surface_z=175)
+        self.assertIn("a crundle (wild animal)", text)
+        self.assertIn("deep underground, in the caverns", text)
+        self.assertIn("120 tiles from the nearest dwarf", text)
+
+    def test_visitor_and_livestock(self):
+        text = at.describe_unit({
+            "id": 5490, "race": "TROLL", "pos": [148, 65, 123],
+            "kind": "visitor", "role": "visitor"},
+            surface_z=175)
+        self.assertIn("a troll (visitor)", text)
+        text = at.describe_unit({
+            "id": 8001, "race": "CAT", "pos": [97, 97, 175],
+            "kind": "livestock", "role": "pet"},
+            surface_z=175)
+        self.assertIn("a cat (pet)", text)
+
+    def test_hostile(self):
+        text = at.describe_unit({
+            "id": 9001, "race": "GOBLIN", "pos": [100, 100, 175],
+            "kind": "hostile"}, surface_z=175)
+        self.assertIn("(HOSTILE)", text)
+
+
 class TestBuildAttention(unittest.TestCase):
     def test_empty_when_nothing_to_say(self):
         items = at.build_attention(_state(), StubDetector([]))

@@ -16,10 +16,23 @@ Routes:
   ``/v1/cursor`` — read-only state queries.
 * ``GET /v1/slice?x0&y0&z&x1&y1&layer`` — one ASCII slice
   (world-model design §3.4; max 64x64, ``&full=1`` for a full
-  z-level, flagged expensive).
+  z-level, flagged expensive). Coordinate rulers, the fort-centre
+  landmark, the areas overlapping the rect, and what is directly
+  above and below the slice, in plain words.
+* ``GET /v1/column?x&y[&from_z=N][&levels=N]`` — vertical profile
+  of one map column (standing directive 2026-11-26): strata from
+  the top down in plain words, hazards (aquifer/magma/water), and
+  the answer to "if I dig down N levels from here, what do I hit?"
+* ``GET /v1/overview`` — coarse block-level overview of the whole
+  map (a side cross-section through the fort + a top-down view of
+  the fort's level), built from the cached scan + survey, no game
+  read.
 * ``GET /v1/areas``, ``/v1/area/{id|name}``, ``/v1/path?a&b`` —
   named areas + the connectivity graph (design §3; derived once
   from a full block scan, cached, ``?refresh=1`` re-derives).
+  Every area carries a plain-words ``description`` (what it is,
+  where, how big, what is in it, how to get there, what is above
+  and below it).
 * ``GET /v1/survey[?kind=water|magma|mineral|aquifer|plants|soil]``
   — resource survey (design §5; one ~25 s scan, cached, stale
   after one season; ``?refresh=1`` re-scans). Plain-words summary,
@@ -203,12 +216,14 @@ def create_server(
         if spatial_cache["areas"] is not None and not refresh:
             return spatial_cache["areas"]
         t0 = time.monotonic()
+        holder: dict[str, Any] = {}
 
         def _derive() -> dict[str, Any]:
             state = observe.collect(
                 client, sections=("buildings", "units", "map",
                                   "status"))
             scan = spatial.scan_blocks(client)
+            holder["scan"] = scan
             return spatial.derive_areas(state, scan)
 
         with rpc_lock:
@@ -221,20 +236,101 @@ def create_server(
         }
         areas["stale"] = False
         spatial_cache["areas"] = areas
+        # The scan is cached for the overview route (no second scan).
+        if holder.get("scan") is not None:
+            spatial_cache["scan"] = holder["scan"]
         return areas
+
+    def _enrich_area_descriptions(areas: dict[str, Any]) -> None:
+        """Re-describe areas with the cached survey's vertical facts
+        (magma, aquifer, first cavern) when a survey is cached.
+        In place, idempotent — the derivation-time descriptions are
+        graph-only, so this upgrades them whenever the survey exists.
+        """
+        from . import spatial
+        from .survey import FORT_CENTRE
+        cached_survey = spatial_cache.get("survey")
+        if cached_survey is None:
+            return
+        descs = spatial.area_descriptions(
+            areas["areas"], areas["graph"], cached_survey, FORT_CENTRE)
+        for a in areas["areas"]:
+            a["description"] = descs[a["id"]]
 
     def get_slice(x0: int, y0: int, z: int, x1: int, y1: int,
                   layer: str, allow_full: bool) -> dict[str, Any]:
         from . import spatial
         from .read_safety import paused_read
+        from .survey import FORT_CENTRE
         if client is None:
             raise ConnectionError("no DFHack client")
+        landmarks = [{"x": FORT_CENTRE[0], "y": FORT_CENTRE[1],
+                      "z": FORT_CENTRE[2], "char": "F",
+                      "what": "fort centre (the embark point, "
+                              "where the wagon stands)"}]
         with rpc_lock:
-            return paused_read(
+            out = paused_read(
                 client,
                 lambda: spatial.render_slice(
                     client, x0, y0, z, x1, y1, layer=layer,
-                    allow_full=allow_full))
+                    allow_full=allow_full, landmarks=landmarks))
+        # Areas overlapping this rect, from the cache only (never
+        # triggers a scan). The key is always present — empty when
+        # the areas have not been derived yet — so a client can
+        # rely on it.
+        cached = spatial_cache.get("areas")
+        if cached is not None:
+            out["areas_in_rect"] = [
+                {"id": a["id"], "name": a["name"], "kind": a["kind"]}
+                for a in cached["areas"]
+                if a["bbox"]["x0"] <= x1 and a["bbox"]["x1"] >= x0
+                and a["bbox"]["y0"] <= y1 and a["bbox"]["y1"] >= y0
+                and a["bbox"]["z0"] <= z <= a["bbox"]["z1"]]
+        else:
+            out["areas_in_rect"] = []
+        return out
+
+    def get_column(x: int, y: int, levels: int,
+                   from_z: Optional[int]) -> dict[str, Any]:
+        from . import column as column_mod
+        from .read_safety import paused_read
+        if client is None:
+            raise ConnectionError("no DFHack client")
+        t0 = time.monotonic()
+        cached = spatial_cache.get("areas")
+        surface_z = (cached or {}).get("surface_z")
+        with rpc_lock:
+            col = paused_read(
+                client,
+                lambda: column_mod.read_column(client, x, y))
+        if from_z is None:
+            from_z = column_mod.ground_level(
+                col.get("strata") or [], surface_z)
+            if from_z is None:
+                from_z = (surface_z if surface_z is not None
+                          else col["z_count"] - 1)
+        return column_mod.column_response(
+            col, levels, from_z, surface_z=surface_z,
+            ms=int((time.monotonic() - t0) * 1000),
+            lua_ms=col.get("cost_ms", 0))
+
+    def get_overview() -> dict[str, Any]:
+        """Coarse overview from the cached scan + survey (no game
+        read). Triggers the area derivation (which runs the scan)
+        and the survey (which runs the scan) only if uncached."""
+        from . import spatial
+        areas = get_areas()
+        survey_out = get_survey()
+        scan = spatial_cache.get("scan")
+        if scan is None:
+            # The scan was derived before the cache was added (or
+            # the areas came from an older cache): re-derive once.
+            areas = get_areas(refresh=True)
+            scan = spatial_cache.get("scan")
+        from .survey import FORT_CENTRE
+        out = spatial.render_overview(scan, survey_out, FORT_CENTRE)
+        out["stale"] = bool(survey_out.get("stale"))
+        return out
 
     # -- resource survey (world-model design §5) -----------------------
     # One full scan (~25 s wall, ~16 s Lua), cached in memory; the
@@ -360,6 +456,10 @@ def create_server(
                 self._section("map", collect_section)
             elif path == "/v1/slice":
                 self._slice(query, get_slice)
+            elif path == "/v1/column":
+                self._column(query, get_column)
+            elif path == "/v1/overview":
+                self._overview(get_overview)
             elif path == "/v1/areas":
                 self._areas(query, get_areas)
             elif path.startswith("/v1/area/"):
@@ -560,8 +660,18 @@ def create_server(
             except ValueError:
                 limit = 100
             limit = max(1, min(limit, 1000))
+            # Plain-words description per unit (standing directive):
+            # the record stays compact, the description says what
+            # the unit is, where it is, and what it is doing.
+            from . import attention as attention_mod
+            cached_areas = spatial_cache.get("areas")
+            surface_z = (cached_areas or {}).get("surface_z")
+            described = [
+                dict(rec, description=attention_mod.describe_unit(
+                    rec, surface_z=surface_z))
+                for rec in out[:limit]]
             _json(self, 200, {
-                "units": out[:limit],
+                "units": described,
                 "count": len(out),
                 "citizen_count": len(citizens),
                 "total_active_units": units.get("total_active_units"),
@@ -611,7 +721,13 @@ def create_server(
                 _error(self, 503, "GAME_NOT_RUNNING",
                        f"unit probe failed: {out.get('error')}")
                 return
-            _json(self, 200, out["unit"])
+            from . import attention as attention_mod
+            cached_areas = spatial_cache.get("areas")
+            surface_z = (cached_areas or {}).get("surface_z")
+            unit = dict(out["unit"])
+            unit["description"] = attention_mod.describe_unit(
+                unit, surface_z=surface_z)
+            _json(self, 200, unit)
 
         def _section(self, section: str,
                      collect_fn: Callable[[str], dict[str, Any]]) -> None:
@@ -659,6 +775,58 @@ def create_server(
                 return
             _json(self, 200, out)
 
+        def _column(self, query: dict[str, list[str]],
+                    column_fn: Callable[..., dict[str, Any]]) -> None:
+            try:
+                x = int(query["x"][0])
+                y = int(query["y"][0])
+            except (KeyError, IndexError, ValueError):
+                _error(self, 400, "BAD_REQUEST",
+                       "column needs integer x&y params")
+                return
+            try:
+                levels = int(query.get("levels", ["5"])[0])
+            except ValueError:
+                levels = 5
+            levels = max(1, min(levels, 197))
+            from_z = None
+            if query.get("from_z"):
+                try:
+                    from_z = int(query["from_z"][0])
+                except ValueError:
+                    _error(self, 400, "BAD_REQUEST",
+                           "from_z must be an integer")
+                    return
+            try:
+                out = column_fn(x, y, levels, from_z)
+            except ValueError as exc:
+                _error(self, 400, "BAD_REQUEST", str(exc))
+                return
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "column unavailable", {"error": str(exc)})
+                return
+            _json(self, 200, out)
+
+        def _overview(self,
+                      overview_fn: Callable[[], dict[str, Any]]
+                      ) -> None:
+            try:
+                out = overview_fn()
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "overview unavailable", {"error": str(exc)})
+                return
+            _json(self, 200, out)
+
         def _areas(self, query: dict[str, list[str]],
                    areas_fn: Callable[[bool], dict[str, Any]]) -> None:
             refresh = query.get("refresh", [""])[0].lower() in (
@@ -673,6 +841,9 @@ def create_server(
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "areas unavailable", {"error": str(exc)})
                 return
+            _enrich_area_descriptions(areas)
+            from . import spatial
+            areas["summary"] = spatial.area_summary(areas["areas"])
             _json(self, 200, areas)
 
         def _area(self, path: str, query: dict[str, list[str]],
@@ -696,6 +867,7 @@ def create_server(
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "areas unavailable", {"error": str(exc)})
                 return
+            _enrich_area_descriptions(areas)
             area = spatial.resolve_area(areas["areas"], ref)
             if area is None:
                 _error(self, 404, "NOT_FOUND",

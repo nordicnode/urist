@@ -169,6 +169,13 @@ class TestBuildSurvey(unittest.TestCase):
         self.assertIn("nearest point at (5, 15, z3)", big["description"])
         self.assertIn("10 tiles away", big["description"])
 
+    def test_block_indices_for_the_overview(self):
+        # The overview needs the water/magma block sets, not just
+        # the bodies: the L-body blocks 12, 13, 15 + the pool 10;
+        # the magma pool block 0.
+        self.assertEqual(self.s["water_block_indices"], [10, 12, 13, 15])
+        self.assertEqual(self.s["magma_block_indices"], [0])
+
 
 if __name__ == "__main__":
     unittest.main()

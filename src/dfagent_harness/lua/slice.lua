@@ -99,20 +99,59 @@ local ok, err = pcall(function()
     counts[g] = (counts[g] or 0) + 1
   end
   -- Block cache: one getTileBlock per 16x16 block, not per tile.
-  local cur_bx, cur_by, cur_b = nil, nil, nil
-  local function block_at(x, y)
+  -- Keyed by (bx, by, z) so the adjacent-level counts below can
+  -- reuse the same helper.
+  local cur_bx, cur_by, cur_bz, cur_b = nil, nil, nil, nil
+  local function block_at(x, y, zz)
     local bx, by = x // 16, y // 16
-    if bx ~= cur_bx or by ~= cur_by then
-      cur_bx, cur_by = bx, by
-      cur_b = dfhack.maps.getTileBlock(bx * 16, by * 16, z)
+    if bx ~= cur_bx or by ~= cur_by or zz ~= cur_bz then
+      cur_bx, cur_by, cur_bz = bx, by, zz
+      cur_b = dfhack.maps.getTileBlock(bx * 16, by * 16, zz)
     end
     return cur_b
+  end
+  -- Coarse class counts for one z-level over the rect (the level
+  -- above / below the slice): open = a dwarf can stand there
+  -- (floor, pebbles, brook bed, ramp, stair); solid = wall,
+  -- fortification, boulder, tree, shrub, sapling; water / magma by
+  -- flow_size; hidden tiles counted separately. The agent needs to
+  -- know what is directly above and below before it digs.
+  local function count_level(zz)
+    if zz < 0 or zz >= m.z_count then return nil end
+    local c = {z = zz, open = 0, solid = 0, water = 0,
+               magma = 0, hidden = 0}
+    for y = y0, y1 do
+      for x = x0, x1 do
+        local b = block_at(x, y, zz)
+        local lx, ly = x % 16, y % 16
+        local d = b.designation[lx][ly]
+        if d.hidden then
+          c.hidden = c.hidden + 1
+        elseif d.flow_size > 0 then
+          if d.liquid_type then c.magma = c.magma + 1
+          else c.water = c.water + 1 end
+        else
+          local tt = b.tiletype[lx][ly]
+          local shape = tostring(df.tiletype_shape[
+            df.tiletype.attrs[tt].shape])
+          if shape == 'FLOOR' or shape == 'PEBBLES'
+            or shape == 'BROOK_BED' or shape == 'RAMP'
+            or shape == 'STAIR_UP' or shape == 'STAIR_DOWN'
+            or shape == 'STAIR_UPDOWN' then
+            c.open = c.open + 1
+          else
+            c.solid = c.solid + 1
+          end
+        end
+      end
+    end
+    return c
   end
   for y = y0, y1 do
     local row = {}
     for x = x0, x1 do
       local key = x .. ',' .. y
-      local b = block_at(x, y)
+      local b = block_at(x, y, z)
       local lx, ly = x % 16, y % 16
       local d = b.designation[lx][ly]
       local g
@@ -180,6 +219,8 @@ local ok, err = pcall(function()
     markers = markers,
     counts = count_list,
     hidden = hidden,
+    above = count_level(z + 1),
+    below = count_level(z - 1),
     cost_ms = math.floor((os.clock() - t0) * 1000),
   }}
 end)

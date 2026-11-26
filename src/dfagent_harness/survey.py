@@ -459,6 +459,14 @@ def build_survey(raw: dict[str, Any],
         "soil": soil, "stone": stone, "plants": plants,
         "vertical": vertical, "hazards": hazards,
         "fort_centre": list(fort),
+        # Block index sets for the coarse overview (spatial.py):
+        # one char per block needs to know which blocks hold water
+        # or magma. Small (a few hundred ints), kept alongside the
+        # bodies they came from.
+        "water_block_indices": sorted(
+            {i for w in waters for i in w["blocks"]}),
+        "magma_block_indices": sorted(
+            {i for m in magmas for i in m["blocks"]}),
         "derived_at_tick": tick,
         "scan_seconds": raw.get("scan_seconds"),
         "build_ms": int((time.monotonic() - t0) * 1000),

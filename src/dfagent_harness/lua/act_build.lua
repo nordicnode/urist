@@ -1,10 +1,11 @@
 -- act_build.lua — place a workshop via dfhack.buildings.constructBuilding.
 -- PARAMS: type (df.building_type name, e.g. 'Workshop'),
 -- subtype (e.g. 'Carpenters' — a df.workshop_type name), x, y, z,
--- width, height. (x,y,z) is the building's corner tile.
--- Filters are derived by constructBuilding from the building definition
--- (a carpenter's workshop takes one wood log); the call fails with an
--- error when no matching item is available or the tiles are not free.
+-- width, height, mat_type, mat_index (EXPLICIT material filter for
+-- the construction item — without it, constructBuilding sometimes
+-- creates the building with mat NONE and a job that can never be
+-- worked; seen live 2026-11-26 with carpenter #22). (x,y,z) is the
+-- building's corner tile.
 -- The building is created with a ConstructBuilding job; construction
 -- itself happens on game ticks (the Python side waits for it).
 -- Prints one JSON object.
@@ -22,6 +23,8 @@ local ok, err = pcall(function()
     pos = {x = PARAMS.x, y = PARAMS.y, z = PARAMS.z},
     type = btype, subtype = subtype,
     width = PARAMS.width, height = PARAMS.height,
+    material = {mat_type = PARAMS.mat_type,
+                mat_index = PARAMS.mat_index},
   }
   if not b then
     result = {ok = false, action = 'build',

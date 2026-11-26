@@ -31,13 +31,98 @@ from . import observe
 from .actions import NOBLES_SCREEN_ORDER, nobles as probe_nobles
 
 __all__ = ["appoint_noble", "create_stockpile", "set_cursor", "get_cursor",
-           "ensure_map_view", "get_focus", "df_window_id"]
+           "ensure_map_view", "get_focus", "df_window_id", "dismiss_dialog",
+           "DIALOG_KEYS", "NO_FORT_FOCI", "fort_loaded"]
 
 #: xdotool key names for the nobles/stockpile menus.
 _KEY_DELAY = 0.35
 
 #: DFHack focus string of the main fortress view.
 _MAP_FOCUS = "dwarfmode/Default"
+
+#: Modal dialogs the daemon may dismiss on its own, and the key that
+#: closes each (verified live 2026-11-26: the outpost liaison meeting
+#: opens as textviewer (greeting) then topicmeeting ("a - Finish
+#: peeking in on conversation") and freezes the tick while it is up).
+#: Anything else is left alone and logged — a wrong key on an
+#: unknown screen can do real damage (confirm a trade, abandon the
+#: fort), so only these are ever auto-dismissed.
+DIALOG_KEYS: dict[str, str] = {
+    "topicmeeting": "a",
+    "textviewer": "Return",
+    # The liaison's trade-request list ("ESC: Done" in the footer).
+    # ESC returns to the topic screen, where "a" finishes the meeting.
+    "topicmeeting_takerequests": "Escape",
+    # The trade agreement list ("ESC: Done" in the footer). All
+    # priorities are 0, so ESC agrees to supply nothing.
+    "requestagreement": "Escape",
+}
+
+
+#: Focus strings that mean no fort is loaded (title / load / movie).
+#: While the game is on one of these, the world is absent or
+#: mid-rebuild and world-state Lua reads are unsafe — verified live
+#: 2026-11-26: full collects during map load crashed DF twice
+#: (double-free abort at "Resetting textures"). The poller and the
+#: planner probe the focus first and skip the cycle while the game
+#: is on one of these; getCurFocus itself reads GUI state only.
+NO_FORT_FOCI = frozenset({"movieplayer", "title", "loadgame",
+                          "dfhack/lua"})
+
+
+def fort_loaded(focus: Optional[str]) -> bool:
+    """True when a fort is loaded (world state is safe to read)."""
+    if not focus:
+        return False
+    if focus in NO_FORT_FOCI:
+        return False
+    if focus.startswith("dfhack/lua/"):
+        return False
+    return True
+
+
+def dismiss_dialog(client: DFHackClient, display: str = ":99",
+                   timeout: float = 10.0) -> dict[str, Any]:
+    """Dismiss a known modal dialog (liaison meeting) and return to
+    the map view. Sends at most 3 keys, re-probing focus after each,
+    and stops as soon as the focus reads dwarfmode/Default. Returns
+    ``{"ok", "focus", "steps"}``; ok is False for an unknown dialog
+    (left alone) or a failed probe/keystroke.
+
+    The probe timeout is short (10s, not the usual 30s): a probe
+    slower than that means the RPC server is busy, and failing fast
+    so the daemon retries next tick beats burning 30s per probe
+    while the meeting waits.
+    """
+    wid = df_window_id(display)
+    if wid is None:
+        return {"ok": False, "focus": "no DF window", "steps": []}
+    steps: list[str] = []
+    for _ in range(3):
+        try:
+            focus = get_focus(client, timeout=timeout).get("focus")
+        except Exception as exc:  # noqa: BLE001 - probe failed
+            return {"ok": False,
+                    "focus": f"focus probe failed: {exc}", "steps": steps}
+        if focus == _MAP_FOCUS:
+            return {"ok": True, "focus": focus, "steps": steps}
+        key = DIALOG_KEYS.get(str(focus))
+        if key is None:
+            return {"ok": False, "focus": str(focus), "steps": steps}
+        try:
+            _keys(wid, display, key)
+        except subprocess.CalledProcessError as exc:
+            return {"ok": False, "focus": f"xdotool failed: {exc}",
+                    "steps": steps}
+        steps.append(f"{focus}:{key}")
+        time.sleep(0.5)
+    try:
+        focus = get_focus(client, timeout=timeout).get("focus")
+    except Exception as exc:  # noqa: BLE001 - probe failed
+        return {"ok": False, "focus": f"focus probe failed: {exc}",
+                "steps": steps}
+    return {"ok": focus == _MAP_FOCUS, "focus": str(focus),
+            "steps": steps}
 
 
 def get_focus(client: DFHackClient,

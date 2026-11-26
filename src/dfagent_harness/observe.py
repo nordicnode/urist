@@ -119,6 +119,17 @@ def run_section(client: DFHackClient, section: str,
     if not isinstance(out, dict):
         return {"ok": False, "section": section,
                 "error": f"helper returned non-object JSON: {out!r:.200}"}
+    # A helper tags its output with its section name. A reply tagged
+    # with a DIFFERENT section is the previous call's leftover (the
+    # stream went stale after a timeout) — valid JSON, wrong data.
+    # Drop the connection so the next call starts clean.
+    tag = out.get("section")
+    if isinstance(tag, str) and tag not in _LUA_PROVIDES.get(lua_file, ()):
+        client.reset()
+        return {"ok": False, "section": section,
+                "error": (f"stale reply: helper reported section "
+                          f"{tag!r}, expected one of "
+                          f"{_LUA_PROVIDES.get(lua_file, ())}")}
     return out
 
 

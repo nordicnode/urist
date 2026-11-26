@@ -137,7 +137,13 @@ class FakeGame:
             {"id": 2, "name": "Deduk Stâkudunib",
              "labors": ["CARPENTER"]},
         ]
-        self.material = {"WOOD": {"total": 3, "accessible": 3}}
+        self.material = {"WOOD": {"total": 3, "accessible": 3,
+                                  # Stand-in wood material: the real
+                                  # probe returns the first accessible
+                                  # item's mat_type/mat_index, and the
+                                  # action layer only needs a non-(-1)
+                                  # value to pass an explicit filter.
+                                  "mat_type": 0, "mat_index": 0}}
         self.spawn_jobs = True       # tier-2: game spawns FellTree/etc.
         self.complete_builds = True  # buildings finish construction
         self.build_polls = 0
@@ -292,6 +298,19 @@ class FakeGame:
             return {"ok": True, "action": "order", "mode": "remove",
                     "id": params["order_id"],
                     "job_type": gone["job_type"]}
+        if name == "probe_bldg_mat.lua":
+            target = next((b for b in self.buildings
+                           if b["id"] == params["building_id"]), None)
+            if target is None:
+                return {"ok": False,
+                        "error": "no building #"
+                        f"{params['building_id']}"}
+            return {"ok": True, "building_id": target["id"],
+                    "mat_type": target.get("mat_type", -1),
+                    "mat_index": target.get("mat_index", -1),
+                    "mat_name": None,
+                    "construction_stage":
+                        target.get("construction_stage")}
         if name == "act_build.lua":
             bid = self.next_building_id
             self.next_building_id += 1
@@ -303,7 +322,14 @@ class FakeGame:
                  "z": params["z"],
                  "center": [params["x"] + 1, params["y"] + 1, params["z"]],
                  "construction_stage": 0, "jobs": 1,
-                 "contained_items": 0})
+                 "contained_items": 0,
+                 # No material filter in the params means the real
+                 # game sometimes creates a mat-NONE building; the
+                 # mock stores -1 so the fail-fast path is exercised.
+                 "mat_type": params.get("mat_type")
+                 if params.get("mat_type") is not None else -1,
+                 "mat_index": params.get("mat_index")
+                 if params.get("mat_index") is not None else -1})
             self.jobs.append({"id": self.next_job_id,
                               "type": "ConstructBuilding",
                               "pos": [params["x"] + 1, params["y"] + 1,
@@ -362,6 +388,7 @@ class FakeClient:
         for name in ("probe_dig.lua", "act_dig.lua", "probe_plants.lua",
                      "act_plants.lua", "probe_jobs_at.lua",
                      "probe_material.lua", "probe_site.lua",
+                     "probe_bldg_mat.lua",
                      "act_order.lua", "act_build.lua", "act_labor.lua"):
             if f"-- {name}" in code:
                 return self.game.run_helper(name, params)

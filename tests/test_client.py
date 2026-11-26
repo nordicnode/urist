@@ -197,9 +197,42 @@ class TestClientAgainstMock(unittest.TestCase):
         self.assertIn("timed out", str(ctx.exception))
 
     def test_call_without_connect(self):
+        # Self-healing contract (2026-11-26): a call on a
+        # never-connected client auto-connects instead of failing —
+        # a dropped/poisoned connection must not wedge the daemon.
         client = DFHackClient("127.0.0.1", self.server.port)
+        try:
+            text = client.run_command("help")
+        finally:
+            client.quit()
+        self.assertTrue(client.connected is False)  # quit closed it
+        self.assertIsInstance(text, str)
+
+    def test_call_unreachable_raises(self):
+        # No server listening: the auto-connect itself fails.
+        client = DFHackClient("127.0.0.1", 1, timeout=1.0)
         with self.assertRaises(TransportError):
             client.run_command("help")
+
+    def test_invalid_json_resets_and_next_call_reconnects(self):
+        # A helper always prints one JSON object, so unparsable
+        # output means the stream went stale: run_lua_json raises,
+        # the socket is dropped, and the NEXT call reconnects
+        # transparently instead of reading the stale bytes again.
+        server = MockDFHackServer(lua_responses={
+            'print("not json")': "not json\n",
+            'print("{\\"ok\\": true}")': '{"ok": true}',
+        }).start()
+        self.addCleanup(server.stop)
+        client = DFHackClient("127.0.0.1", server.port, timeout=5.0)
+        client.connect()
+        with self.assertRaises(ValueError):
+            client.run_lua_json('print("not json")')
+        self.assertFalse(client.connected)
+        out = client.run_lua_json('print("{\\"ok\\": true}")')
+        self.assertEqual(out, {"ok": True})
+        self.assertTrue(client.connected)
+        client.quit()
 
     def test_double_connect_rejected(self):
         client = self._client()

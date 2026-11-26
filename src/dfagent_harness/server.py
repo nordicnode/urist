@@ -91,7 +91,10 @@ def _error(handler: BaseHTTPRequestHandler, status: int, code: str,
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
 
 
 def _json(handler: BaseHTTPRequestHandler, status: int,
@@ -101,7 +104,12 @@ def _json(handler: BaseHTTPRequestHandler, status: int,
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        # Client went away mid-response (e.g. dfh status timing
+        # out); not an error worth a traceback in the daemon log.
+        pass
 
 
 def _sse_event(seq: int, payload: dict[str, Any]) -> bytes:

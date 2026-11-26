@@ -129,6 +129,17 @@ def _summary(state: dict[str, Any]) -> dict[str, Any]:
     items = state.get("items") or {}
     citizens = units.get("citizens") or []
     summary = {
+        # Section presence: a missing section means "unknown", never
+        # "zero/absent". A failed collect must not make the planner
+        # build a second carpenter or queue a duplicate brew — the
+        # rules below skip when the section they need is absent
+        # (verified live 2026-11-26: three carpenters #15/#17/#21,
+        # one per tick whose buildings section failed).
+        "has_buildings": "buildings" in state,
+        "has_stocks": "stocks" in state,
+        "has_units": "units" in state,
+        "has_jobs": "jobs" in state,
+        "has_items": "items" in state,
         "tick": status.get("year_tick"),
         "year": status.get("year"),
         "paused": status.get("paused"),
@@ -258,11 +269,21 @@ def decide(state: dict[str, Any],
     def _blocked(key: str) -> bool:
         return key in blocked
 
+    # Section gates (see _summary): a rule that needs a section
+    # skips when that section is absent. "Unknown" is never read as
+    # "zero" or "none" — that is how the fort ended up with three
+    # carpenters.
+    has_b = s["has_buildings"]
+    has_s = s["has_stocks"]
+    has_u = s["has_units"]
+    has_j = s["has_jobs"]
+    has_i = s["has_items"]
+
     # -- 1. Threats (safety) -------------------------------------------
     dist = _nearest_hostile_distance(s)
     hostile_names = [h.get("race") or h.get("name") or "?"
                      for h in s["hostiles"]]
-    if s["hostiles"] and dist is not None:
+    if has_u and s["hostiles"] and dist is not None:
         if dist <= THREAT_CRITICAL_TILES:
             decisions.append(Decision(
                 1, "threat",
@@ -288,11 +309,12 @@ def decide(state: dict[str, Any],
     drink_warn = max(DRINK_WARN, citizens)
     drink = s["drink"]
     still = _workshop(s, "Still")
-    if drink <= DRINK_CRITICAL:
+    if has_s and has_b and drink <= DRINK_CRITICAL:
         if still is not None:
             brewable = _brewable_plants(s)
             queued = _count_jobs(s, "CustomReaction")
-            if brewable > 0 and s["barrels"] > 0 and queued == 0:
+            if has_j and brewable > 0 and s["barrels"] > 0 \
+                    and queued == 0:
                 decisions.append(Decision(
                     1, "needs", "brew drink now",
                     f"drink {drink}u (critical <= {DRINK_CRITICAL}) with "
@@ -338,8 +360,8 @@ def decide(state: dict[str, Any],
                 "build_workshop",
                 {"kind": "still", "pos": list(WORKSHOP_SITES[0])},
                 goal_key="drink:still"))
-    elif drink <= drink_warn:
-        if still is not None and _brewable_plants(s) > 0 \
+    elif has_s and has_b and drink <= drink_warn:
+        if has_j and still is not None and _brewable_plants(s) > 0 \
                 and s["barrels"] > 0 \
                 and _count_jobs(s, "CustomReaction") == 0:
             decisions.append(Decision(
@@ -353,8 +375,9 @@ def decide(state: dict[str, Any],
     food_warn = max(FOOD_WARN, citizens)
     food = s["food"]
     kitchen = _workshop(s, "Kitchen")
-    if food <= FOOD_CRITICAL:
-        if kitchen is not None and _count_jobs(s, "PrepareMeal") == 0:
+    if has_s and has_b and food <= FOOD_CRITICAL:
+        if has_j and kitchen is not None \
+                and _count_jobs(s, "PrepareMeal") == 0:
             decisions.append(Decision(
                 1, "needs", "cook a meal (food critical)",
                 f"food {food}u (critical <= {FOOD_CRITICAL}); kitchen "
@@ -370,8 +393,9 @@ def decide(state: dict[str, Any],
                 f"surface shrubs for raw food now",
                 "designate_gather", {"box": list(GATHER_BOX)},
                 goal_key="food:gather"))
-    elif food <= food_warn:
-        if kitchen is not None and _count_jobs(s, "PrepareMeal") == 0:
+    elif has_s and has_b and food <= food_warn:
+        if has_j and kitchen is not None \
+                and _count_jobs(s, "PrepareMeal") == 0:
             decisions.append(Decision(
                 3, "needs", "cook a meal (food low)",
                 f"food {food}u (warn <= {food_warn}) — top up",
@@ -410,7 +434,8 @@ def decide(state: dict[str, Any],
 
     # -- 4. Production: workshops ---------------------------------------
     carpenter = _workshop(s, "Carpenters")
-    if carpenter is None and s["wood"] >= 1 and not any(
+    if has_b and has_s and carpenter is None and s["wood"] >= 1 \
+            and not any(
             d.goal_key == "drink:still" and not _blocked(d.goal_key)
             for d in decisions):
         decisions.append(Decision(
@@ -420,7 +445,7 @@ def decide(state: dict[str, Any],
             "build_workshop",
             {"kind": "carpenter", "pos": list(WORKSHOP_SITES[1])},
             goal_key="production:carpenter"))
-    if kitchen is None and s["stone"] >= 1:
+    if has_b and has_s and kitchen is None and s["stone"] >= 1:
         decisions.append(Decision(
             4, "production", "build a kitchen",
             f"no kitchen; stone {s['stone']}u — needed to cook meals",
@@ -431,7 +456,8 @@ def decide(state: dict[str, Any],
     # -- 4b. Beds --------------------------------------------------------
     beds = s["building_summary"].get("Bed", 0)
     bed_items = s["items_by_type"].get("BED", 0)
-    if carpenter is not None and beds < s["citizens"]:
+    if has_b and has_i and carpenter is not None \
+            and beds < s["citizens"]:
         if bed_items > 0:
             # Place beds in a grid from BED_ORIGIN; find the first
             # free 1x1 the daemon will verify (site check happens in
@@ -447,7 +473,8 @@ def decide(state: dict[str, Any],
                 "build_furniture",
                 {"kind": "Bed", "pos": pos},
                 goal_key="production:bed"))
-        elif s["wood"] >= 1 and _count_jobs(s, "CustomReaction") == 0:
+        elif has_s and has_j and s["wood"] >= 1 \
+                and _count_jobs(s, "CustomReaction") == 0:
             decisions.append(Decision(
                 4, "production", "make beds at the carpenter",
                 f"{beds} beds for {s['citizens']} citizens and no bed "
@@ -458,7 +485,7 @@ def decide(state: dict[str, Any],
                 goal_key="production:make_bed"))
 
     # -- 5. Expansion: digging for stone + farm space -------------------
-    if s["stone"] == 0 and not any(
+    if has_s and s["stone"] == 0 and not any(
             d.goal_key.startswith("drink:") and not _blocked(d.goal_key)
             for d in decisions):
         decisions.append(Decision(
@@ -470,7 +497,7 @@ def decide(state: dict[str, Any],
                      DIG_STAIRS[0], DIG_STAIRS[1], DIG_STAIRS[2]],
              "mode": "down-stair"},
             goal_key="expansion:dig"))
-    if s["building_summary"].get("Stockpile", 0) == 0:
+    if has_b and s["building_summary"].get("Stockpile", 0) == 0:
         decisions.append(Decision(
             5, "expansion", "create a food stockpile",
             "no stockpile yet — food sits where it falls and rots; "
@@ -481,7 +508,8 @@ def decide(state: dict[str, Any],
     # Farm plot once a still exists and seeds are on hand (surface
     # plot first; underground when the dug room exists).
     farm_plots = s["building_summary"].get("FarmPlot", 0)
-    if farm_plots == 0 and s["seeds"] >= 5 and still is not None:
+    if has_b and has_s and farm_plots == 0 and s["seeds"] >= 5 \
+            and still is not None:
         decisions.append(Decision(
             5, "expansion", "build a farm plot",
             f"{s['seeds']} seeds in stock and no farm plot — surface "
@@ -492,7 +520,19 @@ def decide(state: dict[str, Any],
             goal_key="expansion:farm"))
 
     decisions.sort(key=lambda d: (d.priority, d.domain))
-    return [d for d in decisions if d.goal_key not in blocked]
+    # Dedup identical actions (same act + kwargs): the drink-gather
+    # and food-gather rules can both fire on the same box in one
+    # tick — running designate_gather twice is a no-op re-mark, so
+    # keep only the first (highest-priority) copy.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[Decision] = []
+    for d in decisions:
+        key = (d.action, json.dumps(d.kwargs, sort_keys=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(d)
+    return [d for d in deduped if d.goal_key not in blocked]
 
 
 # ----------------------------------------------------------------------

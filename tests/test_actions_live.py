@@ -47,17 +47,6 @@ def _game_is_up():
     return True
 
 
-def _wait_for(fn, timeout, interval=0.5):
-    deadline = time.monotonic() + timeout
-    while True:
-        value = fn()
-        if value:
-            return value
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(interval)
-
-
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestLiveActions(unittest.TestCase):
     """Verified live against the Athelunol fort (region1)."""
@@ -93,13 +82,16 @@ class TestLiveActions(unittest.TestCase):
         """Mark a building for deconstruction and wait until it is gone.
 
         Uses dfhack.buildings.deconstruct + almost_deleted (the wagon
-        vanishes a tick later, per deep-embark.lua); the game is unpaused
-        for the wait and re-paused after. Afterwards the building's
-        footprint tiles get their stale "building" occupancy cleared:
-        deconstruction does not clear it (verified live 2026-11-26 —
-        a deconstructed workshop's tiles keep occupancy.building=2 and
-        constructBuilding refuses them until the flag is cleared), so
-        without this every test run would burn one workshop site.
+        vanishes a tick later, per deep-embark.lua). The wait uses the
+        burst pattern (actions._wait_for_paused): short unpaused bursts,
+        every read while paused — the old unpause-and-poll-while-running
+        is the race that killed DF in the live suite. Afterwards the
+        building's footprint tiles get their stale "building" occupancy
+        cleared: deconstruction does not clear it (verified live
+        2026-11-26 — a deconstructed workshop's tiles keep
+        occupancy.building=2 and constructBuilding refuses them until
+        the flag is cleared), so without this every test run would burn
+        one workshop site.
         """
         target = next((b for b in self._buildings()["list"]
                        if b["id"] == building_id), None)
@@ -114,14 +106,11 @@ class TestLiveActions(unittest.TestCase):
         out = self.client.run_lua(code).strip()
         self.assertEqual(out, "DECONSTRUCT_MARKED",
                          f"deconstruct failed for #{building_id}: {out!r}")
-        actions.set_paused(self.client, False)
-        try:
-            gone = _wait_for(
-                lambda: not any(b["id"] == building_id
-                                for b in self._buildings()["list"]),
-                timeout)
-        finally:
-            actions.set_paused(self.client, True)
+        gone = actions._wait_for_paused(
+            self.client,
+            lambda: not any(b["id"] == building_id
+                            for b in self._buildings()["list"]),
+            timeout)
         self.assertTrue(gone, f"building #{building_id} did not vanish")
         # Clear the stale building occupancy on the footprint so the
         # site is buildable again (see probe_site.lua).

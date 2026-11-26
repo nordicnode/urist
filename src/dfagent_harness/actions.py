@@ -56,10 +56,9 @@ from __future__ import annotations
 
 import json
 import time
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Optional
 
 from dfhack_rpc import DFHackClient, DFHackError
 from dfhack_rpc.proto import CoreProtocol_pb2 as core
@@ -374,24 +373,49 @@ def _send_space_key(client: DFHackClient) -> None:
         time.sleep(0.05)
 
 
-@contextmanager
-def _unpaused_for_ticks(client: DFHackClient) -> Iterator[bool]:
-    """Unpause for a bounded wait, then restore the prior pause state.
+def _wait_for_paused(client: DFHackClient, predicate: Callable[[], Any],
+                     timeout: float, burst: float = 1.0) -> Any:
+    """Poll ``predicate`` until it returns a truthy value, or None.
 
-    Yields True when the game was paused on entry (so it was unpaused by
-    us and will be re-paused); yields False when the game was already
-    running (left running). Restoration runs even on failure; a restore
-    failure is raised as a verification failure (the game is left in a
-    known-reported state, never silently running).
+    Pause-before-read (the read-safety rule, world-model design §8):
+    game state is NEVER read while the game is running. The loop runs
+    in bursts: unpause briefly so the game ticks, re-pause (verified),
+    then read the predicate while paused. Repeat until the predicate
+    holds or the timeout (wall clock) expires. The entry pause state
+    is restored on exit, even on failure; a restore failure is raised
+    as a verification failure (the game is left in a known-reported
+    state, never silently running).
+
+    ``burst`` is the unpaused window per iteration in wall seconds
+    (~46 game ticks at the measured ~46 ticks/s). One second is enough
+    for a job to spawn after a designation is processed, and short
+    enough that a read never happens far from a pause. The old pattern
+    (unpause for the whole wait, polling probes every 0.25s while the
+    game ticked) is what killed DF three times in the live suite on
+    2026-11-25 — RPC reads of the jobs list while the game ticks can
+    catch a freed struct (one run ended "free(): double free detected
+    in tcache 2"). No retries of the underlying mutation — only
+    re-reads.
     """
     was_paused = get_paused(client)
-    if was_paused:
-        set_paused(client, False)
+    deadline = time.monotonic() + timeout
     try:
-        yield was_paused
-    finally:
-        if was_paused:
+        while True:
+            # Read while paused (pause first if the game was running).
+            if not get_paused(client):
+                set_paused(client, True)
+            value = predicate()
+            if value:
+                return value
+            if time.monotonic() >= deadline:
+                return None
+            # Burst: let the game tick, then loop back to the paused read.
+            set_paused(client, False)
+            time.sleep(min(burst, max(0.0, deadline - time.monotonic())))
             set_paused(client, True)
+    finally:
+        if get_paused(client) != was_paused:
+            set_paused(client, was_paused)
 
 
 def _flag_process_dig(client: DFHackClient) -> None:
@@ -447,23 +471,6 @@ def _check_box(client: DFHackClient, box: tuple[int, ...],
         raise _Fail("precondition",
                     f"box {box!r} outside map 0..{mx - 1}, 0..{my - 1}, "
                     f"0..{mz - 1}")
-
-
-def _wait_for(predicate: Callable[[], Any], timeout: float,
-              interval: float = 0.5) -> Any:
-    """Poll ``predicate`` until it returns a truthy value, or None.
-
-    Bounded: never waits past ``timeout`` seconds. No retries of the
-    underlying mutation — only re-reads.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        value = predicate()
-        if value:
-            return value
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
 
 
 # -- actions ----------------------------------------------------------------
@@ -636,8 +643,7 @@ def _plants_action(client: DFHackClient, kind: str,
                                   timeout=timeout)
                 return not cur.get("count")
 
-            with _unpaused_for_ticks(client):
-                gone = _wait_for(_jobs_gone, job_timeout, interval=0.25)
+            gone = _wait_for_paused(client, _jobs_gone, job_timeout)
             if gone:
                 remaining = []
             else:
@@ -682,9 +688,10 @@ def _plants_action(client: DFHackClient, kind: str,
             detail={"box": list(box), "kind": kind, "mark": mark,
                     "changed": 0,
                     "already": len(out.get("already") or [])})
-    # Unpause briefly and wait for a FellTree/GatherPlants job at one of
-    # the designation tiles — or for a marked plant to disappear (gathered
-    # / felled faster than the poll interval). Either proves the game saw it.
+    # Wait (burst pattern: short unpaused bursts, reads only while
+    # paused) for a FellTree/GatherPlants job at one of the designation
+    # tiles — or for a marked plant to disappear (gathered / felled
+    # faster than the poll interval). Either proves the game saw it.
     # First flag the designation for processing: without process_dig the
     # game may not scan the new designation at all (see _flag_process_dig).
     _flag_process_dig(client)
@@ -713,8 +720,7 @@ def _plants_action(client: DFHackClient, kind: str,
             return {"unmarked_plants": gone}
         return None
 
-    with _unpaused_for_ticks(client):
-        seen = _wait_for(_job_or_gone, job_timeout, interval=0.25)
+    seen = _wait_for_paused(client, _job_or_gone, job_timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     if not seen:
         return ActionResult(
@@ -889,7 +895,9 @@ def build_workshop(client: DFHackClient, kind: str,
     out = _helper_or_fail(client, "act_build.lua",
                           {"type": spec["type"], "subtype": spec["subtype"],
                            "x": pos[0], "y": pos[1], "z": pos[2],
-                           "width": width, "height": height},
+                           "width": width, "height": height,
+                           "mat_type": mat.get("mat_type"),
+                           "mat_index": mat.get("mat_index")},
                           timeout=timeout)
     building_id = out["id"]
     after_place = _read_section(client, "buildings", timeout=timeout)
@@ -899,6 +907,26 @@ def build_workshop(client: DFHackClient, kind: str,
         raise _Fail("verification",
                     f"workshop #{building_id} placed but not found in "
                     f"buildings on re-read")
+    # Fail fast on a mat-NONE building: without an assigned material
+    # the ConstructBuilding job can never be worked (carpenter #22,
+    # 2026-11-26) and the wait below would burn the whole timeout.
+    # The building's material is read back through the material probe
+    # helper (buildings.lua does not expose mat_type).
+    placed_mat = _run_helper(client, "probe_bldg_mat.lua",
+                             {"building_id": building_id}, timeout=timeout)
+    if placed_mat.get("mat_type", -1) in (None, -1):
+        return ActionResult(
+            ok=False, action="build_workshop",
+            before={"building_count": before.get("count")},
+            after={"building_count": after_place.get("count"),
+                   "building": placed},
+            reason=(f"workshop #{building_id} placed with no material "
+                    f"(mat NONE) — the game assigned no construction "
+                    f"item; deconstruct it and retry"),
+            error_kind="verification",
+            took_ms=round((time.monotonic() - started) * 1000),
+            detail={"kind": kind, "pos": list(pos),
+                    "building_id": building_id})
 
     def _construction_done() -> Any:
         cur = _read_section(client, "buildings", timeout=timeout)
@@ -914,8 +942,7 @@ def build_workshop(client: DFHackClient, kind: str,
             return {"building": b}
         return None
 
-    with _unpaused_for_ticks(client):
-        done = _wait_for(_construction_done, build_timeout, interval=2.0)
+    done = _wait_for_paused(client, _construction_done, build_timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     base = {"kind": kind, "pos": list(pos), "building_id": building_id,
             "stage_at_placement": out.get("construction_stage")}
@@ -1020,7 +1047,10 @@ def _find_citizen(units_section: dict[str, Any],
 def _wait_construction(client: DFHackClient, building_id: int,
                        build_timeout: float,
                        timeout: float = 30.0) -> dict[str, Any] | None:
-    """Wait (unpaused) for a building's ConstructBuilding job to clear.
+    """Wait for a building's ConstructBuilding job to clear.
+
+    Burst pattern: the game ticks in short unpaused bursts and every
+    read happens while paused (see _wait_for_paused).
 
     Returns ``{"building": <buildings entry>}`` when the building stands
     with no construction job left, ``{"cancelled": True}`` when the
@@ -1040,8 +1070,7 @@ def _wait_construction(client: DFHackClient, building_id: int,
             return {"building": b}
         return None
 
-    with _unpaused_for_ticks(client):
-        return _wait_for(_done, build_timeout, interval=2.0)
+    return _wait_for_paused(client, _done, build_timeout)
 
 
 def _cancel_reason(client: DFHackClient, timeout: float = 30.0) -> str:
@@ -1289,8 +1318,7 @@ def deconstruct_building(client: DFHackClient, building_id: int,
         return not any(b.get("id") == building_id
                        for b in cur.get("list") or [])
 
-    with _unpaused_for_ticks(client):
-        gone = _wait_for(_gone, wait_timeout, interval=0.5)
+    gone = _wait_for_paused(client, _gone, wait_timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     after = _read_section(client, "buildings", timeout=timeout)
     if not gone:

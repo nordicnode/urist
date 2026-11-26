@@ -38,7 +38,7 @@ from .events import (
 )
 from .observe import SECTIONS, collect, measure_fps, render_text
 from .planner import Journal, Planner, decide, state_summary
-from .ui import appoint_noble, create_stockpile
+from .ui import DIALOG_KEYS, appoint_noble, create_stockpile, dismiss_dialog
 
 __all__ = ["ACTIONS", "ActionResult", "JOB_SPECS", "act", "nobles",
            "SECTIONS", "collect", "measure_fps", "render_text",
@@ -46,4 +46,5 @@ __all__ = ["ACTIONS", "ActionResult", "JOB_SPECS", "act", "nobles",
            "collect_mandates", "install_watcher", "make_event",
            "uninstall_watcher", "watcher_status",
            "Daemon", "DaemonConfig", "Journal", "Planner", "decide",
-           "state_summary", "appoint_noble", "create_stockpile"]
+           "state_summary", "appoint_noble", "create_stockpile",
+           "dismiss_dialog", "DIALOG_KEYS"]

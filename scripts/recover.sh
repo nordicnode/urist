@@ -21,10 +21,43 @@ mkdir -p "$HARNESS/logs"
 # 1. System packages. Every one of these vanishes on VM replacement.
 #    (xvfb is listed explicitly: SETUP.md's apt lines omitted it and it
 #    only survived the last replacement because the base image had it.)
-sudo apt-get update -qq
-sudo apt-get install -y xvfb x11-apps imagemagick xdotool \
+#    Non-fatal (2026-11-26): after a cell reboot apt is locked by the
+#    system package replay for ~20 min; a locked apt must not abort
+#    the recovery — the deblibs/tools fallbacks below cover the wait.
+if ! sudo apt-get update -qq 2>/dev/null; then
+  echo "apt update failed (locked by the system replay?) — continuing with cached libs"
+fi
+if ! sudo apt-get install -y xvfb x11-apps imagemagick xdotool \
   libsdl1.2debian libsdl-image1.2 libsdl-ttf2.0-0 libgtk2.0-0t64 \
-  libglu1-mesa libgl1
+  libglu1-mesa libgl1 2>/dev/null; then
+  echo "apt install failed (locked?) — continuing with cached libs"
+fi
+
+# 1a. xdotool/scrot fallback (2026-11-26): if apt could not install
+#     them, extract the already-cached .debs into scratch/tools.
+#     Idempotent. Consumers (ui.py, shot.sh, dfh.py) resolve bare
+#     `xdotool`/`scrot` via PATH, so source scratch/tools-env.sh (or
+#     export its PATH/LD_LIBRARY_PATH) before driving the game.
+if ! command -v xdotool >/dev/null 2>&1 \
+    || ! command -v scrot >/dev/null 2>&1; then
+  TOOLS="$HARNESS/scratch/tools"
+  mkdir -p "$TOOLS"
+  for spec in "xdotool_:xdotool" "scrot_:scrot" "libxdo3_:libxdo3" \
+              "libxtst6_:libxtst6" "libimlib2t64_:libimlib2"; do
+    deb="${spec%%:*}"; dir="${spec##*:}"
+    f=$(ls /var/cache/apt/archives/${deb}*.deb 2>/dev/null | head -1)
+    if [ -n "$f" ]; then
+      dpkg-deb -x "$f" "$TOOLS/$dir" 2>/dev/null || true
+    fi
+  done
+  cat > "$TOOLS-env.sh" <<EOF
+# Sourced by callers that drive DF while apt packages are missing
+# (post-reboot, before the system replay restores them).
+export PATH="$TOOLS/xdotool/usr/bin:$TOOLS/scrot/usr/bin:\$PATH"
+export LD_LIBRARY_PATH="$TOOLS/libxdo3/usr/lib/x86_64-linux-gnu:$TOOLS/libxtst6/usr/lib/x86_64-linux-gnu:$TOOLS/libimlib2/usr/lib/x86_64-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+EOF
+  echo "xdotool/scrot missing system-wide; extracted to $TOOLS (source $TOOLS-env.sh)"
+fi
 
 # 1b. Autosave (2026-11-26): a VM replacement wiped ~2 months of play
 #     because the fort had never saved. The setting lives in d_init.txt
@@ -61,7 +94,7 @@ if ! ldconfig -p 2>/dev/null | grep -q libSDL-1.2.so.0; then
       dpkg-deb -x "$f" "$DEBLIBS/$deb" 2>/dev/null || true
     fi
   done
-  export LD_LIBRARY_PATH="$DEBLIBS/libsdl1.2debian/usr/lib/x86_64-linux-gnu:$DEBLIBS/libsdl-image1.2/usr/lib/x86_64-linux-gnu:$DEBLIBS/libsdl-ttf2.0-0/usr/lib/x86_64-linux-gnu:$DEBLIBS/libgtk2.0-0t64/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH="$DEBLIBS/libsdl1.2debian/usr/lib/x86_64-linux-gnu:$DEBLIBS/libsdl-image1.2/usr/lib/x86_64-linux-gnu:$DEBLIBS/libsdl-ttf2.0-0/usr/lib/x86_64-linux-gnu:$DEBLIBS/libgtk2.0-0t64/usr/lib/x86_64-linux-gnu:$DEBLIBS/libglu1-mesa/usr/lib/x86_64-linux-gnu:$DEBLIBS/libgl1/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   echo "libsdl missing system-wide; using extracted libs from $DEBLIBS"
 fi
 if ! pgrep -x Dwarf_Fortress >/dev/null; then

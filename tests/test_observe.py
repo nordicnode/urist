@@ -39,6 +39,10 @@ class FakeClient:
     def __init__(self, fixture):
         self.fixture = fixture
         self.lua_calls: list[str] = []
+        self.resets = 0
+
+    def reset(self):
+        self.resets += 1
 
     def get_version(self):
         return dict(self.fixture["meta"]["version"])
@@ -211,6 +215,42 @@ class TestCollectWithFakeClient(unittest.TestCase):
         self.assertIn("stocks", state)
         self.assertEqual(state["errors"],
                          [{"section": "units", "error": "kaboom"}])
+
+    def test_stale_reply_wrong_section_resets_connection(self):
+        # A reply tagged with another section is the previous call's
+        # leftover (stream went stale after a timeout): the section
+        # is dropped with a "stale reply" error and the client is
+        # reset so the next call reconnects clean.
+        class StaleClient(FakeClient):
+            def run_lua_json(self, code, timeout=None):
+                if "section = 'status'" in code:
+                    return {"ok": True, "section": "units",
+                            "units": self.fixture["units"]}
+                return super().run_lua_json(code, timeout)
+
+        client = StaleClient(load_fixture())
+        state = collect(client, sections=("status",))
+        self.assertNotIn("status", state)
+        self.assertEqual(len(state["errors"]), 1)
+        self.assertIn("stale reply", state["errors"][0]["error"])
+        self.assertEqual(client.resets, 1)
+
+    def test_invalid_json_resets_connection(self):
+        # Unparsable helper output is also a stale stream, not a
+        # helper bug: run_lua_json raises, run_section records it,
+        # and the client is reset (FakeClient raises ValueError here
+        # to mimic run_lua_json's behaviour after its own reset).
+        class GarbageClient(FakeClient):
+            def run_lua_json(self, code, timeout=None):
+                self.reset()
+                raise ValueError(
+                    "Lua output was not valid JSON: raw text: ''")
+
+        client = GarbageClient(load_fixture())
+        state = collect(client, sections=("status",))
+        self.assertNotIn("status", state)
+        self.assertEqual(len(state["errors"]), 1)
+        self.assertEqual(client.resets, 1)
 
 
 if __name__ == "__main__":

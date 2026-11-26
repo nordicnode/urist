@@ -220,6 +220,65 @@ class DecideProductionTests(unittest.TestCase):
         self.assertIn(decisions[0].domain, ("needs", "threat"))
 
 
+class DecideMissingSectionTests(unittest.TestCase):
+    """A missing section means "unknown", never "zero/absent".
+
+    Regression for the live 2026-11-26 duplicate-carpenter bug:
+    three carpenters (#15/#17/#21) were built, one per tick whose
+    buildings section failed and was read as "no carpenter".
+    """
+
+    def test_missing_buildings_section_builds_nothing(self):
+        state = load_state()
+        del state["buildings"]
+        _set_stock(state, drink_units=1, food_units=2)
+        decisions = decide(state)
+        actions = {d.action for d in decisions}
+        self.assertNotIn("build_workshop", actions)
+        self.assertNotIn("build_farm_plot", actions)
+        self.assertNotIn("ui:create_stockpile", actions)
+        self.assertNotIn("build_furniture", actions)
+        self.assertNotIn("queue_job", actions)
+        self.assertNotIn("designate_gather", actions)
+
+    def test_missing_stocks_section_skips_needs_and_production(self):
+        state = load_state()
+        del state["stocks"]
+        _add_building(state, "Workshop", "Still", bid=14)
+        _add_building(state, "Workshop", "Carpenters", bid=15)
+        _add_building(state, "Workshop", "Kitchen", bid=16)
+        state["buildings"]["summary"].append({"type": "Bed", "count": 7})
+        decisions = decide(state)
+        actions = {d.action for d in decisions}
+        self.assertNotIn("queue_job", actions)
+        self.assertNotIn("designate_gather", actions)
+        self.assertNotIn("build_workshop", actions)
+        self.assertNotIn("designate_dig", actions)
+
+    def test_missing_jobs_section_skips_queues(self):
+        state = load_state()
+        del state["jobs"]
+        _add_building(state, "Workshop", "Still", bid=14)
+        _add_building(state, "Workshop", "Carpenters", bid=15)
+        _add_building(state, "Workshop", "Kitchen", bid=16)
+        state["buildings"]["summary"].append({"type": "Bed", "count": 7})
+        _set_stock(state, drink_units=1, food_units=1, barrels=5)
+        state["stocks"]["by_material"].append(
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+             "units": 5})
+        decisions = decide(state)
+        actions = {d.action for d in decisions}
+        self.assertNotIn("queue_job", actions)
+
+    def test_missing_units_section_skips_threat(self):
+        state = load_state()
+        del state["units"]
+        decisions = decide(state)
+        domains = {d.domain for d in decisions}
+        self.assertNotIn("threat", domains)
+
+
 class StateSummaryTests(unittest.TestCase):
     def test_summary_counts(self):
         s = state_summary(load_state())

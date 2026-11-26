@@ -27,6 +27,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -152,7 +153,9 @@ def _cmd_stop(args: argparse.Namespace) -> int:
         print("dfh: no daemon running")
         return 1
     os.kill(pid, signal.SIGTERM)
-    deadline = time.time() + 20
+    # Graceful stop runs a forced quicksave first (up to ~45s for
+    # the region1 mtime check), so 20s was too short to ever succeed.
+    deadline = time.time() + 75
     while time.time() < deadline:
         try:
             os.kill(pid, 0)
@@ -161,7 +164,7 @@ def _cmd_stop(args: argparse.Namespace) -> int:
             _pid_file(state_dir).unlink(missing_ok=True)
             return 0
         time.sleep(1)
-    print(f"dfh: daemon (pid {pid}) did not stop in 20s",
+    print(f"dfh: daemon (pid {pid}) did not stop in 75s",
           file=sys.stderr)
     return 1
 
@@ -199,7 +202,17 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     daemon = Daemon(config=config, state_dir=state_dir)
 
     def _handle(signum, frame):
-        daemon.stop()
+        # Do NOT call daemon.stop() here: stop() calls
+        # server.shutdown(), which blocks until serve_forever()
+        # returns — but serve_forever() runs on this very thread
+        # (suspended inside this handler), so that deadlocks and
+        # the daemon never exits on SIGTERM. Instead just flag the
+        # stop and kick serve_forever from a helper thread; the
+        # graceful stop() runs after serve_forever() returns below.
+        daemon._stop.set()
+        if daemon.server is not None:
+            threading.Thread(target=daemon.server.shutdown,
+                             daemon=True).start()
 
     signal.signal(signal.SIGTERM, _handle)
     signal.signal(signal.SIGINT, _handle)
@@ -215,6 +228,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         return 1
     print("dfh daemon: running (Ctrl-C / SIGTERM to stop)", flush=True)
     daemon.serve_forever()
+    daemon.stop()
     print("dfh daemon: stopped", flush=True)
     return 0
 

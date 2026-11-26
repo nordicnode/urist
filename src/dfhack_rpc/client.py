@@ -167,6 +167,18 @@ class DFHackClient:
             self._sock = None
         self._bind_cache.clear()
 
+    def reset(self) -> None:
+        """Drop the connection, discarding any buffered bytes.
+
+        Call this when a reply looks stale or unparsable: after a
+        timeout mid-reply the socket can hold a partial reply, and
+        the next call would read those bytes as its own reply
+        (observed live 2026-11-26: empty TEXT, wrong-section JSON).
+        The next call reconnects transparently (see :meth:`call_raw`).
+        Idempotent.
+        """
+        self._close_socket()
+
     def __enter__(self) -> "DFHackClient":
         return self.connect()
 
@@ -233,25 +245,41 @@ class DFHackClient:
                  method: str = "") -> tuple[bytes, str]:
         """Send one request, collect TEXT, return (result_payload, text).
 
+        Self-healing: if a call fails after its request was sent
+        (timeout, I/O error, malformed reply), the socket may hold a
+        partial reply — the next call would read those stale bytes as
+        its own reply (observed live 2026-11-26: a 30s timeout
+        reading a reply header, after which every call returned
+        empty TEXT in ~300ms). The connection is therefore dropped
+        on any such failure and the next call reconnects
+        transparently. The failed call is NOT retried: its Lua may
+        already have run server-side.
+
         Raises:
             TransportError: send/recv failure, timeout, malformed reply.
             RemoteError: server answered RPC_REPLY_FAIL (code carried).
         """
-        if self._sock is None:
-            raise TransportError("not connected; call connect() first")
         if len(payload) > MAX_MESSAGE_SIZE:
             raise TransportError(
                 f"request payload {len(payload)} bytes exceeds "
                 f"max {MAX_MESSAGE_SIZE}")
         with self._lock:
+            if self._sock is None:
+                self.connect()
             if timeout is not None:
                 self._sock.settimeout(timeout)
             try:
                 self._send_all(_HEADER.pack(method_id, 0, len(payload)) + payload)
                 return self._collect_reply(method=method)
+            except BaseException:
+                self._close_socket()
+                raise
             finally:
-                if timeout is not None:
-                    self._sock.settimeout(self.timeout)
+                if timeout is not None and self._sock is not None:
+                    try:
+                        self._sock.settimeout(self.timeout)
+                    except OSError:
+                        pass
 
     def _collect_reply(self, method: str = "") -> tuple[bytes, str]:
         """Read TEXT messages until the terminal RESULT/FAIL.
@@ -392,6 +420,11 @@ class DFHackClient:
         try:
             return json.loads(text.strip())
         except json.JSONDecodeError as exc:
+            # A helper always prints exactly one JSON object, so
+            # unparsable output means the stream is stale/misaligned
+            # (a previous call's leftover reply) — drop the
+            # connection so the next call starts clean.
+            self.reset()
             raise ValueError(
                 f"Lua output was not valid JSON: {exc}; raw text: {text!r}"
             ) from exc

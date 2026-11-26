@@ -8,9 +8,16 @@
 -- footprint (DFHack walks SE from the footprint centre while the tile is
 -- trunk; the SE-most trunk tile is the same tile for single-trunk trees
 -- and a valid trunk tile for multi-trunk trees). Trunk tiles are found by
--- tiletype material TREE at the tree's z-level. Unmarking also removes any
--- FellTree/GatherPlants job at the designation tile (same as DFHack's
--- unmarkPlant), so no dwarf walks out to a tree that is no longer marked.
+-- tiletype material TREE at the tree's z-level. Unmarking clears the
+-- designation ONLY: it does NOT remove FellTree/GatherPlants jobs.
+-- dfhack.job.removeJob was removed 2026-11-25 after two live-suite runs
+-- ended in "free(): double free detected in tcache 2" — the crash
+-- reproduces when the game is unmarked through this path, and removeJob
+-- does not even take the job off the list (it returns true and the job
+-- stays listed through thousands of ticks), so the call buys nothing and
+-- risks the game. FellTree jobs never leave the list and GatherPlants
+-- jobs leave on the game's own cleanup; both are reported in
+-- remaining_jobs by the Python side rather than failed on.
 --
 -- Classification is by structure: a tree has tree_info set, a shrub has
 -- is_shrub set, and a *sapling* has neither (is_shrub=false,
@@ -78,20 +85,14 @@ local ok, err = pcall(function()
           d.dig = df.tile_dig_designation.No
           b.flags.designated = true
           changed[#changed+1] = entry
-          -- remove any FellTree/GatherPlants job at the designation tile
-          -- (save next first: removeJob mutates the list)
-          local node = df.global.world.jobs.list
-          while node ~= nil do
-            local nxt = node.next
-            local job = node.item
-            if job ~= nil
-              and (job.job_type == df.job_type.FellTree
-                or job.job_type == df.job_type.GatherPlants)
-              and job.pos.x == dx and job.pos.y == dy and job.pos.z == dz then
-              dfhack.job.removeJob(job)
-            end
-            node = nxt
-          end
+          -- Jobs are NOT removed here. dfhack.job.removeJob on a
+          -- FellTree/GatherPlants job is the documented double-free
+          -- crash path (see the header comment): it does not take the
+          -- job off the list anyway, and the game cleans up
+          -- GatherPlants jobs itself while FellTree jobs are reported
+          -- in remaining_jobs by the Python side. A dwarf can still
+          -- take a stale FellTree job if the tree is reachable; that
+          -- is the game's behaviour, not something unmarking can fix.
         else
           already[#already+1] = entry
         end

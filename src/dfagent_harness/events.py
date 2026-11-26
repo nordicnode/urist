@@ -975,9 +975,11 @@ class EventPoller:
     docs/EVENTS.md): the fast set with lite units costs ~0.12 s
     (status ~0.05 s, units_lite ~0.08 s, jobs/reports ~0.01 s each);
     with full units it would be ~0.7 s (full units alone ~0.65 s).
-    Stocks costs ~0.9 s, hence the slow cadence. Defaults (2 s fast
-    while running, 10 s while paused, 30 s slow) keep the poll duty
-    cycle near 6% running / 1% paused.
+    Stocks costs ~0.9 s, hence the slow cadence. Defaults (6 s fast
+    while running, 10 s while paused, 60 s slow) — raised from
+    2 s / 30 s on 2026-11-26 after measuring ~98% RPC server
+    saturation at the old rates (lite ~1.6 s every 2 s + planner
+    ~3 s/30 s + slow ~5 s/30 s -> queueing -> 30 s timeouts).
     """
 
     FAST_SECTIONS = ("status", "units", "jobs", "reports")
@@ -985,9 +987,9 @@ class EventPoller:
 
     def __init__(self, client: DFHackClient, bus: EventBus,
                  drainer: Optional[WatcherDrainer] = None,
-                 fast_interval: float = 2.0,
+                 fast_interval: float = 6.0,
                  paused_interval: float = 10.0,
-                 slow_interval: float = 30.0,
+                 slow_interval: float = 60.0,
                  lock: Optional[threading.RLock] = None) -> None:
         self.client = client
         self.bus = bus
@@ -1056,6 +1058,20 @@ class EventPoller:
                 pass
         started = time.time()
         try:
+            # Focus first: while the game is loading (title / load /
+            # movie) the world is absent or mid-rebuild and a full
+            # Lua collect can crash it (double-free abort, 2026-11-26
+            # x2). getCurFocus reads GUI state only, so the probe is
+            # the one call that is safe to make here. The watcher
+            # drain above is file-only and already ran.
+            from .ui import fort_loaded, get_focus
+            try:
+                probe = get_focus(self.client, timeout=10.0)
+                focus = probe.get("focus") if probe.get("ok") else None
+            except Exception:  # noqa: BLE001 - probe failure skips
+                focus = None
+            if not fort_loaded(focus):
+                return published
             sections = list(self.FAST_SECTIONS)
             now = time.time()
             slow_due = (now - self._last_slow_at) >= self.slow_interval

@@ -26,6 +26,7 @@ Lifecycle: ``dfh start`` (background, writes pid file),
 
 from __future__ import annotations
 
+import faulthandler
 import json
 import os
 import re
@@ -89,9 +90,14 @@ class DaemonConfig:
     df_dir: str = ""  # default: <repo>/third_party/df_47_05
     allow_raw_actions: bool = False
     no_auth: bool = False
-    fast_interval: float = 2.0
+    # Poll load measured 2026-11-26 (game paused): lite collect
+    # ~1.6s every 2.0s + planner ~3s/30s + slow ~5s/30s = ~98% RPC
+    # server saturation -> queueing -> 30s timeouts -> stale replies.
+    # 6s/60s cuts that to ~40%: the poller is a watcher, not a
+    # real-time feed (the planner does its own full collect).
+    fast_interval: float = 6.0
     paused_interval: float = 10.0
-    slow_interval: float = 30.0
+    slow_interval: float = 60.0
     planner_interval: float = 30.0
     planner_max_actions: int = 2
     backoff_s: float = 180.0
@@ -246,7 +252,12 @@ class Daemon:
         self._planner_thread: Optional[threading.Thread] = None
         self._loop_paused = False  # autonomous loop paused (game runs)
         self.started_at = time.time()
-        self._last_quicksave = 0.0
+        self._last_quicksave = time.time()
+        # NB: initialised to "now", not 0.0 — with 0.0 the first
+        # planner tick thinks a quicksave is ~1.7e9 s overdue and
+        # fires one immediately (observed live 2026-11-26: a save
+        # landed ~30 s after daemon start, and the game died right
+        # after it).
         self._recent_events: list[dict[str, Any]] = []
         self._goal_check_at = 0.0
 
@@ -254,6 +265,13 @@ class Daemon:
     def start(self) -> None:
         """Connect, install the watcher, start poller + planner + HTTP.
         Blocks only for the HTTP server (call :meth:`serve_forever`)."""
+        # SIGUSR1 dumps every thread's stack to stderr (daemon.log)
+        # without killing the daemon — the diagnostic for a wedged
+        # planner/poller loop (a stall leaves no other trace).
+        try:
+            faulthandler.register(signal.SIGUSR1)
+        except Exception:  # noqa: BLE001 - best-effort diagnostics
+            pass
         self.client = DFHackClient(self.config.df_host,
                                    self.config.df_port, timeout=30.0)
         self.client.connect()
@@ -355,12 +373,64 @@ class Daemon:
     def _planner_tick(self) -> None:
         if self._loop_paused or self.poller is None \
                 or self.planner is None or self.client is None:
+            print("dfh planner: tick skipped (loop paused or not "
+                  "ready)", flush=True)
             return
-        state = self.poller.last_state
-        if state is None:
+        # Focus first, before any world-state read: a full collect
+        # during map load crashed DF twice (2026-11-26, double-free
+        # abort at "Resetting textures"). The probe reads GUI state
+        # only; the collect below runs only once a fort is loaded.
+        from .ui import DIALOG_KEYS, dismiss_dialog, fort_loaded, get_focus
+        try:
+            probe = get_focus(self.client, timeout=10.0)
+            focus = probe.get("focus") if probe.get("ok") else None
+        except Exception as exc:  # noqa: BLE001 - retry next tick
+            print(f"dfh planner: focus probe failed: {exc}", flush=True)
+            return
+        if not fort_loaded(focus):
+            print(f"dfh planner: tick skipped (no fort loaded; "
+                  f"focus {focus!r})", flush=True)
+            return
+        # A modal dialog freezes the tick even when the pause flag is
+        # clear (verified live: the outpost liaison meeting left the
+        # fort at tick 225920 for 20+ minutes while the planner kept
+        # ticking). Dismiss a known dialog and skip the rest of this
+        # tick; any other non-map focus is logged (once per focus
+        # value) and also skips the tick — acting through a dialog
+        # fails or, worse, drives the wrong menu.
+        if focus != "dwarfmode/Default":
+            if focus in DIALOG_KEYS:
+                out = dismiss_dialog(self.client,
+                                     display=self.config.display)
+                self.journal.log_event(
+                    "dialog_dismissed", f"{focus} -> {out}")
+                print(f"dfh planner: dismissed {focus} dialog: {out}",
+                      flush=True)
+            elif focus != getattr(self, "_last_dialog_focus", None):
+                self._last_dialog_focus = focus
+                self.journal.log_event(
+                    "dialog_blocked",
+                    f"game on unexpected focus {focus!r}; tick skipped")
+                print(f"dfh planner: unexpected focus {focus!r}; "
+                      f"tick skipped", flush=True)
+            return
+        # The planner decides from a FULL state. The poller's
+        # last_state is a lite snapshot (fast sections only: no
+        # buildings, no stocks, no items most polls) — deciding from
+        # it hallucinates drink 0 / no workshops and re-orders a
+        # still on an occupied tile every tick. A full collect costs
+        # ~3s per 30s tick; that is the correct price.
+        try:
             with self.lock:
                 state = observe.collect(self.client)
+        except Exception as exc:  # noqa: BLE001 - poll again next tick
+            print(f"dfh planner: full collect failed: {exc}",
+                  flush=True)
+            return
         if not state.get("status"):
+            print(f"dfh planner: tick skipped (no status section); "
+                  f"errors={state.get('errors')}",
+                  flush=True)
             return
         # Threat hold: a critical threat pauses the game and the
         # planner does nothing else until it moves away.
@@ -384,10 +454,24 @@ class Daemon:
             if get_paused(self.client):
                 set_paused(self.client, False)
         manager = self._manager_present()
-        self.planner.tick(state, list(self._recent_events),
-                          manager=manager)
+        records = self.planner.tick(state, list(self._recent_events),
+                                    manager=manager)
+        print(f"dfh planner: tick {self.planner.ticks} done: "
+              f"{len(records)} decision(s), "
+              f"{sum(1 for r in records if r.get('ok'))} ok, "
+              f"game tick {state_summary(state)['tick']}",
+              flush=True)
         self._check_goals(state)
         self._quicksave_if_due()
+        # Leave the game running between ticks. Actions re-pause the
+        # game after their waits; without this the fort sits paused
+        # for the whole planner interval (observed live: two ticks
+        # 30s apart with zero ticks advanced). The threat hold above
+        # already returned early for a critical threat, so reaching
+        # here means it is safe to run.
+        with self.lock:
+            if get_paused(self.client):
+                set_paused(self.client, False)
 
     def _manager_present(self) -> Optional[bool]:
         """True when a manager is appointed, False when not, None

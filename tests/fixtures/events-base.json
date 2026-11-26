@@ -1,0 +1,2452 @@
+{
+ "meta": {
+  "schema_version": 1,
+  "collected_at": 1795659702,
+  "fps": null,
+  "fps_measured": false,
+  "version": {
+   "dwarf_fortress_version": "0.47.05",
+   "dfhack_version": "0.47.05-r8",
+   "remote_fortress_reader_version": "0.21.0"
+  },
+  "took_ms": 1810
+ },
+ "errors": [],
+ "status": {
+  "year": 306,
+  "season": "Spring",
+  "population": {
+   "total_active_units": 45,
+   "animals": 24,
+   "citizens": 7,
+   "jobless": 7,
+   "threats": 0
+  },
+  "save_dir": "region1",
+  "fort_name": "Athelunol",
+  "focus": "dwarfmode/Default",
+  "date": "306-03-22",
+  "season_index": 0,
+  "season_tick": 9313,
+  "gametype": "DWARF_MAIN",
+  "month": 3,
+  "paused": true,
+  "day": 22,
+  "year_tick": 93135
+ },
+ "units": {
+  "hostile_count": 0,
+  "citizen_count": 7,
+  "hostiles": [],
+  "citizens": [
+   {
+    "mood": -1,
+    "name": "Udil Sodelkosh",
+    "id": 15196,
+    "mood_name": "none",
+    "profession": "expedition leader",
+    "pos": [
+     18,
+     41,
+     41
+    ],
+    "age": 73.5407,
+    "goal": {
+     "type": 8,
+     "name": "Master a Skill"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "CLEAN",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "MINE",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Adequate",
+      "skill": "MINING",
+      "rating_num": 2
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "POETRY",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "SPEAKING",
+      "rating_num": 3
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "DANCE",
+      "rating_num": 1
+     },
+     {
+      "experience": 700,
+      "rating": "Competent",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SING_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 2
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -392,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 224,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -1090,
+      "need": "EatGoodMeal",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Fight",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "CauseTrouble",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeExtravagant",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "HelpSomebody",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "ThinkAbstractly",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -784,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     }
+    ],
+    "counters": {
+     "sleepiness": 24980,
+     "hunger": 34651,
+     "thirst": 12312
+    },
+    "profession_id": 0
+   },
+   {
+    "mood": -1,
+    "name": "Rimtar Stinth\u00e4dmebzuth",
+    "id": 15197,
+    "mood_name": "none",
+    "profession": "Stoneworker",
+    "pos": [
+     62,
+     6,
+     42
+    ],
+    "age": 68.7959,
+    "goal": {
+     "type": 2,
+     "name": "Be a Mother"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "ARCHITECT",
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "CLEAN",
+     "DETAIL",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "MASON",
+     "MECHANIC",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "DETAILSTONE",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "MASONRY",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "MECHANICS",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "DESIGNBUILDING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "POETRY",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "SPEAKING",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "DANCE",
+      "rating_num": 3
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 3
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "SING_MUSIC",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 1
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -509,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 226,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -1090,
+      "need": "EatGoodMeal",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Fight",
+      "level": 1
+     },
+     {
+      "focus": -486,
+      "need": "CauseTrouble",
+      "level": 1
+     },
+     {
+      "focus": -486,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "BeExtravagant",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "ThinkAbstractly",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -1018,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     }
+    ],
+    "counters": {
+     "sleepiness": 26133,
+     "hunger": 34721,
+     "thirst": 12157
+    },
+    "profession_id": 5
+   },
+   {
+    "mood": -1,
+    "name": "Mebzuth Matul\u00f2nul",
+    "id": 15198,
+    "mood_name": "none",
+    "profession": "Jeweler",
+    "pos": [
+     44,
+     9,
+     42
+    ],
+    "age": 71.5768,
+    "goal": {
+     "type": 5,
+     "name": "Craft a Masterwork"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 1,
+    "labors": [
+     "BONE_CARVE",
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "CLEAN",
+     "CUT_GEM",
+     "ENCRUST_GEM",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION",
+     "STONE_CRAFT",
+     "WOOD_CRAFT"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "CUTGEM",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "ENCRUSTGEM",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "WOODCRAFT",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "STONECRAFT",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "BONECARVE",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "POETRY",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SPEAKING",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "DANCE",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SING_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 700,
+      "rating": "Competent",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 3
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -631,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "StayOccupied",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 229,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -2180,
+      "need": "EatGoodMeal",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "Fight",
+      "level": 1
+     },
+     {
+      "focus": 396,
+      "need": "CauseTrouble",
+      "level": 1
+     },
+     {
+      "focus": 396,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeExtravagant",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AdmireArt",
+      "level": 1
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -1262,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     }
+    ],
+    "counters": {
+     "sleepiness": 26486,
+     "hunger": 35056,
+     "thirst": 11981
+    },
+    "profession_id": 20
+   },
+   {
+    "mood": -1,
+    "name": "Deduk St\u00e2kudunib",
+    "id": 15199,
+    "mood_name": "none",
+    "profession": "Woodworker",
+    "pos": [
+     53,
+     8,
+     42
+    ],
+    "age": 81.2146,
+    "goal": {
+     "type": 8,
+     "name": "Master a Skill"
+    },
+    "stress": {
+     "category": 3,
+     "level": 3
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "BOWYER",
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "CARPENTER",
+     "CLEAN",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "CARPENTRY",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "BOWYER",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "POETRY",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SPEAKING",
+      "rating_num": 2
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "DANCE",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "SING_MUSIC",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 1
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -498,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "Excitement",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 221,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -1090,
+      "need": "EatGoodMeal",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Fight",
+      "level": 1
+     },
+     {
+      "focus": 396,
+      "need": "CauseTrouble",
+      "level": 1
+     },
+     {
+      "focus": 396,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Wander",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "ThinkAbstractly",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -996,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "PrayOrMeditate",
+      "level": 1
+     }
+    ],
+    "counters": {
+     "sleepiness": 25488,
+     "hunger": 35257,
+     "thirst": 12526
+    },
+    "profession_id": 1
+   },
+   {
+    "mood": -1,
+    "name": "Dastot Mebzuthed\u00ebm",
+    "id": 15200,
+    "mood_name": "none",
+    "profession": "Fish Cleaner",
+    "pos": [
+     51,
+     13,
+     42
+    ],
+    "age": 66.7417,
+    "goal": {
+     "type": 5,
+     "name": "Craft a Masterwork"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "BUTCHER",
+     "CLEAN",
+     "CLEAN_FISH",
+     "CLOTHESMAKER",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "LEATHER",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION",
+     "TANNER",
+     "WEAVER"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "PROCESSFISH",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "BUTCHER",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "TANNER",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "WEAVING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "CLOTHESMAKING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "LEATHERWORK",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "POETRY",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SPEAKING",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "DANCE",
+      "rating_num": 2
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "SING_MUSIC",
+      "rating_num": 1
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 2
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -452,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -2180,
+      "need": "BeCreative",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 223,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -1090,
+      "need": "EatGoodMeal",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "Fight",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "CauseTrouble",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeExtravagant",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "ThinkAbstractly",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -904,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -2180,
+      "need": "UpholdTradition",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PrayOrMeditate",
+      "level": 2
+     }
+    ],
+    "counters": {
+     "sleepiness": 26252,
+     "hunger": 34851,
+     "thirst": 12374
+    },
+    "profession_id": 38
+   },
+   {
+    "mood": -1,
+    "name": "Bomrek Kadoltekkud",
+    "id": 15201,
+    "mood_name": "none",
+    "profession": "Woodcutter",
+    "pos": [
+     96,
+     97,
+     42
+    ],
+    "age": 62.7618,
+    "goal": {
+     "type": 2,
+     "name": "Be a Mother"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "BREWER",
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "BURN_WOOD",
+     "CLEAN",
+     "COOK",
+     "CUTWOOD",
+     "FEED_WATER_CIVILIANS",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "HERBALIST",
+     "LYE_MAKING",
+     "PLANT",
+     "POTASH_MAKING",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION",
+     "SMELT"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "WOODCUTTING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "BREWING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "COOK",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "PLANT",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "HERBALISM",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "SMELT",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "WOOD_BURNING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "LYE_MAKING",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "POTASH_MAKING",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "POETRY",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SPEAKING",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "DANCE",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SING_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 500,
+      "rating": "Novice",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 1
+     },
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 1
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -1090,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "AcquireObject",
+      "level": 1
+     },
+     {
+      "focus": 220,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -2180,
+      "need": "EatGoodMeal",
+      "level": 2
+     },
+     {
+      "focus": 227,
+      "need": "CauseTrouble",
+      "level": 5
+     },
+     {
+      "focus": 227,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeExtravagant",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "MakeMerry",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFamily",
+      "level": 2
+     },
+     {
+      "focus": -2180,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     },
+     {
+      "focus": 384,
+      "need": "SeeAnimal",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Wander",
+      "level": 1
+     },
+     {
+      "focus": -5450,
+      "need": "PrayOrMeditate",
+      "level": 5
+     }
+    ],
+    "counters": {
+     "sleepiness": 24189,
+     "hunger": 35670,
+     "thirst": 12630
+    },
+    "profession_id": 4
+   },
+   {
+    "mood": -1,
+    "name": "Sodel Mengdallith",
+    "id": 15202,
+    "mood_name": "none",
+    "profession": "Fisherdwarf",
+    "pos": [
+     10,
+     6,
+     42
+    ],
+    "age": 61.166,
+    "goal": {
+     "type": 4,
+     "name": "Create Great Artwork"
+    },
+    "stress": {
+     "category": 3,
+     "level": 0
+    },
+    "wound_count": 0,
+    "wounds": [],
+    "idle": true,
+    "sex": 0,
+    "labors": [
+     "BUILD_CONSTRUCTION",
+     "BUILD_ROAD",
+     "CLEAN",
+     "FEED_WATER_CIVILIANS",
+     "FISH",
+     "HANDLE_VEHICLES",
+     "HAUL_ANIMALS",
+     "HAUL_BODY",
+     "HAUL_FOOD",
+     "HAUL_FURNITURE",
+     "HAUL_ITEM",
+     "HAUL_REFUSE",
+     "HAUL_STONE",
+     "HAUL_TRADE",
+     "HAUL_WATER",
+     "HAUL_WOOD",
+     "PULL_LEVER",
+     "RECOVER_WOUNDED",
+     "REMOVE_CONSTRUCTION"
+    ],
+    "skills": [
+     {
+      "experience": 0,
+      "rating": "Novice",
+      "skill": "FISH",
+      "rating_num": 1
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "POETRY",
+      "rating_num": 2
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "SPEAKING",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "DANCE",
+      "rating_num": 2
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "MAKE_MUSIC",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "SING_MUSIC",
+      "rating_num": 2
+     },
+     {
+      "experience": 200,
+      "rating": "Competent",
+      "skill": "PLAY_KEYBOARD_INSTRUMENT",
+      "rating_num": 3
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_STRINGED_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_WIND_INSTRUMENT",
+      "rating_num": 2
+     },
+     {
+      "experience": 400,
+      "rating": "Adequate",
+      "skill": "PLAY_PERCUSSION_INSTRUMENT",
+      "rating_num": 2
+     }
+    ],
+    "race": "DWARF",
+    "needs": [
+     {
+      "focus": -452,
+      "need": "Socialize",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "StayOccupied",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "BeCreative",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Excitement",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AcquireObject",
+      "level": 2
+     },
+     {
+      "focus": 226,
+      "need": "DrinkAlcohol",
+      "level": 10
+     },
+     {
+      "focus": -1090,
+      "need": "EatGoodMeal",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "Fight",
+      "level": 1
+     },
+     {
+      "focus": 227,
+      "need": "Argue",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "BeExtravagant",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "LearnSomething",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "HelpSomebody",
+      "level": 1
+     },
+     {
+      "focus": -1090,
+      "need": "ThinkAbstractly",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "AdmireArt",
+      "level": 2
+     },
+     {
+      "focus": -5450,
+      "need": "CraftObject",
+      "level": 5
+     },
+     {
+      "focus": -904,
+      "need": "BeWithFriends",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "MartialTraining",
+      "level": 1
+     },
+     {
+      "focus": -2180,
+      "need": "PracticeSkill",
+      "level": 2
+     },
+     {
+      "focus": -1090,
+      "need": "TakeItEasy",
+      "level": 1
+     }
+    ],
+    "counters": {
+     "sleepiness": 27750,
+     "hunger": 34652,
+     "thirst": 12155
+    },
+    "profession_id": 36
+   }
+  ]
+ },
+ "stocks": {
+  "stone_stacks": 0,
+  "metal_bar_units": 0,
+  "bins": 0,
+  "drink_units": 39,
+  "wood_units": 3,
+  "food_units": 38,
+  "seeds_units": 30,
+  "metal_bar_stacks": 0,
+  "food_stacks": 8,
+  "buckets": 3,
+  "thread_units": 337,
+  "seeds_stacks": 30,
+  "drink_stacks": 12,
+  "stone_units": 0,
+  "barrels": 15,
+  "by_material": [
+   {
+    "type": "THREAD",
+    "units": 211,
+    "material": "CREATURE:SPIDER_CAVE_GIANT:SILK"
+   },
+   {
+    "type": "THREAD",
+    "units": 104,
+    "material": "CREATURE:SPIDER_CAVE:SILK"
+   },
+   {
+    "type": "DRINK",
+    "units": 17,
+    "material": "PLANT:GRASS_TAIL_PIG:DRINK"
+   },
+   {
+    "type": "THREAD",
+    "units": 17,
+    "material": "CREATURE:DEMON_13:SILK"
+   },
+   {
+    "type": "PLANT",
+    "units": 15,
+    "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL"
+   },
+   {
+    "type": "DRINK",
+    "units": 14,
+    "material": "PLANT:GRASS_WHEAT_CAVE:DRINK"
+   },
+   {
+    "type": "MEAT",
+    "units": 10,
+    "material": "CREATURE:DRUNIAN:SPLEEN"
+   },
+   {
+    "type": "DRINK",
+    "units": 8,
+    "material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:MUSHROOM_CUP_DIMPLE:SEED"
+   },
+   {
+    "type": "CLOTH",
+    "units": 5,
+    "material": "PLANT:GRASS_TAIL_PIG:THREAD"
+   },
+   {
+    "type": "THREAD",
+    "units": 5,
+    "material": "PLANT:GRASS_TAIL_PIG:THREAD"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:GRASS_WHEAT_CAVE:SEED"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:GRASS_TAIL_PIG:SEED"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:MUSHROOM_HELMET_PLUMP:SEED"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:POD_SWEET:SEED"
+   },
+   {
+    "type": "SEEDS",
+    "units": 5,
+    "material": "PLANT:BUSH_QUARRY:SEED"
+   },
+   {
+    "type": "WOOD",
+    "units": 3,
+    "material": "PLANT:DURIAN:WOOD"
+   }
+  ],
+  "category_stacks": {
+   "SEEDS": 30,
+   "ANY_EDIBLE_RAW": 8,
+   "BAR": 0,
+   "CLOTH": 5,
+   "ANY_COOKABLE": 81,
+   "ANY_DRINK": 12,
+   "ANY_GOOD_FOOD": 49,
+   "WOOD": 3
+  },
+  "wood_stacks": 3,
+  "cloth_units": 5
+ },
+ "jobs": {
+  "manager_orders": [],
+  "counts_by_type": [],
+  "list": [],
+  "manager_order_count": 0,
+  "count": 0
+ },
+ "reports": {
+  "announcements": [
+   {
+    "zoom_type": 0,
+    "text": "The weather has cleared.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 1,
+    "time": 26730,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 290,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "A snow storm has come.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 13,
+    "time": 42590,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 291,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The Stray Dog (Tame) has been found dead.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 5,
+    "duration": 0,
+    "id": 165,
+    "time": 50896,
+    "pos": [
+     29,
+     16,
+     42
+    ],
+    "type": 106,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The weather has cleared.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 166,
+    "time": 65290,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 290,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "A snow storm has come.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 167,
+    "time": 80430,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 291,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The weather has cleared.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 168,
+    "time": 88800,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 290,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   }
+  ],
+  "report_count": 168,
+  "reports": [
+   {
+    "zoom_type": 0,
+    "text": "The muskox woman releases the grip of The muskox woman's left hand from ",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 5,
+    "duration": 100,
+    "id": 149,
+    "time": 50827,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 124,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog's left rear paw.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 5,
+    "duration": 100,
+    "id": 150,
+    "time": 50827,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 124,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The muskox woman misses the stray dog!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 151,
+    "time": 50828,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 12,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog's upper body skids along the ground, bruising the muscle ",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 152,
+    "time": 50831,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "and bruising the liver!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 153,
+    "time": 50831,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The muskox woman punches the stray dog in the lower body with her right ",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 154,
+    "time": 50834,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "hand, bruising the muscle and bruising the stomach!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 155,
+    "time": 50834,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog slams into an obstacle!",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 6,
+    "duration": 100,
+    "id": 156,
+    "time": 50838,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 113,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The muskox woman punches the stray dog in the left front paw with her ",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 157,
+    "time": 50838,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "left hand, bruising the muscle!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 4,
+    "duration": 100,
+    "id": 158,
+    "time": 50838,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 38,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog stands up.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 100,
+    "id": 159,
+    "time": 50839,
+    "pos": [
+     27,
+     16,
+     42
+    ],
+    "type": 130,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog attacks the muskox woman but She jumps away!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 3,
+    "duration": 100,
+    "id": 160,
+    "time": 50841,
+    "pos": [
+     28,
+     17,
+     42
+    ],
+    "type": 11,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "Muskox Woman: I must withdraw!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": 89,
+    "unk_v40_2": 0,
+    "color": 3,
+    "duration": 100,
+    "id": 161,
+    "time": 50851,
+    "pos": [
+     29,
+     16,
+     42
+    ],
+    "type": 175,
+    "repeat_count": 0,
+    "speaker_id": 15263,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog attacks the muskox woman but She jumps away!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 3,
+    "duration": 100,
+    "id": 162,
+    "time": 50868,
+    "pos": [
+     29,
+     16,
+     42
+    ],
+    "type": 11,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "Muskox Woman: Help!  Save me!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": 89,
+    "unk_v40_2": 0,
+    "color": 3,
+    "duration": 100,
+    "id": 163,
+    "time": 50878,
+    "pos": [
+     30,
+     16,
+     42
+    ],
+    "type": 175,
+    "repeat_count": 0,
+    "speaker_id": 15263,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The stray dog misses the muskox woman!",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 3,
+    "duration": 100,
+    "id": 164,
+    "time": 50892,
+    "pos": [
+     30,
+     16,
+     42
+    ],
+    "type": 12,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The Stray Dog (Tame) has been found dead.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 5,
+    "duration": 0,
+    "id": 165,
+    "time": 50896,
+    "pos": [
+     29,
+     16,
+     42
+    ],
+    "type": 106,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The weather has cleared.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 166,
+    "time": 65290,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 290,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "A snow storm has come.",
+    "year": 306,
+    "bright": true,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 167,
+    "time": 80430,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 291,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   },
+   {
+    "zoom_type": 0,
+    "text": "The weather has cleared.",
+    "year": 306,
+    "bright": false,
+    "unk_v40_1": -1,
+    "unk_v40_2": -1,
+    "color": 7,
+    "duration": 0,
+    "id": 168,
+    "time": 88800,
+    "pos": [
+     -30000,
+     -30000,
+     -30000
+    ],
+    "type": 290,
+    "repeat_count": 0,
+    "speaker_id": -1,
+    "zoom_type2": 0
+   }
+  ],
+  "announcement_count": 6
+ },
+ "mandates": []
+}

@@ -1,0 +1,11 @@
+{"kind": "JOB_COMPLETED", "tick": 100143, "year": 306, "job_id": 42, "job_type": "Eat", "worker_id": 7, "pos": [100, 90, 42]}
+{"kind": "JOB_COMPLETED", "tick": 100211, "year": 306, "job_id": 43, "job_type": "Drink2", "worker_id": 9, "pos": [101, 90, 42]}
+{"kind": "UNIT_DEATH", "tick": 101290, "year": 306, "unit_id": 15284}
+{"kind": "REPORT", "tick": 101300, "year": 306, "index": 169, "text": "A snow storm has come.", "time": 101300, "announcement": true}
+{"kind": "UNIT_NEW_ACTIVE", "tick": 101310, "year": 306, "unit_id": 15320, "hostile": false, "name": "Bim Kereshtân", "race": "Dwarf", "pos": [95, 95, 42]}
+{"kind": "UNIT_NEW_ACTIVE", "tick": 101320, "year": 306, "unit_id": 15321, "hostile": true, "name": "Goblin thief", "race": "Goblin", "pos": [98, 102, 42]}
+{"kind": "INVASION", "tick": 101330, "year": 306, "args": ["GOBLIN"]}
+{"kind": "TICK", "tick": 101340, "year": 306}
+{"kind": "JOB_COMPLETED", "tick": 100143, "year": 306, "job_id": 42, "job_type": "Eat", "worker_id": 7, "pos": [100, 90, 42]}
+not json at all
+{"kind": "REPORT", "tick": 101350, "year": 306, "index": 170, "time": 101350}

@@ -64,8 +64,12 @@ class TestLiveObserve(unittest.TestCase):
         st = self.state["status"]
         self.assertEqual(st["fort_name"], "Athelunol")
         self.assertEqual(st["year"], 306)
-        self.assertEqual(st["population"]["citizens"], 7)
-        self.assertGreaterEqual(st["population"]["total_active_units"], 7)
+        # 7 founders at embark; migrants arrive over time (15 by
+        # 2026-11-26 after the phase-3 live runs), so only the floor
+        # is pinned — the exact count is live state, not a constant.
+        self.assertGreaterEqual(st["population"]["citizens"], 7)
+        self.assertGreaterEqual(st["population"]["total_active_units"],
+                                st["population"]["citizens"])
 
     def test_units_match_status(self):
         units = self.state["units"]

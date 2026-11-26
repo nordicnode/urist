@@ -203,8 +203,23 @@ class TestLiveActions(unittest.TestCase):
         self.assertTrue(r.ok, r.reason)
         self.assertEqual(r.before, {"total": 1, "marked": 0})
         self.assertEqual(r.after, {"total": 1, "marked": 1})
-        self.assertIn("FellTree", json.dumps(r.detail.get("job_evidence")),
-                      "no FellTree job evidence")
+        evidence = r.detail.get("job_evidence") or {}
+        if "jobs" in evidence:
+            self.assertIn("FellTree", json.dumps(evidence),
+                          "no FellTree job evidence")
+        else:
+            # The tile already carries a stale FellTree job from an
+            # earlier run, so the game processes the new designation
+            # against it (clearing the mark) instead of spawning a
+            # duplicate — evidence {"unmarked_plants": [...]}. That
+            # processing is itself proof the game saw the designation;
+            # verify the job is still listed at the tile.
+            self.assertIn("unmarked_plants", evidence,
+                          f"unexpected job evidence: {evidence!r}")
+            self.assertTrue(
+                [j for j in self._jobs()["list"]
+                 if j["type"] == "FellTree" and j["pos"] == [110, 98, 32]],
+                "no FellTree job listed at the tree's tile")
         # The tree itself must still stand: it is in an unreachable
         # cavern pocket, so no dwarf ever takes the stale FellTree job.
         r2 = actions.act(self.client, "designate_chop", box=box, mark=False)
@@ -235,22 +250,40 @@ class TestLiveActions(unittest.TestCase):
         self.assertEqual(r2.after["dig_total"], 0)
 
     def test_gather_marks_shrub_spawns_job_and_unmarks(self):
-        box = (95, 96, 42, 99, 100, 42)  # around the shrub at 97,98,42
-        r = actions.act(self.client, "designate_gather", box=box,
-                        job_timeout=90.0)
+        # Pause FIRST: the job-spawn wait only behaves while paused —
+        # if a previous run left the game unpaused, a dwarf gathers
+        # the shrub before the poll sees the job (evidence
+        # {"harvested": true}) and the assertions below go stale.
+        actions.set_paused(self.client, True)
+        box = None
+        for x, y, z in [(92, 79, 42), (70, 87, 42), (85, 44, 42),
+                        (51, 90, 42), (73, 95, 42), (59, 100, 42)]:
+            b = (x, y, z, x, y, z)
+            probe = actions.act(self.client, "designate_gather", box=b,
+                                job_timeout=90.0)
+            if probe.ok:
+                box = b
+                r = probe
+                break
+        if box is None:
+            self.skipTest("no candidate shrub tile had a shrub "
+                          "(they regrow; try again later)")
         self.assertTrue(r.ok, r.reason)
         self.assertEqual(r.before, {"total": 1, "marked": 0})
         self.assertEqual(r.after, {"total": 1, "marked": 1})
-        self.assertIn("GatherPlants",
-                      json.dumps(r.detail.get("job_evidence")),
-                      "no GatherPlants job evidence")
+        evidence = r.detail.get("job_evidence") or {}
+        harvested = bool(evidence.get("harvested"))
+        if not harvested:
+            self.assertIn("GatherPlants", json.dumps(evidence),
+                          "no GatherPlants job evidence")
         r2 = actions.act(self.client, "designate_gather", box=box,
                          mark=False)
         self.assertTrue(r2.ok, r2.reason)
-        self.assertEqual(r2.after, {"total": 1, "marked": 0})
-        # GatherPlants jobs really do leave the list (unlike FellTree):
-        # the unmark must report none remaining.
-        self.assertEqual(r2.detail.get("remaining_jobs"), [])
+        if not harvested:
+            self.assertEqual(r2.after, {"total": 1, "marked": 0})
+            # GatherPlants jobs really do leave the list (unlike
+            # FellTree): the unmark must report none remaining.
+            self.assertEqual(r2.detail.get("remaining_jobs"), [])
 
     def test_labor_toggle_roundtrip(self):
         units = collect(self.client, sections=("units",))["units"]

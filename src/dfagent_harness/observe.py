@@ -74,6 +74,7 @@ _SECTION_LUA: dict[str, str] = {
 _LUA_PROVIDES: dict[str, tuple[str, ...]] = {
     "status.lua": ("status",),
     "units.lua": ("units",),
+    "units_lite.lua": ("units",),
     "stocks.lua": ("stocks", "items"),
     "buildings.lua": ("buildings",),
     "jobs.lua": ("jobs",),
@@ -95,14 +96,21 @@ def _load_lua(name: str) -> str:
 
 
 def run_section(client: DFHackClient, section: str,
-                timeout: float = 30.0) -> dict[str, Any]:
+                timeout: float = 30.0, lite_units: bool = False
+                ) -> dict[str, Any]:
     """Run one section's Lua helper; return its parsed JSON dict.
 
     Returns ``{"ok": False, "section": ..., "error": ...}`` (never raises)
     when the helper fails or its output is not JSON — the caller records
     it under ``errors``.
+
+    ``lite_units`` swaps the full ``units.lua`` helper for the cheap
+    ``units_lite.lua`` one (same ``units`` shape, only the fields the
+    event diff detector reads). Used by the event poller's fast tick.
     """
     lua_file = _SECTION_LUA[section]
+    if lite_units and section == "units":
+        lua_file = "units_lite.lua"
     try:
         code = _load_lua(lua_file)
         out = client.run_lua_json(code, timeout=timeout)
@@ -138,13 +146,15 @@ def measure_fps(client: DFHackClient, sample_seconds: float = 1.0) -> Optional[f
 
 
 def collect(client: DFHackClient, sections: tuple[str, ...] = FAST_SECTIONS,
-            timeout: float = 30.0, fps: bool = False) -> dict[str, Any]:
+            timeout: float = 30.0, fps: bool = False,
+            lite_units: bool = False) -> dict[str, Any]:
     """Collect the requested sections into one state document.
 
     ``sections`` may contain ``"all"``. Unknown names raise ValueError.
     Always includes ``meta`` (versions, timing) and ``errors`` (possibly
     empty). Sections that fail still appear in ``errors``; the rest of
-    the document is unaffected.
+    the document is unaffected. ``lite_units`` (see :func:`run_section`)
+    uses the cheap units helper for the ``units`` section.
     """
     if "all" in sections:
         # "all" = fast sections; designations only when named explicitly.
@@ -176,10 +186,13 @@ def collect(client: DFHackClient, sections: tuple[str, ...] = FAST_SECTIONS,
     ran: dict[str, dict[str, Any]] = {}
     for section in wanted:
         lua_file = _SECTION_LUA[section]
+        if lite_units and section == "units":
+            lua_file = "units_lite.lua"
         if lua_file in ran:
             out = ran[lua_file]
         else:
-            out = run_section(client, section, timeout=timeout)
+            out = run_section(client, section, timeout=timeout,
+                              lite_units=lite_units)
             ran[lua_file] = out
         if not out.get("ok", False):
             state["errors"].append(

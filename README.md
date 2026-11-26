@@ -136,6 +136,8 @@ tests/                 unit tests plus live tests against a running fort
    that answers why things happened.
 4. A fort that plays itself for in-game years: threats, trade, strange moods,
    military, farming, and everything else fortress mode holds.
+5. An MCP server over the same API, so a Freebuff agent gets Urist as native
+   tools instead of shelling out to the CLI.
 
 ## License
 

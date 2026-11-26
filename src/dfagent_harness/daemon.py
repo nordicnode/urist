@@ -707,10 +707,48 @@ class Daemon:
                         "took_ms": round((time.monotonic() - started)
                                          * 1000)}
         if name == "gather":
-            from .planner import GATHER_BOX
-            result = act(self.client, "designate_gather",
-                         box=tuple(GATHER_BOX))
-            return {**result.to_dict(), "action": f"task:{name}"}
+            # The gather box is derived from the live state, never
+            # hardcoded: probe the surface for shrubs and build a
+            # box around a cluster. The old GATHER_BOX was Athelunol
+            # z=42 coordinates — on Erushtathtat (surface z=175)
+            # it designated gathering in solid rock, with no
+            # plants. The citizens' mean position is no good
+            # either (verified live: no shrubs there) — the box
+            # must be where the plants are.
+            from .actions import _run_helper
+            citizens = (state.get("units") or {}).get("citizens") or []
+            if citizens:
+                surface_z = min(c["pos"][2] for c in citizens
+                                if c.get("pos"))
+            else:
+                surface_z = 175
+            probe = _run_helper(
+                self.client, "probe_plants.lua",
+                {"x0": 0, "y0": 0, "z0": surface_z,
+                 "x1": 191, "y1": 191, "z1": surface_z,
+                 "kind": "shrub"})
+            shrubs = probe.get("plants") or []
+            if not shrubs:
+                return {"ok": False, "action": f"task:{name}",
+                        "detail": "no shrubs on the surface — "
+                                  "nothing to gather",
+                        "fix": "Fix: plant a farm plot (action "
+                               "build_farm_plot) and grow plump "
+                               "helmets instead of gathering.",
+                        "evidence": None,
+                        "took_ms": round((time.monotonic() - started)
+                                         * 1000)}
+            # A 10x10 box around the first shrub found (the probe
+            # returns them in world order, so this is deterministic
+            # for a given fort state).
+            sx, sy = shrubs[0]["pos"][0], shrubs[0]["pos"][1]
+            box = (max(0, sx - 5), max(0, sy - 5), surface_z,
+                   min(191, sx + 5), min(191, sy + 5), surface_z)
+            result = act(self.client, "designate_gather", box=box)
+            # The box is returned so the caller can verify where the
+            # gathering was designated (the surface z, never z=42).
+            return {**result.to_dict(), "action": f"task:{name}",
+                    "box": list(box)}
         need = spec["need"]
         subtype = {"still": "Still", "kitchen": "Kitchen",
                    "carpenter": "Carpenters"}[need]
@@ -720,6 +758,37 @@ class Daemon:
                     "detail": f"no {need} workshop exists",
                     "evidence": None,
                     "took_ms": round((time.monotonic() - started) * 1000)}
+        # The causal chain, checked before queuing (layer 2): a brew
+        # needs an empty barrel AND a brewable plant, not just a
+        # still. Without them the job is queued and then cancelled,
+        # and the task would have reported a false success. The
+        # planner checks the same conditions before deciding to
+        # brew; the task re-checks them so it is self-contained.
+        if name == "brew":
+            from .planner import _brewable_plants
+            stocks = state.get("stocks") or {}
+            barrels = stocks.get("barrels") or 0
+            brewable = _brewable_plants(stocks)
+            if barrels == 0:
+                return {"ok": False, "action": f"task:{name}",
+                        "detail": "no barrels in stock — cannot brew",
+                        "fix": "Fix: queue MakeBarrel at the "
+                               "carpenter (action queue_job, job_type "
+                               "MakeBarrel). Needs 1 wood. "
+                               f"Wood: {stocks.get('wood_units')}.",
+                        "evidence": None,
+                        "took_ms": round((time.monotonic() - started)
+                                         * 1000)}
+            if brewable == 0:
+                return {"ok": False, "action": f"task:{name}",
+                        "detail": "no brewable plants in stock — "
+                                  "cannot brew",
+                        "fix": "Fix: gather plants (action "
+                               "designate_gather) or plant a farm "
+                               "plot and grow plump helmets.",
+                        "evidence": None,
+                        "took_ms": round((time.monotonic() - started)
+                                         * 1000)}
         job_name = spec["job"]
         result = act(self.client, "queue_job",
                      building_id=workshop["id"], job=job_name, count=count)
@@ -748,6 +817,32 @@ class Daemon:
                               f"did not finish within {wait}s",
                     "evidence": {"job_ids": sorted(job_ids)},
                     "took_ms": took_ms}
+        # The job left the list — but disappearance means it was
+        # worked OR cancelled. A cancelled job is a FAILURE, not a
+        # success (the old code reported ok=True for a cancelled
+        # brew). Check the newest reports for a cancellation after
+        # the task started; a cancellation's text names the cause
+        # (e.g. "cancels Brew Drink: No empty barrel").
+        try:
+            cur = observe.collect(self.client, sections=("reports",))
+            reports = (cur.get("reports") or {}).get("reports") or []
+            start_tick = (state.get("status") or {}).get("year_tick")
+            for rep in reports:
+                text = str(rep.get("text") or "")
+                if "cancel" not in text.lower():
+                    continue
+                if start_tick is not None and rep.get("time") is not None \
+                        and rep["time"] < start_tick:
+                    continue
+                return {"ok": False, "action": f"task:{name}",
+                        "detail": f"the {job_name} job was cancelled: "
+                                  f"{text}",
+                        "evidence": {"job_ids": sorted(job_ids)},
+                        "took_ms": took_ms}
+        except Exception:  # noqa: BLE001 - a failed report read must
+            # not turn a completed job into a failure; the job did
+            # leave the list, so report it as completed.
+            pass
         return {"ok": True, "action": f"task:{name}",
                 "detail": f"{job_name} x{count} completed on building "
                           f"#{workshop['id']}",

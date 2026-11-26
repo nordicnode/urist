@@ -31,6 +31,13 @@ __all__ = [
 # An arrival stays in attention for one in-game day after its tick,
 # then drops out (it remains in the journal/event stream for history).
 ATTENTION_WINDOW_TICKS = 1200
+# A baseline arrival (already present when the first snapshot was
+# taken) can age out of the 1,200-tick window before the agent's
+# first planner tick ever sees it. Baseline arrivals stay for 7
+# in-game days (7 x 1,200 ticks) instead — long enough for the
+# planner to notice them, short enough that they still drop out of
+# attention once the fort has settled.
+BASELINE_WINDOW_TICKS = 8400
 
 
 def prettify_race(race: Optional[str]) -> str:
@@ -245,14 +252,17 @@ def build_attention(state: dict[str, Any],
                     surface_z: Optional[int] = None,
                     window_ticks: int = ATTENTION_WINDOW_TICKS
                     ) -> list[dict[str, Any]]:
-    """Build the attention list: threats first, then new arrivals.
+    """Build the attention list: threats first, then low stocks,
+    then new arrivals.
 
     ``detector`` is the poll diff (its ``arrivals`` property is the
-    record of what the agent has been told). An arrival stays in
-    attention for ``window_ticks`` after its tick, then drops out —
-    it is still in the journal. Returns items sorted P0-first:
-    {"priority", "kind", "text", "unit_id", "pos", "at_baseline",
-    "tick"} (arrivals carry their tick; threats carry none).
+    record of what the agent has been told); it may be None, in
+    which case the arrivals are skipped and only the threats +
+    stocks are reported. An arrival stays in attention for
+    ``window_ticks`` after its tick, then drops out — it is still
+    in the journal. Returns items sorted P0-first: {"priority",
+    "kind", "text", "unit_id", "pos", "at_baseline", "tick"}
+    (arrivals carry their tick; threats and stocks carry none).
     """
     items: list[dict[str, Any]] = []
     status = state.get("status") or {}
@@ -282,12 +292,46 @@ def build_attention(state: dict[str, Any],
             "unit_id": h.get("id"), "pos": pos,
             "at_baseline": False,
         })
+    # Low stocks (design §6.1: "what is wrong"): low drink/food
+    # are the fort's most common killers, and the suggestion maps
+    # them to the brew/cook tasks. The thresholds match the
+    # planner's (DRINK_WARN 20 / CRITICAL 5, FOOD_WARN 15 /
+    # CRITICAL 5). These need no detector — they come straight
+    # from the state.
+    stocks = state.get("stocks") or {}
+    for key, label, warn, crit in (
+            ("drink_units", "Drink", 20, 5),
+            ("food_units", "Food", 15, 5)):
+        n = stocks.get(key)
+        if not isinstance(n, int):
+            continue
+        if n <= crit:
+            items.append({
+                "priority": 1, "kind": f"low_{label.lower()}",
+                "text": f"{label} is CRITICAL: {n} units left. "
+                        f"The fort will run out in days.",
+                "unit_id": None, "pos": None,
+                "at_baseline": False,
+            })
+        elif n <= warn:
+            items.append({
+                "priority": 2, "kind": f"low_{label.lower()}",
+                "text": f"{label} is low: {n} units left.",
+                "unit_id": None, "pos": None,
+                "at_baseline": False,
+            })
     # New arrivals (priority 2 for visitors and near wildlife, 3 for
     # the rest): from the detector's record, inside the window.
-    for rec in detector.arrivals:
+    # Baseline arrivals get the long window (7 in-game days): they
+    # were already present at the first snapshot, and the agent's
+    # first planner tick may come much later than the 1,200-tick
+    # (one-day) window.
+    for rec in (detector.arrivals if detector is not None else []):
         tick = rec.get("tick")
+        window = (BASELINE_WINDOW_TICKS if rec.get("at_baseline")
+                  else window_ticks)
         if (isinstance(now_tick, int) and isinstance(tick, int)
-                and now_tick - tick > window_ticks):
+                and now_tick - tick > window):
             continue
         data = rec.get("data") or {}
         severity = "warning" if data.get("kind") == "visitor" else \

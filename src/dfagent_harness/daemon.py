@@ -52,6 +52,7 @@ from .events import (
 )
 from .planner import Journal, Planner, state_summary
 from .server import create_server
+from .store import Store, diagnose_death
 from .ui import appoint_noble as ui_appoint_noble
 from .ui import create_stockpile as ui_create_stockpile
 
@@ -247,6 +248,11 @@ class Daemon:
         self.poller: Optional[EventPoller] = None
         self.planner: Optional[Planner] = None
         self.journal = Journal(self.state_dir / "journal.db")
+        # Milestone 5: the State Store (world.db) — the world
+        # model's system of record, alongside journal.db. One
+        # Store per daemon; the HTTP server reuses it (daemon.store).
+        self.store = Store(self.state_dir / "world.db")
+        self._deaths_recorded: set[int] = set()
         self.server = None
         self._stop = threading.Event()
         self._planner_thread: Optional[threading.Thread] = None
@@ -353,6 +359,7 @@ class Daemon:
                 pass
         self.journal.log_event("daemon_stopped", "graceful")
         self.journal.close()
+        self.store.close()
 
     # -- event memory ----------------------------------------------------
     def _remember_event(self, event: dict[str, Any]) -> None:
@@ -448,6 +455,13 @@ class Daemon:
                   f"errors={state.get('errors')}",
                   flush=True)
             return
+        # Milestone 5: the per-tick assembled snapshot (design §6)
+        # — built from this tick's full paused collect, diffed
+        # against the Store, trends + unit history sampled once per
+        # in-game day, deaths recorded from UNIT_DEATH events. The
+        # snapshot is the observation record the agent decides from;
+        # its token count is logged so the budget is visible.
+        self._record_snapshot(state)
         # Threat hold: a critical threat pauses the game and the
         # planner does nothing else until it moves away.
         summary = state_summary(state)
@@ -491,6 +505,54 @@ class Daemon:
         with self.lock:
             if get_paused(self.client):
                 set_paused(self.client, False)
+
+    def _record_snapshot(self, state: dict[str, Any]) -> None:
+        """Build the per-tick assembled snapshot (milestone 5) and
+        record it in the State Store: diff baselines, daily trend +
+        unit-history samples, and deaths from the recent UNIT_DEATH
+        events. Areas + survey come from the server's CACHE only —
+        a tick never triggers a scan. Failures are logged, never
+        fatal to the tick."""
+        from .assembler import assemble, sample_daily
+        areas = None
+        survey_data = None
+        cache = getattr(self.server, "spatial_cache", None) \
+            if self.server is not None else None
+        if cache:
+            areas = cache.get("areas")
+            survey_data = cache.get("survey")
+        detector = self.poller.detector if self.poller is not None \
+            else None
+        try:
+            snap = assemble(state, store=self.store,
+                            detector=detector, areas=areas,
+                            survey=survey_data)
+        except Exception as exc:  # noqa: BLE001 - never kill the tick
+            self.journal.log_event("snapshot_error",
+                                   f"assemble failed: {exc}")
+            return
+        sample_daily(state, self.store)
+        tick = (state.get("status") or {}).get("year_tick")
+        reports = (state.get("reports") or {}).get("announcements") \
+            or []
+        for ev in self._recent_events:
+            if ev.get("kind") != "unit_death":
+                continue
+            uid = (ev.get("data") or {}).get("unit_id")
+            if not isinstance(uid, int) \
+                    or uid in self._deaths_recorded:
+                continue
+            self._deaths_recorded.add(uid)
+            dtick = ev.get("tick") if isinstance(ev.get("tick"), int) \
+                else (tick or 0)
+            history = self.store.unit_history(uid)
+            cause, ref = diagnose_death(uid, history, reports)
+            self.store.record_death(dtick, uid, cause, ref)
+        self.journal.log_event(
+            "snapshot",
+            f"tick {tick}: {snap['tokens']} tokens, "
+            f"cuts={','.join(snap['cuts']) or 'none'}",
+            tick=tick if isinstance(tick, int) else None)
 
     def _manager_present(self) -> Optional[bool]:
         """True when a manager is appointed, False when not, None

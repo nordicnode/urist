@@ -10,6 +10,10 @@ Routes:
 * ``GET /v1/health`` — liveness, no auth required.
 * ``GET /v1/state`` — full snapshot (poller snapshot when fresh,
   else a fresh collect).
+* ``GET /v1/snapshot`` — the per-tick assembled snapshot
+  (world-model design §6): full paused collect folded through the
+  Context Assembler with the Store (diffing + trends) and the
+  poller's detector (attention). Areas + survey from cache only.
 * ``GET /v1/status`` — compact status (population, stocks, threats).
 * ``GET /v1/units``, ``/v1/unit/{id}``, ``/v1/buildings``,
   ``/v1/jobs``, ``/v1/items``, ``/v1/reports``, ``/v1/map``,
@@ -199,6 +203,17 @@ def create_server(
             return paused_read(
                 client,
                 lambda: observe.collect(client, sections=(section,)))
+
+    # The State Store (world-model design §5). The daemon owns one
+    # (daemon.store); a standalone server (no daemon) gets its own
+    # lazily, so the snapshot route works without the daemon.
+    _store_holder: dict[str, Any] = {"store": None}
+
+    def _default_store() -> Any:
+        if _store_holder["store"] is None:
+            from .store import Store, default_world_db_path
+            _store_holder["store"] = Store(default_world_db_path())
+        return _store_holder["store"]
 
     # -- spatial model (world-model design §3) -------------------------
     # Areas + the connectivity graph are derived once from a full
@@ -470,6 +485,8 @@ def create_server(
                 self._survey(query, get_survey)
             elif path == "/v1/attention":
                 self._attention()
+            elif path == "/v1/snapshot":
+                self._snapshot()
             elif path == "/v1/cursor":
                 self._cursor()
             elif path == "/v1/events":
@@ -1015,6 +1032,49 @@ def create_server(
                 "cost": {"tokens": estimate_tokens(text),
                          "ms": int((time.monotonic() - t0) * 1000)}})
 
+        def _snapshot(self) -> None:
+            # The per-tick assembled snapshot (world-model design
+            # §6): a FULL paused collect folded through the Context
+            # Assembler with the Store (diffing + trends) and the
+            # poller's detector (attention). Areas + survey come from
+            # the CACHE only — a snapshot never triggers a scan
+            # (~10 s areas / ~25 s survey). Needs the game client.
+            from . import assembler, observe
+            from .read_safety import ReadRefused, paused_read
+            if client is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "no DFHack client")
+                return
+            t0 = time.monotonic()
+            try:
+                with rpc_lock:
+                    state = paused_read(
+                        client, lambda: observe.collect(client))
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "snapshot collect failed", {"error": str(exc)})
+                return
+            store = (daemon.store if daemon is not None
+                     and getattr(daemon, "store", None) is not None
+                     else _default_store())
+            detector = poller.detector if poller is not None else None
+            try:
+                snap = assembler.assemble(
+                    state, store=store, detector=detector,
+                    areas=spatial_cache.get("areas"),
+                    survey=spatial_cache.get("survey"))
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "SNAPSHOT_FAILED",
+                       "assembler failed", {"error": str(exc)})
+                return
+            snap["cost"] = {"tokens": snap["tokens"],
+                            "ms": int((time.monotonic() - t0) * 1000)}
+            _json(self, 200, snap)
+
         def _cursor(self) -> None:
             if client is None:
                 _error(self, 503, "GAME_NOT_RUNNING",
@@ -1395,6 +1455,10 @@ def create_server(
 
     server = ThreadingHTTPServer((host, port), Handler)
     server.daemon_threads = True
+    # The spatial cache (areas + survey) is exposed on the server so
+    # the daemon can fold the cached areas/survey into its per-tick
+    # snapshot without triggering a scan.
+    server.spatial_cache = spatial_cache
     return server
 
 

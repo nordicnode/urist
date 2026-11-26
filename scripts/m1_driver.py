@@ -540,7 +540,18 @@ class M1Driver:
                     return 2
                 # A failed model call ends the TICK, not the run:
                 # advance the clock a little and try again.
-                self._advance_clock(tick + self.args.window, tick)
+                try:
+                    self._advance_clock(tick + self.args.window, tick)
+                except Exception as exc:
+                    # DF died mid-run (observed 2026-11-26: the
+                    # driver crashed with an unhandled RuntimeError
+                    # from _advance_clock when DF died). A dead game
+                    # ends the RUN cleanly (exit 1); the finally in
+                    # main() still re-pauses best-effort.
+                    self._log("run_end",
+                              reason="game unreachable during clock "
+                                     f"advance: {exc}")
+                    return 1
                 continue
             # Split queries from real actions; queries run first and
             # their results join the next prompt.
@@ -612,7 +623,15 @@ class M1Driver:
                                   error=str(exc)[:300])
                         self.last_action_results.append(
                             f"{a['action']} -> ERROR: {str(exc)[:250]}")
-            self._advance_clock(tick + self.args.window, tick)
+            try:
+                self._advance_clock(tick + self.args.window, tick)
+            except Exception as exc:
+                # Same as the model-failure branch above: a DF death
+                # ends the run cleanly, never crashes the driver.
+                self._log("run_end",
+                          reason="game unreachable during clock "
+                                 f"advance: {exc}")
+                return 1
         # unreachable
         return 0
 

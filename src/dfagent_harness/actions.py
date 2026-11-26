@@ -974,6 +974,11 @@ def build_workshop(client: DFHackClient, kind: str,
     taken from the newest announcement when one matches.
     """
     started = time.monotonic()
+    # Normalize the kind: the model reads "Still" from the catalog's
+    # subtype and passes it capitalised; the registry keys are
+    # lowercase. Accept any case (M1, 2026-11-26: the model failed
+    # the still build twice on 'Still' vs 'still').
+    kind = str(kind).strip().lower()
     spec = WORKSHOP_CATALOG.get(kind)
     if spec is None:
         raise _Fail("precondition",

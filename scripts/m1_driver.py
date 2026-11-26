@@ -513,7 +513,7 @@ class M1Driver:
               flush=True)
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
-                  date=(snap0.get("sections") or {}).get("status", "")[:80])
+                  date=snap0.get("date"))
         while True:
             self.tick_no += 1
             if (self.args.max_ticks and

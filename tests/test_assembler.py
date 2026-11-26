@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness import assembler  # noqa: E402
-from dfagent_harness.assembler import (TokenAccountant, assemble,  # noqa: E402
+from dfagent_harness.assembler import (TokenAccountant, _buildings,  # noqa: E402
+                                       _stocks, assemble,
                                        sample_daily, suggest)
 from dfagent_harness.store import Store, TICKS_PER_DAY  # noqa: E402
 
@@ -306,6 +307,61 @@ class TestSuggest(unittest.TestCase):
 
     def test_nothing_urgent_no_suggestion(self):
         self.assertIsNone(suggest(_state(), []))
+
+
+class TestBuildingsAndStocksVisibility(unittest.TestCase):
+    # Mikey, 2026-11-26: M1 ticks 1 and 4 burned idle ticks asking
+    # what the single existing building is, and by tick 6 three
+    # brewers were enabled without ever checking whether a Still
+    # existed. The snapshot must surface the workshops (subtype +
+    # state) and the brewable plant count directly.
+    def test_buildings_names_workshop_subtype_and_still_none(self):
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 1},
+                        {"type": "Bed", "count": 10}],
+            "list": [{"id": 7, "type": "Workshop",
+                      "subtype": "Carpenters",
+                      "construction_stage": 3}]})
+        text, _short = _buildings(st)
+        self.assertIn("Carpenters (built)", text)
+        self.assertIn("Still: none", text)
+        self.assertIn("Bed x10", text)
+        self.assertNotIn("Workshop x", text)
+
+    def test_buildings_names_still_when_present(self):
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 2}],
+            "list": [{"id": 7, "type": "Workshop",
+                      "subtype": "Carpenters",
+                      "construction_stage": 3},
+                     {"id": 8, "type": "Workshop",
+                      "subtype": "Still",
+                      "construction_stage": 1}]})
+        text, _short = _buildings(st)
+        self.assertIn("Carpenters (built)", text)
+        self.assertIn("Still (under construction)", text)
+        self.assertNotIn("Still: none", text)
+
+    def test_stocks_head_line_has_brewable_plants(self):
+        st = _state()
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["by_material"] = [
+            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+             "units": 12},
+            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+             "units": 5},
+            {"material": "wood", "units": 211}]
+        text, _short = _stocks(st, None, 0)
+        # Only the DRINK material counts; STRUCTURAL does not.
+        self.assertIn("brewable plants 12", text.split("\n")[0])
+
+    def test_assemble_carries_calendar_date(self):
+        # The M1 driver's start_tick log took "date" from the
+        # status section text ("Population: ...") — the wrong line.
+        # The snapshot carries the calendar date as a field.
+        snap = assemble(_state(), store=None, detector=_Detector())
+        self.assertEqual(snap["date"], "125-06-02")
+        self.assertNotIn("Population", snap["date"])
 
 
 class TestSampleDaily(unittest.TestCase):

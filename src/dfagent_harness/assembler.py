@@ -226,6 +226,11 @@ def _stocks(state: dict[str, Any], store: Optional[Store],
                        ("wood", wood), ("stone", stone)):
         if val is not None:
             head.append(f"{label} {val}")
+    # Brewable plants, in the head line so it survives compaction:
+    # the model needs the count to decide about brewing without a
+    # query turn (M1 tick 6: three brewers enabled, no brew queued,
+    # no check of whether plants existed to brew).
+    head.append(f"brewable plants {_brewable_plants(stocks)}")
     lines.append("Stocks: " + (", ".join(head) if head else "none")
                  + ".")
     # Burn rates + days-remaining from the Store's trends. The
@@ -355,10 +360,46 @@ def _buildings(state: dict[str, Any]) -> tuple[str, str]:
     lst = buildings.get("list") or []
     if not summary and not lst:
         return "Buildings: none.", "0 buildings"
-    lines = ["Buildings: " + ", ".join(
-        f"{e.get('type')} x{e.get('count')}" for e in summary[:12])
-        + "."]
+    # Workshops by subtype with state. The model must be able to
+    # tell a Carpenter's from a Still without spending a query
+    # turn: M1 ticks 1 and 4 burned idle ticks asking what the
+    # single existing building is, and by tick 6 three brewers
+    # were enabled without ever checking whether a Still existed.
+    # construction_stage >= 2 is built (the live Carpenter's is 3;
+    # the fake's completed build is 2); 0/1 is under construction.
+    # The Still is named explicitly when absent, so the model never
+    # has to guess whether brewing is possible.
+    workshops = [b for b in lst if b.get("type") == "Workshop"]
+    parts: list[str] = []
+    for b in workshops:
+        sub = b.get("subtype") or "?"
+        stage = b.get("construction_stage")
+        state_txt = ("under construction"
+                     if isinstance(stage, int) and stage < 2
+                     else "built")
+        parts.append(f"{sub} ({state_txt})")
+    if not any(b.get("subtype") == "Still" for b in workshops):
+        parts.append("Still: none")
+    # Other building types as counts (workshops are listed above,
+    # so the Workshop summary count is not repeated).
+    for e in [e for e in summary if e.get("type") != "Workshop"][:12]:
+        parts.append(f"{e.get('type')} x{e.get('count')}")
+    lines = ["Buildings: " + ", ".join(parts) + "."]
     return "\n".join(lines), f"{len(lst)} buildings"
+
+
+def _brewable_plants(stocks: dict[str, Any]) -> int:
+    """Brewable plant units in stock: PLANT items whose material
+    has a DRINK product (by_material entries like
+    PLANT:MUSHROOM_HELMET_PLUMP:DRINK). Same rule as the planner's
+    _brewable_plants; surfaced in the snapshot so the model can
+    decide about brewing without a query turn."""
+    total = 0
+    for e in stocks.get("by_material") or []:
+        mat = str(e.get("material") or "")
+        if mat.startswith("PLANT:") and mat.endswith(":DRINK"):
+            total += int(e.get("units") or 0)
+    return total
 
 
 def _jobs(state: dict[str, Any]) -> tuple[str, str]:
@@ -680,6 +721,11 @@ def assemble(state: dict[str, Any],
         "tokens": tokens,
         "wire_tokens": acct.wire_count(text),
         "tick": tick,
+        # The in-game calendar date (e.g. "125-04-01"), as a field:
+        # the M1 driver used to take it from the status section
+        # text, which starts with "Population: ..." — the wrong
+        # line (2026-11-26). A section's text is never a date.
+        "date": (status.get("date") or "unknown date"),
         "cuts": cuts,
         "suggestion": suggestion,
         "cost": {"tokens": tokens,

@@ -507,6 +507,10 @@ def create_server(
                 self._wiki(query)
             elif path.startswith("/v1/wiki/"):
                 self._wiki_page(path)
+            elif path == "/v1/catalog":
+                self._catalog()
+            elif path.startswith("/v1/catalog/"):
+                self._catalog_one(path)
             elif path == "/v1/goals":
                 self._goals_list()
             elif path.startswith("/v1/goals/"):
@@ -1267,6 +1271,33 @@ def create_server(
                 _error(self, 503, "WIKI_UNAVAILABLE", str(exc))
                 return
             _json(self, 200, result)
+
+        # -- action catalog (GOAL.md step 5, layer 1) ------------------
+        def _catalog(self) -> None:
+            # The self-describing catalog: every action, its
+            # parameters, its constraints, an example call. Built
+            # from the code, so it cannot drift from what the
+            # harness actually does. No game read — it works even
+            # with the game down.
+            from . import catalog as catalog_mod
+            _json(self, 200, catalog_mod.catalog())
+
+        def _catalog_one(self, path: str) -> None:
+            # One action's description, by name.
+            name = path[len("/v1/catalog/"):]
+            if not name or "/" in name:
+                _error(self, 400, "BAD_REQUEST",
+                       "an action name has no '/' in it")
+                return
+            from . import catalog as catalog_mod
+            desc = catalog_mod.describe(name)
+            if desc is None:
+                from .actions import ACTIONS
+                _error(self, 404, "UNKNOWN_ACTION",
+                       f"no action named {name!r} — choose from: "
+                       f"{', '.join(sorted(ACTIONS))}")
+                return
+            _json(self, 200, desc)
 
         # -- goals ------------------------------------------------------
         def _goals_list(self) -> None:

@@ -225,6 +225,21 @@ def _find_workshop(state: dict[str, Any],
     return None
 
 
+def _fort_centre(areas: dict[str, Any]) -> Optional[tuple[int, int]]:
+    """The fort centre: the Surface area's bbox centre (the embark
+    centre, where the wagon lands). NOT the median citizen position
+    — the citizens scatter and the median drifts to the map edge
+    (verified live: median (53, 9) while the fort is at (97, 97))."""
+    for a in areas.get("areas") or []:
+        if a.get("kind") == "surface":
+            b = a.get("bbox") or {}
+            if "x0" in b and "x1" in b and "y0" in b and "y1" in b:
+                return ((b["x0"] + b["x1"]) // 2,
+                        (b["y0"] + b["y1"]) // 2)
+            return None
+    return None
+
+
 class Daemon:
     """Owns the RPC connection, the poller, the planner, the journal
     and the HTTP server. One instance per process."""
@@ -490,7 +505,9 @@ class Daemon:
         manager = self._manager_present()
         records = self.planner.tick(
             state, list(self._recent_events),
-            manager=manager, dig_site=self._derive_dig_site(state))
+            manager=manager, dig_site=self._derive_dig_site(state),
+            sites=self._derive_sites(state),
+            gather_box=self._derive_gather_box(state))
         print(f"dfh planner: tick {self.planner.ticks} done: "
               f"{len(records)} decision(s), "
               f"{sum(1 for r in records if r.get('ok'))} ok, "
@@ -591,18 +608,114 @@ class Daemon:
         surface_z = areas.get("surface_z")
         if not isinstance(surface_z, int):
             return None
-        citizens = (state.get("units") or {}).get("citizens") or []
-        positions = [c.get("pos") for c in citizens
-                     if isinstance(c, dict) and c.get("pos")]
-        if not positions:
+        # The fort centre is the Surface area's bbox centre (the
+        # embark centre, where the wagon lands) — NOT the median
+        # citizen position. The citizens scatter (gathering, fishing)
+        # and the median drifts to the map edge: verified live, the
+        # median was (53, 9) while the fort is at (97, 97), and the
+        # workshop sites derived from it landed on WALL tiles at
+        # y=0. The bbox centre is stable and correct.
+        centre = _fort_centre(areas)
+        if centre is None:
             return None
-        xs = sorted(p[0] for p in positions)
-        ys = sorted(p[1] for p in positions)
-        centre = (xs[len(xs) // 2], ys[len(ys) // 2])
         try:
             return digging.derive_dig_site(areas, centre, surface_z)
         except Exception:  # noqa: BLE001 - no site is "no dig"
             return None
+
+    def _derive_sites(self, state: dict[str, Any]
+                      ) -> Optional[dict[str, Any]]:
+        """The planner's workshop/bed/farm/stockpile sites, derived
+        from the areas (never hardcoded): the Surface area + the
+        fort centre (the Surface bbox centre) + the surface z.
+        Returns None when the areas are not cached yet — the planner
+        then falls back to the module constants (Athelunol z=42),
+        which are the wrong fort; the fallback is only for the
+        offline tests, and the daemon logs it so it is visible.
+        Failures are None, never fatal to the tick."""
+        from . import sites as sites_mod
+        cache = getattr(self.server, "spatial_cache", None) \
+            if self.server is not None else None
+        areas = cache.get("areas") if cache else None
+        if not areas:
+            return None
+        surface_z = areas.get("surface_z")
+        if not isinstance(surface_z, int):
+            return None
+        centre = _fort_centre(areas)
+        if centre is None:
+            return None
+        # The workshop sites must be searched for, not assumed: the
+        # surface is hilly, so fixed offsets land on WALL/RAMP/
+        # BOULDER (verified live: all 8 fixed candidates around
+        # (95, 95) were unbuildable). Render a slice at the surface
+        # z and one above, find the 3x3 floor rects nearest the
+        # fort centre, and verify each with probe_site (plants,
+        # units, stale occupancy). A slice is one Lua call per
+        # level; the probes are ~50 ms each, bounded to 8.
+        from . import sites as sites_mod
+        from .actions import _run_helper
+        from .spatial import render_slice
+        rects: list[tuple[int, int, int]] = []
+        cx, cy = centre
+        for z in (surface_z, surface_z + 1):
+            if rects:
+                break
+            try:
+                sl = render_slice(
+                    self.client, max(0, cx - 20), max(0, cy - 20), z,
+                    min(191, cx + 20), min(191, cy + 20))
+            except Exception:  # noqa: BLE001 - no slice is no rects
+                continue
+            grid = sl.get("grid") or []
+            if not grid:
+                continue
+            for pos in sites_mod.find_free_rects(
+                    grid, max(0, cx - 20), max(0, cy - 20), z,
+                    centre=centre):
+                try:
+                    probe = _run_helper(
+                        self.client, "probe_site.lua",
+                        {"x": pos[0], "y": pos[1], "z": pos[2],
+                         "width": 3, "height": 3})
+                except Exception:  # noqa: BLE001 - a failed probe
+                    continue  # is not a free site
+                if probe.get("free"):
+                    rects.append(pos)
+                if len(rects) >= 8:
+                    break
+        try:
+            return sites_mod.derive_sites(areas, centre, surface_z,
+                                          floor_rects=rects)
+        except Exception:  # noqa: BLE001 - no sites is "no build"
+            return None
+
+    def _derive_gather_box(self, state: dict[str, Any]
+                           ) -> Optional[tuple[int, ...]]:
+        """The planner's gather box, derived from a shrub probe on
+        the surface (never the hardcoded GATHER_BOX). Returns None
+        when there are no shrubs or the probe fails — the planner
+        then falls back to GATHER_BOX. A paused read, no game time
+        advances."""
+        from .actions import _run_helper
+        citizens = (state.get("units") or {}).get("citizens") or []
+        if not citizens:
+            return None
+        surface_z = min(c["pos"][2] for c in citizens if c.get("pos"))
+        try:
+            probe = _run_helper(
+                self.client, "probe_plants.lua",
+                {"x0": 0, "y0": 0, "z0": surface_z,
+                 "x1": 191, "y1": 191, "z1": surface_z,
+                 "kind": "shrub"})
+        except Exception:  # noqa: BLE001 - no box is "no gather"
+            return None
+        shrubs = probe.get("plants") or []
+        if not shrubs:
+            return None
+        sx, sy = shrubs[0]["pos"][0], shrubs[0]["pos"][1]
+        return (max(0, sx - 5), max(0, sy - 5), surface_z,
+                min(191, sx + 5), min(191, sy + 5), surface_z)
 
     def _manager_present(self) -> Optional[bool]:
         """True when a manager is appointed, False when not, None

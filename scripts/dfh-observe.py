@@ -26,6 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness import SECTIONS, collect, render_text  # noqa: E402
+from dfagent_harness.observe import measure_fps  # noqa: E402
+from dfagent_harness.read_safety import ReadRefused, paused_read  # noqa: E402
 from dfhack_rpc import DFHackClient, DFHackError  # noqa: E402
 
 
@@ -67,8 +69,28 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with DFHackClient(args.host, args.port,
                           timeout=args.timeout) as client:
-            state = collect(client, sections=args.section,
-                            timeout=args.timeout, fps=args.fps)
+            # Read safety (world-model design §8): the section dump
+            # runs only while the game is verified paused. --fps is
+            # the exception: it measures the tick counter while the
+            # game runs (single-value reads, explicitly opt-in), so
+            # it is measured first, in the game's entry state, and
+            # the gated collect runs with fps=False.
+            fps_value = None
+            if args.fps:
+                fps_value = measure_fps(client)
+            state = paused_read(
+                client,
+                lambda: collect(client, sections=args.section,
+                                timeout=args.timeout, fps=False))
+            if args.fps:
+                state.setdefault("meta", {})["fps"] = (
+                    round(fps_value, 1) if fps_value is not None else None)
+                state["meta"]["fps_measured"] = fps_value is not None
+    except ReadRefused as exc:
+        print(json.dumps({"ok": False, "error": f"read refused: {exc}",
+                          "host": args.host, "port": args.port},
+                         indent=2), file=sys.stderr)
+        return 1
     except DFHackError as exc:
         print(json.dumps({"ok": False, "error": str(exc),
                           "host": args.host, "port": args.port},

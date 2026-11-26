@@ -53,6 +53,7 @@ from dfhack_rpc.proto import RemoteFortressReader_pb2 as rfr
 from .actions import JOB_SPECS, act, get_paused, set_paused
 from .events import EventBus, EventPoller
 from .planner import state_summary
+from .read_safety import ReadRefused
 
 __all__ = ["create_server", "run_server", "HEALTH_PATH", "KEYSYMS"]
 
@@ -155,15 +156,23 @@ def create_server(
         if client is None:
             raise ConnectionError("no DFHack client and no poller state")
         from . import observe
+        from .read_safety import paused_read
         with rpc_lock:
-            return observe.collect(client)
+            # Read safety (world-model design §8): pause (verified),
+            # read, restore the prior pause state. A refused read
+            # surfaces as a 503 (outcome unknown), never a read
+            # while running.
+            return paused_read(client, lambda: observe.collect(client))
 
     def collect_section(section: str) -> dict[str, Any]:
         from . import observe
+        from .read_safety import paused_read
         if client is None:
             raise ConnectionError("no DFHack client")
         with rpc_lock:
-            return observe.collect(client, sections=(section,))
+            return paused_read(
+                client,
+                lambda: observe.collect(client, sections=(section,)))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -311,6 +320,12 @@ def create_server(
                    ) -> None:
             try:
                 state = get_state_fn()
+            except ReadRefused as exc:
+                # Read safety: pause could not be verified, so the
+                # read was refused (outcome unknown). 503, retryable.
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001 - game down, etc.
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "DFHack RPC is not reachable or state is "
@@ -323,6 +338,10 @@ def create_server(
                     ) -> None:
             try:
                 state = get_state_fn()
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "DFHack RPC is not reachable",
@@ -349,6 +368,10 @@ def create_server(
                    get_state_fn: Callable[[], dict[str, Any]]) -> None:
             try:
                 state = get_state_fn()
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "DFHack RPC is not reachable",
@@ -377,6 +400,10 @@ def create_server(
                 return
             try:
                 state = get_state_fn()
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "DFHack RPC is not reachable",
@@ -398,6 +425,10 @@ def create_server(
                      collect_fn: Callable[[str], dict[str, Any]]) -> None:
             try:
                 state = collect_fn(section)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "GAME_NOT_RUNNING",
                        f"section {section!r} unavailable",

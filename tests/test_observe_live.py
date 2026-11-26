@@ -46,6 +46,11 @@ class TestLiveObserve(unittest.TestCase):
     def setUpClass(cls):
         cls.client = DFHackClient(HOST, PORT, timeout=30.0)
         cls.client.connect()
+        # Read safety (world-model design §8): the suite runs paused;
+        # pause (verified) before the collect so no section is read
+        # while the game ticks.
+        from dfagent_harness.actions import set_paused
+        set_paused(cls.client, True)
         cls.state = collect(cls.client)
 
     @classmethod

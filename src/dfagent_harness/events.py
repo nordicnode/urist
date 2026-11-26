@@ -338,6 +338,29 @@ class DiffDetector:
         events.extend(self._diff_mandates(state, tick, year))
         return events
 
+    def note_pause(self, paused: bool) -> Optional[dict[str, Any]]:
+        """Record a pause-flag change observed without a full collect.
+
+        The poller reads the pause flag (a single RFR GetPauseState
+        call, safe while running) and reports it here, so pause
+        toggles are still detected while the full collect is skipped
+        (read safety, design §8). Updates the baseline's paused flag
+        in place, so the next full detect() diffs from the true value
+        instead of re-firing or missing the return transition.
+        Returns the pause event, or None when nothing changed or
+        there is no baseline yet.
+        """
+        if self._prev is None:
+            return None
+        prev_status = self._prev.get("status") or {}
+        if prev_status.get("paused") == paused:
+            return None
+        # Keep the baseline current (in place: _prev is the last
+        # collected state, shared with the poller's last_state, so
+        # the poll interval picker also sees the true pause state).
+        self._prev.setdefault("status", {})["paused"] = paused
+        return make_event("pause", "notice", {"paused": paused})
+
     # -- baselines ------------------------------------------------------
     def _baseline_reports(self, state: dict[str, Any]) -> None:
         reports = state.get("reports") or {}
@@ -1071,6 +1094,26 @@ class EventPoller:
             except Exception:  # noqa: BLE001 - probe failure skips
                 focus = None
             if not fort_loaded(focus):
+                return published
+            # Read safety (world-model design §8): the poller must
+            # NOT read world state while the game is running. While
+            # running it drains only the watcher JSONL (file reads,
+            # above) and skips the collect; the diff-based derived
+            # events then run at the next paused read (the planner
+            # tick's collect). P0 events still arrive via the watcher
+            # drain. The poller never pauses the game itself — it
+            # collects only when the game is already paused.
+            # One exception: the pause flag itself is a single RFR
+            # read (safe while running), and the detector is told
+            # about a toggle so pause events still fire live and the
+            # baseline stays true for the next full diff.
+            from .actions import get_paused
+            if not get_paused(self.client):
+                event = self.detector.note_pause(False)
+                if event is not None:
+                    stamped = self.bus.publish(event)
+                    if stamped is not None:
+                        published.append(stamped)
                 return published
             sections = list(self.FAST_SECTIONS)
             now = time.time()

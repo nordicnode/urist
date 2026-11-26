@@ -1381,8 +1381,26 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
             f"unknown action {name!r} (choose from "
             f"{', '.join(sorted(ACTIONS))})")
     started = time.monotonic()
+    # Read safety (world-model design §8): the whole action runs
+    # under the pause-before-read gate. The action's read-backs
+    # (_read_section) and probe helpers (_run_helper: probe_site,
+    # probe_plants, probe_material, ...) all read game structures,
+    # so they must happen while the game is verified paused. The
+    # gate pauses first (if running) and restores the entry pause
+    # state afterwards; the action's own _wait_for_paused bursts nest
+    # inside it (they restore to paused, which is what the gate
+    # established). A refused read fails the action as "transport"
+    # (outcome unknown), never reads while running.
+    # Deferred import: read_safety imports from this module.
+    from .read_safety import ReadRefused, paused_read
     try:
-        result = fn(client, **kwargs)
+        result = paused_read(client, lambda: fn(client, **kwargs))
+    except ReadRefused as exc:
+        result = ActionResult(
+            ok=False, action=name,
+            reason=f"read refused: {exc}",
+            error_kind="transport",
+            took_ms=round((time.monotonic() - started) * 1000))
     except _Fail as exc:
         result = ActionResult(
             ok=False, action=name, reason=exc.reason,

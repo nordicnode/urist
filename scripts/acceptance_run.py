@@ -36,6 +36,7 @@ from dfagent_harness.acceptance import (  # noqa: E402
     evaluate_all,
 )
 from dfagent_harness.observe import collect  # noqa: E402
+from dfagent_harness.read_safety import paused_read  # noqa: E402
 from dfhack_rpc import DFHackClient  # noqa: E402
 
 HARNESS = Path(__file__).resolve().parent.parent
@@ -44,7 +45,11 @@ DAEMON_URL = "http://127.0.0.1:8765"
 
 
 def snapshot(client) -> dict:
-    s = collect(client)
+    # Read safety (world-model design §8): the snapshot runs only
+    # while the game is verified paused (pause, read, restore). A
+    # snapshot is a few seconds of pause in a run measured in
+    # minutes; that is the correct price for not reading live state.
+    s = paused_read(client, lambda: collect(client))
     st = s["status"]
     units = s["units"]
     citizens = {c["id"]: c for c in units.get("citizens", [])}

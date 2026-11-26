@@ -420,9 +420,25 @@ class Daemon:
         # it hallucinates drink 0 / no workshops and re-orders a
         # still on an occupied tile every tick. A full collect costs
         # ~3s per 30s tick; that is the correct price.
+        # Read safety (world-model design §8): no world-state read
+        # while the game is running. Pause (verified) BEFORE the full
+        # collect and stay paused through the whole tick — decide and
+        # act happen while paused (the actions re-pause after their
+        # own bursts). The game is unpaused only at the end of the
+        # tick, below. A refused read (pause unverifiable) skips the
+        # tick; the outcome is unknown, never read while running.
         try:
             with self.lock:
-                state = observe.collect(self.client)
+                from .read_safety import ReadRefused, paused_read
+                try:
+                    state = paused_read(
+                        self.client,
+                        lambda: observe.collect(self.client),
+                        restore=False)
+                except ReadRefused as exc:
+                    print(f"dfh planner: read refused: {exc}",
+                          flush=True)
+                    return
         except Exception as exc:  # noqa: BLE001 - poll again next tick
             print(f"dfh planner: full collect failed: {exc}",
                   flush=True)
@@ -448,11 +464,14 @@ class Daemon:
                     f"hostile {dist} tiles from a citizen; game held "
                     f"paused", tick=summary["tick"])
                 return
-        # Otherwise the game should be running for the planner to
-        # have anything to do.
-        with self.lock:
-            if get_paused(self.client):
-                set_paused(self.client, False)
+        # The tick stays paused through decide and act (read safety):
+        # _manager_present reads noble assignments and planner.tick
+        # runs verified actions, and both must see the game paused.
+        # The old code unpaused here so the planner "had anything to
+        # do", but the actions drive the clock themselves in bursts
+        # (actions._wait_for_paused), and unpausing before the noble
+        # probe read assignments while the game ticked. The game is
+        # unpaused only at the end of the tick, below.
         manager = self._manager_present()
         records = self.planner.tick(state, list(self._recent_events),
                                     manager=manager)
@@ -560,8 +579,21 @@ class Daemon:
                     "detail": "daemon has no DFHack client",
                     "evidence": None,
                     "took_ms": 0}
+        # Read safety (world-model design §8): pause (verified)
+        # before the initial collect; a refused read fails the task
+        # (outcome unknown), never reads while running.
         with self.lock:
-            state = observe.collect(self.client)
+            from .read_safety import ReadRefused, paused_read
+            try:
+                state = paused_read(
+                    self.client,
+                    lambda: observe.collect(self.client))
+            except ReadRefused as exc:
+                return {"ok": False, "action": f"task:{name}",
+                        "detail": f"read refused: {exc}",
+                        "evidence": None,
+                        "took_ms": round((time.monotonic() - started)
+                                         * 1000)}
         if name == "gather":
             from .planner import GATHER_BOX
             result = act(self.client, "designate_gather",
@@ -582,19 +614,22 @@ class Daemon:
         if not result.ok:
             return {**result.to_dict(), "action": f"task:{name}"}
         job_ids = set(result.detail.get("job_ids") or [])
-        deadline = time.monotonic() + wait
-        done: Optional[dict[str, Any]] = None
-        while time.monotonic() < deadline:
-            time.sleep(5)
-            with self.lock:
-                cur = observe.collect(self.client, sections=("jobs",))
+        # Read safety (world-model design §8): the job-completion
+        # wait reads the jobs list, so it uses the burst pattern
+        # (actions._wait_for_paused) — unpause briefly, pause
+        # (verified), read while paused — never a 5s sleep + a read
+        # while the game ticks.
+        from .actions import _wait_for_paused
+
+        def _jobs_done() -> bool:
+            cur = observe.collect(self.client, sections=("jobs",))
             live = {j.get("id") for j in
                     (cur.get("jobs") or {}).get("list") or []}
-            if not (job_ids & live):
-                done = {"completed": True}
-                break
+            return not (job_ids & live)
+
+        finished = _wait_for_paused(self.client, _jobs_done, wait)
         took_ms = round((time.monotonic() - started) * 1000)
-        if done is None:
+        if not finished:
             return {"ok": False, "action": f"task:{name}",
                     "detail": f"queued {job_name} x{count} on "
                               f"building #{workshop['id']} but the job "

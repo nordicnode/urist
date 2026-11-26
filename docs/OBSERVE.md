@@ -30,9 +30,19 @@ Exit 0 on success (even if individual sections fail — see `errors`).
 Exit 1 with a JSON error on stderr when the game is not reachable.
 Exit 2 for bad flags (e.g. unknown `--section`).
 
-The game does not need to be paused; the dump reads live state. It is
-safe to run while unpaused, but a snapshot taken while running may span
-a tick boundary (dates/ticks can differ between sections by a tick).
+**Read safety (world-model design §8): the dump runs only while
+the game is verified paused.** Every read goes through the
+pause-before-read gate (`dfagent_harness.read_safety.paused_read`):
+pause (verified), read, restore the prior pause state. If pause
+cannot be verified the read is refused ("outcome unknown"), never
+performed while running. The earlier claim that the dump "is safe
+to run while unpaused" is **retracted** — it is contradicted by the
+three DF deaths of 2026-11-25 (one ended `free(): double free
+detected in tcache 2`), when RPC reads of game structures while the
+game ticked caught a freed struct. While running, the harness
+listens (the eventful watcher writes a file); while paused, it reads
+(RPC). The `--fps` flag is the one exception: it measures the tick
+counter while the game runs (single-value reads, explicitly opt-in).
 
 ## How it works
 

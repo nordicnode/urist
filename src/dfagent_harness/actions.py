@@ -221,6 +221,11 @@ class ActionResult:
     detail: dict[str, Any] = field(default_factory=dict)
     took_ms: int = 0
     mechanism: str = "lua"
+    # Failure diagnosis (GOAL.md step 5, layer 4): the fix for a
+    # failed action, in plain words (the corrective catalog action
+    # + what it needs). None when the action succeeded or the cause
+    # is not recognised.
+    fix: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -233,6 +238,7 @@ class ActionResult:
             "detail": self.detail,
             "took_ms": self.took_ms,
             "mechanism": self.mechanism,
+            "fix": self.fix,
         }
 
 
@@ -1469,12 +1475,20 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
     state). Transport failures are reported as ``error_kind="transport"``
     with ``ok=False``; the outcome is unknown and the caller must re-read
     state before retrying.
+
+    ``state`` (an observe state, popped from kwargs and NOT forwarded
+    to the action) lets a failed action carry its fix (GOAL.md step 5,
+    layer 4): the corrective catalog action + what it needs, with the
+    current numbers. Without it the result has no fix.
     """
     fn = ACTIONS.get(name)
     if fn is None:
         raise ValueError(
             f"unknown action {name!r} (choose from "
             f"{', '.join(sorted(ACTIONS))})")
+    # The observe state, for failure diagnosis only — never forwarded
+    # to the action function (it takes only its own parameters).
+    state = kwargs.pop("state", None)
     started = time.monotonic()
     # Read safety (world-model design §8): the whole action runs
     # under the pause-before-read gate. The action's read-backs
@@ -1508,4 +1522,12 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
             reason=f"transport failure: {exc}",
             error_kind="transport",
             took_ms=round((time.monotonic() - started) * 1000))
+    # Failure diagnosis (GOAL.md step 5, layer 4): a failed action
+    # carries its fix (the corrective action + what it needs), so the
+    # agent never repeats it with the same approach. No state, no
+    # fix — the result stands on its reason alone.
+    if not result.ok and state is not None:
+        from .diagnose import diagnose_failure
+        result.fix = diagnose_failure(
+            name, result.reason, result.error_kind, state)
     return result

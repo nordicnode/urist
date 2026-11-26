@@ -792,9 +792,15 @@ class Planner:
                     executed += 1
                 continue
             started = time.monotonic()
-            result = act(self.client, d.action, **d.kwargs)
+            result = act(self.client, d.action, state=state, **d.kwargs)
             took_ms = round((time.monotonic() - started) * 1000)
-            self._record(d, tick, year, result.ok, result.reason, now,
+            # The recorded result carries the fix (layer 4) so the
+            # journal shows cause AND fix, and the loop detector can
+            # see whether the next attempt changed approach.
+            recorded = result.reason
+            if result.fix:
+                recorded = f"{result.reason} {result.fix}"
+            self._record(d, tick, year, result.ok, recorded, now,
                          records, took_ms=took_ms)
             self._last_attempt[d.goal_key] = now
             if result.ok:

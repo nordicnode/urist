@@ -117,7 +117,12 @@ class TestLiveEntities(unittest.TestCase):
 
     def test_citizens_and_livestock_present(self):
         u = self._fresh_units()
-        self.assertEqual(u["citizen_count"], 7)
+        # The embark party was 7; migrants arrive over time (the
+        # first wave brought it to 10 on 2026-11-26), so the count
+        # is a floor, not an exact number — and it must match the
+        # list length.
+        self.assertGreaterEqual(u["citizen_count"], 7)
+        self.assertEqual(u["citizen_count"], len(u["citizens"]))
         self.assertGreater(u["livestock_count"], 0)
         self.assertEqual(u["hostile_count"], 0)
         # Visitors may arrive mid-suite (a troll did on 2026-11-26);

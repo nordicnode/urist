@@ -141,6 +141,111 @@ class TestDiffDetectorCitizens(unittest.TestCase):
         self.assertEqual(self.det.detect(copy.deepcopy(s2)), [])
 
 
+class TestDiffDetectorArrivals(unittest.TestCase):
+    """New-arrival alerts (troll gap, 2026-11-26): a visitor in the
+    caverns fired nothing — the watcher drops non-hostile
+    UNIT_NEW_ACTIVE and the diff only covered citizens and hostiles.
+    The diff now covers wildlife / visitors / livestock, and the
+    baseline surfaces what is already here instead of silencing it.
+    """
+
+    def setUp(self):
+        self.det = ev.DiffDetector()
+        self.base = load_base()
+
+    @staticmethod
+    def _add_unit(state, key, **rec):
+        state["units"].setdefault(key, []).append(rec)
+        return state
+
+    def _troll(self):
+        return {"id": 5490, "name": "Troll", "race": "TROLL",
+                "pos": [148, 65, 123], "kind": "visitor",
+                "role": "visitor"}
+
+    def test_visitor_arrival_fires_warning(self):
+        self.det.detect(self.base)
+        s2 = copy.deepcopy(self.base)
+        self._add_unit(s2, "visitors", **self._troll())
+        found = self.det.detect(s2)
+        self.assertEqual(types(found), ["new_arrival"])
+        e = found[0]
+        self.assertEqual(e["severity"], "warning")
+        self.assertEqual(e["data"]["unit_id"], 5490)
+        self.assertEqual(e["data"]["race"], "TROLL")
+        self.assertEqual(e["data"]["kind"], "visitor")
+        self.assertEqual(e["data"]["pos"], [148, 65, 123])
+        self.assertFalse(e["data"]["at_baseline"])
+        self.assertEqual(len(self.det.arrivals), 1)
+
+    def test_wildlife_severity_by_distance(self):
+        self.det.detect(self.base)
+        s2 = copy.deepcopy(self.base)
+        self._add_unit(s2, "wildlife", id=7001, name="Crundle",
+                       race="CRUNDLE", pos=[120, 88, 174],
+                       kind="wildlife", role="wild",
+                       dist_nearest_citizen=50)
+        found = self.det.detect(s2)
+        self.assertEqual(found[0]["severity"], "info")
+        s3 = copy.deepcopy(s2)
+        self._add_unit(s3, "wildlife", id=7002, name="Crundle",
+                       race="CRUNDLE", pos=[100, 97, 175],
+                       kind="wildlife", role="wild",
+                       dist_nearest_citizen=5)
+        found = self.det.detect(s3)
+        self.assertEqual(types(found), ["new_arrival"])
+        self.assertEqual(found[0]["severity"], "warning")
+        self.assertEqual(found[0]["data"]["dist_nearest_citizen"], 5)
+
+    def test_livestock_arrival_is_info(self):
+        self.det.detect(self.base)
+        s2 = copy.deepcopy(self.base)
+        self._add_unit(s2, "livestock", id=8001, name="Dog",
+                       race="DOG", pos=[97, 97, 175],
+                       kind="livestock", role="pet")
+        found = self.det.detect(s2)
+        self.assertEqual(types(found), ["new_arrival"])
+        self.assertEqual(found[0]["severity"], "info")
+
+    def test_baseline_surfaces_present_units(self):
+        # Units already here when monitoring starts are surfaced,
+        # not silently baselined away — the agent has not seen them.
+        s0 = copy.deepcopy(self.base)
+        self._add_unit(s0, "visitors", **self._troll())
+        self._add_unit(s0, "wildlife", id=7001, name="Crundle",
+                       race="CRUNDLE", pos=[120, 88, 174],
+                       kind="wildlife", role="wild",
+                       dist_nearest_citizen=50)
+        self._add_unit(s0, "livestock", id=8001, name="Dog",
+                       race="DOG", pos=[97, 97, 175],
+                       kind="livestock", role="pet")
+        found = self.det.detect(s0)
+        self.assertEqual(types(found), ["new_arrival"] * 3)
+        self.assertTrue(all(e["data"]["at_baseline"] for e in found))
+        self.assertEqual({e["data"]["kind"] for e in found},
+                         {"visitor", "wildlife", "livestock"})
+        self.assertNotIn("citizen_new", types(found))
+        self.assertEqual(len(self.det.arrivals), 3)
+        # No re-fire on a no-change second snapshot.
+        self.assertEqual(self.det.detect(copy.deepcopy(s0)), [])
+
+    def test_arrival_re_fires_after_leaving(self):
+        self.det.detect(self.base)
+        s2 = copy.deepcopy(self.base)
+        self._add_unit(s2, "visitors", **self._troll())
+        found = self.det.detect(s2)
+        self.assertEqual(len(found), 1)
+        key1 = found[0].get("dedup_key")
+        # The troll leaves: no event (departures are silent; the
+        # attention window expires instead).
+        self.assertEqual(self.det.detect(copy.deepcopy(self.base)), [])
+        # The troll returns: a fresh arrival with a fresh dedup key
+        # (the bus drops keys it has seen, so a re-fire must re-key).
+        found = self.det.detect(s2)
+        self.assertEqual(types(found), ["new_arrival"])
+        self.assertNotEqual(found[0].get("dedup_key"), key1)
+
+
 class TestDiffDetectorDistress(unittest.TestCase):
     def setUp(self):
         self.det = ev.DiffDetector()

@@ -24,6 +24,9 @@ Routes:
   — resource survey (design §5; one ~25 s scan, cached, stale
   after one season; ``?refresh=1`` re-scans). Plain-words summary,
   nearest of each kind, vertical facts, hazards, cost.
+* ``GET /v1/attention`` — the attention section (design §6.1):
+  threats first, then new arrivals, in plain words with position
+  and class. Needs the daemon's poller (its diff record).
 * ``GET /v1/journal`` — daemon journal (decisions + events).
 * ``GET /v1/goals``, ``POST /v1/goals``, ``GET /v1/goals/{id}``,
   ``POST /v1/goals/{id}/done``, ``DELETE /v1/goals/{id}``.
@@ -365,6 +368,8 @@ def create_server(
                 self._path(query, get_areas)
             elif path == "/v1/survey":
                 self._survey(query, get_survey)
+            elif path == "/v1/attention":
+                self._attention()
             elif path == "/v1/cursor":
                 self._cursor()
             elif path == "/v1/events":
@@ -805,6 +810,38 @@ def create_server(
                 "stale": out.get("stale"),
                 "derived_at_tick": out.get("derived_at_tick"),
                 "cost": out.get("cost")})
+
+        def _attention(self) -> None:
+            # The attention section (world-model design §6.1): what is
+            # wrong, what changed, what needs acting on — built live
+            # from the poller's detector (its arrival record) and last
+            # state. Needs the daemon's poller; without it there is no
+            # diff record to build from. The surface level comes from
+            # the CACHED areas only (never triggers a scan).
+            from . import attention as attention_mod
+            from .spatial import estimate_tokens
+            if poller is None:
+                _error(self, 503, "NO_POLLER",
+                       "attention needs the daemon's poller (its diff "
+                       "record); this server was started without one")
+                return
+            state = poller.last_state
+            if state is None:
+                _error(self, 503, "NO_POLLER_STATE",
+                       "the poller has not collected a state yet")
+                return
+            t0 = time.monotonic()
+            cached_areas = spatial_cache.get("areas")
+            surface_z = (cached_areas or {}).get("surface_z")
+            items = attention_mod.build_attention(
+                state, poller.detector, surface_z=surface_z)
+            text = "\n".join(it["text"] for it in items)
+            _json(self, 200, {
+                "attention": items,
+                "tick": (state.get("status") or {}).get("year_tick"),
+                "source": "poller detector arrivals + last state",
+                "cost": {"tokens": estimate_tokens(text),
+                         "ms": int((time.monotonic() - t0) * 1000)}})
 
         def _cursor(self) -> None:
             if client is None:

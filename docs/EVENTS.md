@@ -85,6 +85,7 @@ unknown future types.
 | `season_change` + | info | poll | `{season, season_index}` | Season index changed — observed live (Spring→Summer, tick 100800) |
 | `citizen_new` | info | poll | `{unit_id, name, pos, profession}` | Citizen id appears — **live**: migrants Bim Kereshtân + ùshrir Tunvucar at tick 123590 (recorded states; detector verified on those snapshots) |
 | `citizen_gone` | notice | poll | `{unit_id, name, pos}` | Citizen id vanishes (death, departure — check `unit_death`) |
+| `new_arrival` + | warning / info | poll | `{unit_id, name, race, kind, role, pos, dist_nearest_citizen?, at_baseline}` | A non-citizen, non-hostile unit appears in `units.wildlife` / `visitors` / `livestock` — **live 2026-11-26** (see §new-arrival gap below). Visitor = warning; wildlife = warning within 15 tiles of a dwarf, else info; livestock (a birth) = info. `at_baseline` marks units already present when monitoring started — those are surfaced, not silenced. A unit that leaves and returns re-fires with a fresh dedup key. |
 | `threat` | critical | poll | `{unit_id, name, race, pos}` | Hostile id appears in `units.hostiles` — fixture-only (no hostiles on this fort) |
 | `invasion` | critical | eventful | `{args}` | Eventful INVASION — implemented, fixture-only (no live invasion) |
 | `hostile_spawn` | critical | eventful | `{unit_id, name, race, pos}` | Eventful UNIT_NEW_ACTIVE with a hostile unit — fixture-only |
@@ -279,6 +280,26 @@ What the watcher does (`watch.lua`):
   registration). The watcher records the report count and active
   unit ids at install time and suppresses events at or below the
   baseline, so the daemon never sees the replay.
+- **The new-arrival gap (found 2026-11-26, fixed):** a troll arrived
+  in the caverns and produced NO event anywhere — zero
+  `hostile_spawn` events, no `UNIT_NEW_ACTIVE` for the troll in the
+  log. It was found only because a live test re-collected
+  `/v1/units` and saw it in the visitor list: pull, not an alert.
+  Cause, twofold: (1) the drainer deliberately drops non-hostile
+  `UNIT_NEW_ACTIVE` (the watcher record cannot tell wildlife from
+  visitor from livestock, so the classified poll diff is the right
+  source); (2) the poll diff only covered citizens (`citizen_new`)
+  and hostiles (`threat`) — wildlife/visitors/livestock were never
+  diffed, and the first snapshot (baseline) emitted nothing at all.
+  Fix: `DiffDetector` now emits `new_arrival` for wildlife /
+  visitors / livestock, both on the baseline (units already present
+  when monitoring starts, flagged `at_baseline`) and on later
+  diffs, and the attention section (`src/dfagent_harness/attention.py`,
+  `GET /v1/attention`) lists them as first-class items with class,
+  name, and position. The drainer's drop of non-hostile
+  `UNIT_NEW_ACTIVE` stays — the poll diff is now the source that
+  actually fires, so the original claim in the code ("covered by
+  poll-diff") is true instead of aspirational.
 - **Handler argument shapes (measured, not the dfkit docs):**
   `JOB_COMPLETED` gets the job struct (read `.id` / `.job_type` /
   worker via `dfhack.job.getWorker`); `REPORT` gets a report index

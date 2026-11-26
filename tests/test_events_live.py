@@ -10,9 +10,11 @@ paused by every test (pause state is restored even on failure), and
 the eventful watcher is uninstalled afterwards.
 """
 
+import http.client
 import json
 import os
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -40,6 +42,149 @@ def _game_is_up():
     except DFHackError:
         return False
     return True
+
+
+@unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
+class TestLiveArrivals(unittest.TestCase):
+    """Live proof for the new-arrival alert (troll gap, 2026-11-26).
+
+    A troll arrived in the caverns and fired no event anywhere — the
+    watcher drops non-hostile UNIT_NEW_ACTIVE and the poll diff only
+    covered citizens and hostiles. These tests prove, against the
+    live fort, that a new non-citizen unit now fires a ``new_arrival``
+    event AND appears in the attention section, and that units
+    already present when monitoring starts are surfaced (not
+    silently baselined away).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = DFHackClient(HOST, PORT, timeout=60.0)
+        cls.client.connect()
+        cls.was_paused = actions.get_paused(cls.client)
+        if not cls.was_paused:
+            actions.set_paused(cls.client, True)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            actions.set_paused(cls.client, cls.was_paused)
+        finally:
+            cls.client.quit()
+
+    def test_baseline_surfaces_present_units(self):
+        det = ev.DiffDetector()
+        state = collect(self.client, sections=("units", "status"))
+        u = state["units"]
+        expected = (u["wildlife_count"] + u["visitor_count"]
+                    + u["livestock_count"])
+        self.assertGreater(expected, 0,
+                           "no non-citizen units to surface")
+        found = det.detect(state)
+        arrivals = [e for e in found if e["type"] == "new_arrival"]
+        self.assertEqual(len(arrivals), expected)
+        self.assertTrue(all(e["data"]["at_baseline"] for e in arrivals))
+        for e in arrivals:
+            self.assertIn(e["data"]["kind"],
+                          ("wildlife", "visitor", "livestock"))
+            self.assertEqual(len(e["data"]["pos"]), 3)
+        # The attention section lists them as already here.
+        from dfagent_harness.attention import build_attention
+        items = build_attention(state, det, surface_z=175)
+        self.assertEqual(len(items), expected)
+        self.assertTrue(all("was already here when monitoring started"
+                            in it["text"] for it in items))
+
+    def test_live_arrival_fires_event_and_attention(self):
+        """Drive the game in unpause bursts until a unit arrives, then
+        show its event AND its attention entry. Wildlife wanders in
+        and out (a 19-crundle pack arrived in one 45 s burst on
+        2026-11-26), but a quiet window SKIPS rather than fails —
+        the deterministic proof is the baseline test above.
+
+        DRINK WATCH (2026-11-26): the fort is at 11 drink with 10
+        citizens and nothing brewing, and every unpause burst burns
+        drink with no replenishment (46 -> 39 -> 11 across the test
+        bursts; the same failure mode killed Athelunol). Bursts here
+        are 15 s, and the test SKIPS entirely when drink is 8 or
+        less — a live test must never kill the fort it measures.
+        Do not lengthen the bursts without checking the drink first.
+        """
+        # Drink pre-check (paused read): too dry to run the game.
+        stocks = collect(self.client, sections=("stocks",))["stocks"]
+        drink = stocks["drink_units"]
+        if drink <= 8:
+            self.skipTest(f"drink {drink}u — too dry to run the game "
+                          f"for arrivals; see the drink watch above")
+        det = ev.DiffDetector()
+        state = collect(self.client, sections=("units", "status"))
+        det.detect(state)  # baseline (its arrivals are not the test)
+        live = []
+        try:
+            for _cycle in range(8):
+                actions.set_paused(self.client, False)
+                time.sleep(15)
+                actions.set_paused(self.client, True)
+                time.sleep(1)
+                state = collect(self.client,
+                                sections=("units", "status"))
+                found = det.detect(state)
+                live = [e for e in found
+                        if e["type"] == "new_arrival"
+                        and not e["data"]["at_baseline"]]
+                if live:
+                    break
+        finally:
+            actions.set_paused(self.client, True)
+        if not live:
+            self.skipTest("no unit arrived in 8 x 15 s unpaused — "
+                          "the fort was quiet")
+        from dfagent_harness.attention import build_attention
+        items = build_attention(state, det, surface_z=175)
+        uids = {e["data"]["unit_id"] for e in live}
+        named = [it for it in items if it.get("unit_id") in uids]
+        self.assertEqual(len(named), len(live),
+                         "live arrival(s) missing from attention: "
+                         f"{[e['data'] for e in live]!r} vs "
+                         f"{[it['text'] for it in items]!r}")
+        for it in named:
+            self.assertIn("It just arrived.", it["text"])
+            self.assertIn("z%d" % it["pos"][2], it["text"])
+
+    def test_attention_route(self):
+        """GET /v1/attention serves the same list over HTTP, from the
+        poller's detector + last state (no fresh game read)."""
+        from dfagent_harness.server import create_server
+        bus = ev.EventBus()
+        poller = ev.EventPoller(self.client, bus, slow_interval=3600)
+        poller.poll_once()  # baseline: detector records the arrivals
+        self.assertIsNotNone(poller.last_state)
+        server = create_server(bus, host="127.0.0.1", port=0,
+                               client=self.client, poller=poller)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever,
+                                  daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port,
+                                              timeout=60)
+            conn.request("GET", "/v1/attention")
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        self.assertEqual(resp.status, 200, body)
+        u = poller.last_state["units"]
+        expected = (u["wildlife_count"] + u["visitor_count"]
+                    + u["livestock_count"])
+        items = body["attention"]
+        self.assertEqual(len(items), expected)
+        self.assertTrue(all(it["kind"] == "new_arrival"
+                            for it in items))
+        self.assertIn("cost", body)
 
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))

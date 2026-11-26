@@ -136,6 +136,7 @@ EVENT_TYPES = (
     "unit_death", "dwarf_distress", "report", "job_cancelled",
     "job_completed", "stock_low", "mandate",
     "task_completed", "task_failed", "goal_satisfied", "save",
+    "new_arrival",
 )
 
 _LUA_DIR = Path(__file__).resolve().parent / "lua"
@@ -198,6 +199,25 @@ def _hostiles(state: dict[str, Any]) -> dict[int, dict[str, Any]]:
     for h in units.get("hostiles") or []:
         if isinstance(h, dict) and h.get("id") is not None:
             out[h["id"]] = h
+    return out
+
+
+def _other_units(state: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Non-citizen, non-hostile units: wildlife, visitors, livestock.
+
+    These are the classes the per-tick snapshot hides behind counts
+    (design §4: only counts by race, hostiles in full), so a unit in
+    one of these classes is invisible to the agent unless the poll
+    diff says it arrived. The watcher drops non-hostile
+    UNIT_NEW_ACTIVE for exactly these classes, so this diff is the
+    only path that tells the agent — it must not be silent.
+    """
+    units = state.get("units") or {}
+    out: dict[int, dict[str, Any]] = {}
+    for key in ("wildlife", "visitors", "livestock"):
+        for rec in units.get(key) or []:
+            if isinstance(rec, dict) and rec.get("id") is not None:
+                out[rec["id"]] = rec
     return out
 
 
@@ -286,10 +306,15 @@ class DiffDetector:
     """Compares consecutive observe snapshots and emits catalog events.
 
     Stateful: the first snapshot passed to :meth:`detect` is the
-    baseline and emits nothing. Later calls emit one event per change
-    (edge-triggered — a persisting condition does not re-fire unless
-    its severity rises). All state is per-instance; create a fresh
-    detector per fort run.
+    baseline. It emits ``new_arrival`` events for every non-citizen
+    unit already present — the agent has not seen those units yet, and
+    the per-tick snapshot hides them behind counts, so baselining them
+    away silently would leave the agent unaware of a troll in the
+    caverns (observed 2026-11-26: the troll was found only by pulling
+    /v1/units). Nothing else fires on the baseline. Later calls emit
+    one event per change (edge-triggered — a persisting condition does
+    not re-fire unless its severity rises). All state is per-instance;
+    create a fresh detector per fort run.
     """
 
     def __init__(self) -> None:
@@ -309,6 +334,13 @@ class DiffDetector:
         self._stock_state: dict[str, str] = {"drink": "ok", "food": "ok"}
         # Mandate keys already emitted.
         self._seen_mandates: set[str] = set()
+        # Arrival records, in emission order: each is {tick, year,
+        # data, at_baseline}. Bounded (last 100) — the attention
+        # section reads this, and the bus/journal holds the full
+        # history. A unit that leaves and returns gets a fresh
+        # activation counter (see _arrival_activations).
+        self._arrivals: list[dict[str, Any]] = []
+        self._arrival_activations: dict[int, int] = {}
 
     def _tick_year(self, state: dict[str, Any]) -> tuple[Optional[int],
                                                          Optional[int]]:
@@ -317,7 +349,13 @@ class DiffDetector:
 
     def detect(self, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Diff ``state`` against the previous snapshot; return new
-        events (without ``seq`` — the bus assigns it)."""
+        events (without ``seq`` — the bus assigns it).
+
+        The first call is the baseline: it returns ``new_arrival``
+        events for the non-citizen units already present (wildlife,
+        visitors, livestock) and nothing else — the agent has not seen
+        those units yet, and the snapshot hides them behind counts.
+        """
         tick, year = self._tick_year(state)
         if self._prev is None:
             self._prev = state
@@ -325,18 +363,30 @@ class DiffDetector:
             self._baseline_distress(state)
             self._baseline_stocks(state)
             self._baseline_mandates(state)
-            return []
+            return self._baseline_arrivals(state, tick, year)
         prev = self._prev
         self._prev = state
         events: list[dict[str, Any]] = []
         events.extend(self._diff_status(prev, state, tick, year))
         events.extend(self._diff_citizens(prev, state, tick, year))
         events.extend(self._diff_hostiles(prev, state, tick, year))
+        events.extend(self._diff_arrivals(prev, state, tick, year))
         events.extend(self._diff_jobs(prev, state, tick, year))
         events.extend(self._diff_reports(prev, state, tick, year))
         events.extend(self._diff_stocks(state, tick, year))
         events.extend(self._diff_mandates(state, tick, year))
         return events
+
+    @property
+    def arrivals(self) -> list[dict[str, Any]]:
+        """Arrival records in emission order (see __init__).
+
+        The attention section reads this: it is the detector's own
+        memory of which non-citizen units the agent has been told
+        about, and when — so an arrival is never silently dropped
+        between the event stream and the per-tick snapshot.
+        """
+        return list(self._arrivals)
 
     def note_pause(self, paused: bool) -> Optional[dict[str, Any]]:
         """Record a pause-flag change observed without a full collect.
@@ -386,6 +436,66 @@ class DiffDetector:
         for m in state.get("mandates") or []:
             if isinstance(m, dict):
                 self._seen_mandates.add(self._mandate_key(m))
+
+    # -- arrivals (wildlife / visitors / livestock) ---------------------
+    # The gap that hid the troll (2026-11-26): the watcher drops
+    # non-hostile UNIT_NEW_ACTIVE, and the poll diff only covered
+    # citizens (citizen_new) and hostiles (threat). A visitor in the
+    # caverns fired nothing anywhere and was found only by pulling
+    # /v1/units. These two methods close it: the baseline surfaces
+    # what is already here, the diff surfaces what arrives.
+
+    @staticmethod
+    def _arrival_severity(rec: dict[str, Any]) -> str:
+        kind = rec.get("kind")
+        if kind == "visitor":
+            # A stranger on the map is always worth a look — even a
+            # harmless one, and especially one in the caverns.
+            return "warning"
+        if kind == "wildlife":
+            dist = rec.get("dist_nearest_citizen")
+            if isinstance(dist, int) and dist <= 15:
+                return "warning"
+            return "info"
+        return "info"  # livestock: a birth, good news
+
+    def _make_arrival(self, rec: dict[str, Any], tick, year,
+                      at_baseline: bool) -> dict[str, Any]:
+        uid = rec.get("id")
+        n = self._arrival_activations.get(uid, 0) + 1
+        self._arrival_activations[uid] = n
+        data: dict[str, Any] = {
+            "unit_id": uid, "name": rec.get("name"),
+            "race": rec.get("race"), "kind": rec.get("kind"),
+            "role": rec.get("role"), "pos": rec.get("pos"),
+            "at_baseline": at_baseline,
+        }
+        dist = rec.get("dist_nearest_citizen")
+        if isinstance(dist, int):
+            data["dist_nearest_citizen"] = dist
+        event = make_event(
+            "new_arrival", self._arrival_severity(rec), data,
+            tick=tick, year=year,
+            dedup_key=f"new_arrival:{uid}:{n}")
+        self._arrivals.append({"tick": tick, "year": year,
+                               "data": data,
+                               "at_baseline": at_baseline})
+        self._arrivals = self._arrivals[-100:]
+        return event
+
+    def _baseline_arrivals(self, state: dict[str, Any], tick,
+                           year) -> list[dict[str, Any]]:
+        return [self._make_arrival(rec, tick, year, True)
+                for rec in _other_units(state).values()]
+
+    def _diff_arrivals(self, prev, state, tick, year):
+        events: list[dict[str, Any]] = []
+        po, co = _other_units(prev), _other_units(state)
+        for uid, rec in co.items():
+            if uid not in po:
+                events.append(
+                    self._make_arrival(rec, tick, year, False))
+        return events
 
     # -- status ---------------------------------------------------------
     def _diff_status(self, prev, state, tick, year):
@@ -760,7 +870,9 @@ def watcher_record_to_event(
     """Convert one raw watcher JSONL record into a catalog event (no
     ``seq``), or ``None`` when the record is not an event the daemon
     surfaces (non-hostile UNIT_NEW_ACTIVE is covered by poll-diff's
-    ``citizen_new``).
+    ``new_arrival`` — the diff classifies the unit as wildlife,
+    visitor or livestock, which the watcher record cannot tell apart;
+    hostile arrivals surface here as ``hostile_spawn``).
 
     ``resolve_unit`` maps a unit id to ``{name, citizen, race, pos}``
     from the daemon's last snapshot — used for UNIT_DEATH, whose unit

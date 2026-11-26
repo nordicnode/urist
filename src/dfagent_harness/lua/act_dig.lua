@@ -2,7 +2,17 @@
 -- PARAMS (set by the Python side): x0,y0,z0,x1,y1,z1, mode.
 -- mode is a df.tile_dig_designation name ('Default','Channel','Ramp',
 -- 'UpStair','DownStair','UpDownStair') or 'clear'.
--- Set path validates first: every tile must be a solid tile of the
+-- Mechanism (DFHack 0.47.05-r8, library/modules/Designations.cpp,
+-- and verified live 2026-11-26): the game's designation sweep only
+-- processes map blocks whose flags.designated is set. Setting a
+-- tile's dig bit WITHOUT the block flag means the sweep skips the
+-- block entirely — process_dig is consumed but no Dig job is ever
+-- created (the digging gap: verified over ~6,000 ticks and a fresh
+-- 12-burst run, designation bit stuck at 5, zero jobs, zero
+-- postings). The UI sets the block flag when designating; Lua must
+-- set it too. act_plants.lua already does this (which is why chop /
+-- gather create jobs and dig did not). Both the set and the clear
+-- paths set the flag, so the sweep re-scans the block either way.
 -- shape the mode needs, and nothing is written when any tile fails
 -- the check (atomic precondition). The shape is per-mode, not just
 -- WALL (verified live 2026-11-26): a down-stair / channel is dug
@@ -56,8 +66,10 @@ local ok, err = pcall(function()
       if mode == 'clear' then
         if d.dig ~= 0 then cleared_n = cleared_n + 1 end
         d.dig = df.tile_dig_designation.No
+        b.flags.designated = true
       else
         d.dig = dig_val
+        b.flags.designated = true
         set_n = set_n + 1
       end
     end

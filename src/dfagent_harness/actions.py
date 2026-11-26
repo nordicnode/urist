@@ -105,6 +105,21 @@ DIG_MODES: dict[str, str] = {
     "clear": "clear",
 }
 
+#: CLI dig mode -> df.job_type name of the job the game creates for
+#: it (verified live 2026-11-26: a down-stair designation creates a
+#: CarveDownwardStaircase job, NOT a Dig job — dig_to_completion used
+#: to wait only for Dig/DigChannel, so it timed out on stairs/ramps
+#: even though the dwarf dug the tile). The job types are the real
+#: runtime enums (tests/fixtures/runtime-enums-0.47.05-r8.json).
+DIG_JOB_TYPES: dict[str, str] = {
+    "dig": "Dig",
+    "channel": "DigChannel",
+    "ramp": "CarveRamp",
+    "up-stair": "CarveUpwardStaircase",
+    "down-stair": "CarveDownwardStaircase",
+    "up-down-stair": "CarveUpDownStaircase",
+}
+
 #: Workshop kind -> building definition. ``material`` is the df.item_type
 #: whose accessible stock the precondition checks (see probe_material).
 #: NOTE (phase 4, verified live 2026-11-26): the still accepts WOOD —
@@ -585,7 +600,9 @@ def dig_to_completion(client: DFHackClient, box: tuple[int, ...],
     tiles = [[x, y, z] for x in range(box[0], box[3] + 1)
              for y in range(box[1], box[4] + 1)
              for z in range(box[2], box[5] + 1)]
-    job_types = ["Dig", "DigChannel"]
+    # The job type depends on the mode (a down-stair is a
+    # CarveDownwardStaircase job, not a Dig job — see DIG_JOB_TYPES).
+    job_types = [DIG_JOB_TYPES[mode]]
     before = _run_helper(client, "probe_jobs_at.lua",
                          {"tiles": tiles, "types": job_types},
                          timeout=timeout)

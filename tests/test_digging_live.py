@@ -20,9 +20,15 @@ reads (no game time advances, no drink burns):
   still solid), so a false "complete" is impossible.
 
 The end-to-end loop (dig_to_completion: job spawns + terrain
-changes) is NOT run here — it needs unpaused game time, and drink
-is at the watch threshold. See tests/test_digging_live.py's
-TestLiveDigToCompletion (skipped until drink allows).
+changes) IS run here, in TestLiveDigToCompletion — it needs unpaused
+game time, and drink is at the watch threshold. It finds a fresh
+FLOOR site at runtime (the fort-centre stair is already dug in the
+save) and sets up a pick for the miner if he holds none (the fort
+ships no pick). Root cause of the digging gap, fixed 2026-11-26:
+act_dig did not set the map-block flags.designated bit, so the
+game's sweep skipped the block and no Dig job was ever created; and
+dig_to_completion waited only for Dig/DigChannel, but a down-stair
+creates a CarveDownwardStaircase job.
 
 Run from the repo root:
 
@@ -154,10 +160,19 @@ class TestLiveDigging(unittest.TestCase):
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestLiveDigToCompletion(unittest.TestCase):
-    """The end-to-end dig loop: designate a down-stair at the fort
-    centre, wait for the Dig job to spawn, wait for the terrain to
-    change, verify the stair. Needs unpaused game time, so it skips
-    itself when drink is at the watch threshold (<= 8).
+    """The end-to-end dig loop: designate a down-stair at a fresh
+    floor site, wait for the Dig job to spawn, wait for the terrain
+    to change, verify the stair. Needs unpaused game time, so it
+    skips itself when drink is at the watch threshold (<= 8).
+
+    Root cause of the digging gap, fixed live 2026-11-26: (1) act_dig
+    did not set the map-block flags.designated bit, so the game's
+    designation sweep skipped the block and no Dig job was ever
+    created (verified: designation bit stuck at 5, zero jobs, zero
+    postings over ~6,000 ticks); (2) dig_to_completion waited only
+    for job types Dig/DigChannel, but a down-stair creates a
+    CarveDownwardStaircase job, so it timed out even when the dwarf
+    dug the tile. Both fixed; this test proves the loop end to end.
     """
 
     @classmethod
@@ -174,6 +189,39 @@ class TestLiveDigToCompletion(unittest.TestCase):
             actions.set_paused(cls.client, False)
         cls.client.close()
 
+    def _find_floor_site(self, cx=97, cy=97, z=175, radius=10):
+        """A FLOOR tile near the fort centre that is not yet dug."""
+        from dfagent_harness.actions import _run_helper
+        cands = []
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                cands.append((abs(dx) + abs(dy), cx + dx, cy + dy))
+        cands.sort()
+        for _, x, y in cands:
+            out = _run_helper(self.client, "probe_block_flags.lua",
+                              {"x": x, "y": y, "z": z})
+            if (out.get("shape") == "FLOOR"
+                    and (out.get("designation") or {}).get("dig") == 0):
+                return (x, y, z)
+        return None
+
+    def _miner_has_pick(self):
+        """True when the miner (id 5407) holds a pick.
+
+        A pick is a WEAPON (df.item_type.WEAPON == 25, runtime enums)
+        with subtype 6 (the weapon raws: subtype 6 = PICK).
+        """
+        from dfagent_harness.actions import _run_helper
+        out = _run_helper(self.client, "probe_picks.lua", {})
+        miner = out.get("miner") or {}
+        # The Lua JSON encoder returns arrays as string-keyed dicts.
+        invs = (list(miner.values()) if isinstance(miner, dict)
+                else list(miner))
+        for inv in invs:
+            if inv.get("type") == 25 and inv.get("subtype") == 6:
+                return True
+        return False
+
     def test_dig_to_completion(self):
         # Drink gate: the loop unpauses the game in 1 s bursts.
         from dfagent_harness import observe
@@ -185,18 +233,35 @@ class TestLiveDigToCompletion(unittest.TestCase):
             self.skipTest("drink %s at/below the watch threshold "
                           "(8) — not spending unpaused game time"
                           % drink)
+        # The fort ships no pick (verified live: the embark brought
+        # none, and the miner held a halberd and a spear). A Dig job
+        # needs a pick, so spawn one and equip the miner if he has
+        # none — the test sets up its own precondition.
+        from dfagent_harness.actions import _run_helper
+        if not self._miner_has_pick():
+            spawned = _run_helper(self.client, "spawn_pick.lua",
+                                  {"x": 97, "y": 95, "z": 175,
+                                   "unit_id": 5407})
+            self.assertTrue(spawned.get("ok"), str(spawned))
+            equipped = _run_helper(self.client, "equip_pick.lua",
+                                   {"unit_id": 5407})
+            self.assertTrue(equipped.get("ok"), str(equipped))
+            self.assertTrue(equipped.get("in_inventory"), str(equipped))
+        site = self._find_floor_site()
+        self.assertIsNotNone(site, "no undug FLOOR tile near the fort")
+        box = (site[0], site[1], site[2], site[0], site[1], site[2])
         r = actions.dig_to_completion(
-            self.client, box=(97, 97, 175, 97, 97, 175),
-            mode="down-stair")
+            self.client, box=box, mode="down-stair")
         self.assertTrue(r.ok, r.reason)
         # The terrain really changed: the floor is now a stair.
-        v = digging.verify_dig(
-            self.client, (97, 97, 175, 97, 97, 175), "down-stair")
+        v = digging.verify_dig(self.client, box, "down-stair")
         self.assertTrue(v["complete"], str(v))
-        # Leave the fort as found: clear the dug stair is not
-        # possible (it is terrain now), so the test leaves the
-        # down-stair in place — it is the first step of the real
-        # expansion dig, and the planner will use it.
+        # The job that did it was a CarveDownwardStaircase (not Dig).
+        self.assertEqual(
+            (r.detail.get("job") or {}).get("type"),
+            "CarveDownwardStaircase", str(r.detail))
+        # The dug stair is left in place — it is the first step of
+        # the real expansion dig, and the planner will use it.
 
 
 if __name__ == "__main__":

@@ -230,10 +230,12 @@ class TestAccountant(unittest.TestCase):
         self.assertIn("status", snap["sections"])
         # History (lowest priority) is dropped first.
         self.assertNotIn("history", snap["sections"])
-        # The cuts brought the total down (from 262 uncut), but
+        # The cuts brought the total down (from 374 uncut), but
         # the never-cut floor (header + attention + status +
-        # compacted sections) cannot go below ~161 for this state.
-        self.assertLess(snap["tokens"], 262)
+        # compacted sections + the suggestion, which names the
+        # still build when no still exists) cannot go below ~264
+        # for this state.
+        self.assertLess(snap["tokens"], 374)
 
     def test_fit_no_cuts_under_target(self):
         acct = TokenAccountant()
@@ -260,6 +262,34 @@ class TestSuggest(unittest.TestCase):
                   "at_baseline": False}]
         out = suggest(_state(), items)
         self.assertIn("brew", out)
+
+    def test_low_drink_no_still_suggests_building_still(self):
+        # M1 run #4: the model enabled brewers and gathered plants
+        # but never built the still, because the suggestion only ever
+        # said "run the brew task" — and the brew task fails without
+        # a still. With no still in state, the suggestion must name
+        # the still build first.
+        items = [{"priority": 2, "kind": "needs",
+                  "text": "Drink is low: 9 units left.",
+                  "unit_id": None, "pos": None,
+                  "at_baseline": False}]
+        out = suggest(_state(), items)
+        self.assertIn("NO STILL EXISTS", out)
+        self.assertIn("build_workshop kind=still", out)
+
+    def test_low_drink_with_still_suggests_brew_task(self):
+        # With a still present, the brew task is the right call.
+        items = [{"priority": 2, "kind": "needs",
+                  "text": "Drink is low: 9 units left.",
+                  "unit_id": None, "pos": None,
+                  "at_baseline": False}]
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 2}],
+            "list": [{"id": 1, "type": "Workshop",
+                      "subtype": "Still"}]})
+        out = suggest(st, items)
+        self.assertIn("run the brew task", out)
+        self.assertNotIn("NO STILL EXISTS", out)
 
     def test_nothing_urgent_no_suggestion(self):
         self.assertIsNone(suggest(_state(), []))

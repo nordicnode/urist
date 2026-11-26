@@ -473,6 +473,22 @@ def _history(decisions: Optional[list[dict[str, Any]]]
     return "\n".join(lines), f"{len(decisions)} decisions"
 
 
+def _has_workshop(state: dict[str, Any], subtype: str) -> bool:
+    """True if a workshop of the given subtype exists in state.
+
+    Buildings in the snapshot state are type=="Workshop" with a
+    subtype (e.g. "Still", "Carpenters"). Used by suggest() so the
+    low-drink suggestion can name the still build when no still
+    exists, instead of pointing at the brew task (which fails
+    without one).
+    """
+    buildings = state.get("buildings") or {}
+    lst = buildings.get("list") or []
+    return any(
+        b.get("type") == "Workshop" and b.get("subtype") == subtype
+        for b in lst)
+
+
 def suggest(state: dict[str, Any],
             attention_items: list[dict[str, Any]]) -> Optional[str]:
     """The ONE suggested action for the single most urgent problem.
@@ -498,9 +514,22 @@ def suggest(state: dict[str, Any],
             return (f"Suggested action: query unit {item['unit_id']} "
                     f"to see what it is and where it is going — "
                     f"{text}")
-        # Low drink: brew. Low food: cook (or gather). These use the
-        # daemon's tasks, which the planner already knows how to run.
+        # Low drink: brew — BUT the brew task needs a still to
+        # already exist (it fails "no still workshop exists" without
+        # one). M1 run #4 proved the gap: the model enabled brewers
+        # and gathered plants but never built the still, because the
+        # suggestion only ever said "run the brew task". So when no
+        # still exists, the suggestion must name the still build
+        # itself, first, and only then the brew task.
         if "drink" in text.lower() or "thirst" in text.lower():
+            if not _has_workshop(state, "Still"):
+                return ("Suggested action: NO STILL EXISTS, so "
+                        "brewing is impossible until you build one. "
+                        "Build a still FIRST: build_workshop "
+                        "kind=still, on a free 3x3 site on open "
+                        "ground (query /v1/slice to confirm it is "
+                        "clear; retry elsewhere if 'site not free'). "
+                        "Only then run the brew task.")
             return ("Suggested action: run the brew task "
                     "(POST /v1/tasks/brew) — the fort is short on "
                     "drink and brewing turns plants into drink.")

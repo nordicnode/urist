@@ -503,6 +503,10 @@ def create_server(
                 self._memory_why(path)
             elif path == "/v1/memory/summary":
                 self._memory_summary()
+            elif path == "/v1/wiki":
+                self._wiki(query)
+            elif path.startswith("/v1/wiki/"):
+                self._wiki_page(path)
             elif path == "/v1/goals":
                 self._goals_list()
             elif path.startswith("/v1/goals/"):
@@ -1220,6 +1224,49 @@ def create_server(
                     d for d in journal.recent_decisions(limit=100)
                     if d.get("ok") is False][:5]
             _json(self, 200, summary)
+
+        def _wiki(self, query: dict[str, list[str]]) -> None:
+            # Wiki lookup (GOAL.md step 5, layer 6): the agent asks
+            # the harness for DF knowledge; the harness answers from
+            # the local wiki export. No game read. mode=search is
+            # the fast keyword fallback; hybrid (the default) fuses
+            # FTS + semantic and is best for vague questions.
+            q = query.get("q", [""])[0].strip()
+            if not q:
+                _error(self, 400, "BAD_REQUEST",
+                       "missing ?q= (the question to look up)")
+                return
+            mode = query.get("mode", ["hybrid"])[0]
+            try:
+                limit = int(query.get("limit", ["5"])[0])
+            except ValueError:
+                limit = 5
+            from . import wiki as wiki_mod
+            try:
+                result = wiki_mod.wiki_search(
+                    q, mode=mode, limit=max(1, min(limit, 10)))
+            except ValueError as exc:
+                _error(self, 400, "BAD_REQUEST", str(exc))
+                return
+            except RuntimeError as exc:
+                _error(self, 503, "WIKI_UNAVAILABLE", str(exc))
+                return
+            _json(self, 200, result)
+
+        def _wiki_page(self, path: str) -> None:
+            # Dump a whole wiki page by slug.
+            slug = path[len("/v1/wiki/"):]
+            if not slug or "/" in slug:
+                _error(self, 400, "BAD_REQUEST",
+                       "a wiki page slug has no '/' in it")
+                return
+            from . import wiki as wiki_mod
+            try:
+                result = wiki_mod.wiki_page(slug)
+            except RuntimeError as exc:
+                _error(self, 503, "WIKI_UNAVAILABLE", str(exc))
+                return
+            _json(self, 200, result)
 
         # -- goals ------------------------------------------------------
         def _goals_list(self) -> None:

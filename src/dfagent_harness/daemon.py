@@ -487,8 +487,9 @@ class Daemon:
         # probe read assignments while the game ticked. The game is
         # unpaused only at the end of the tick, below.
         manager = self._manager_present()
-        records = self.planner.tick(state, list(self._recent_events),
-                                    manager=manager)
+        records = self.planner.tick(
+            state, list(self._recent_events),
+            manager=manager, dig_site=self._derive_dig_site(state))
         print(f"dfh planner: tick {self.planner.ticks} done: "
               f"{len(records)} decision(s), "
               f"{sum(1 for r in records if r.get('ok'))} ok, "
@@ -553,6 +554,36 @@ class Daemon:
             f"tick {tick}: {snap['tokens']} tokens, "
             f"cuts={','.join(snap['cuts']) or 'none'}",
             tick=tick if isinstance(tick, int) else None)
+
+    def _derive_dig_site(self, state: dict[str, Any]
+                         ) -> Optional[dict[str, Any]]:
+        """The planner's dig site, derived from the areas (never
+        hardcoded): the Surface area + the fort centre (the median
+        citizen position) + the surface z. Returns None when the
+        areas are not cached yet — the planner then does not dig
+        rather than digging blind. Failures are None, never fatal
+        to the tick."""
+        from . import digging
+        cache = getattr(self.server, "spatial_cache", None) \
+            if self.server is not None else None
+        areas = cache.get("areas") if cache else None
+        if not areas:
+            return None
+        surface_z = areas.get("surface_z")
+        if not isinstance(surface_z, int):
+            return None
+        citizens = (state.get("units") or {}).get("citizens") or []
+        positions = [c.get("pos") for c in citizens
+                     if isinstance(c, dict) and c.get("pos")]
+        if not positions:
+            return None
+        xs = sorted(p[0] for p in positions)
+        ys = sorted(p[1] for p in positions)
+        centre = (xs[len(xs) // 2], ys[len(ys) // 2])
+        try:
+            return digging.derive_dig_site(areas, centre, surface_z)
+        except Exception:  # noqa: BLE001 - no site is "no dig"
+            return None
 
     def _manager_present(self) -> Optional[bool]:
         """True when a manager is appointed, False when not, None

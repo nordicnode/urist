@@ -547,6 +547,100 @@ def designate_dig(client: DFHackClient, box: tuple[int, ...],
                 "set": out.get("set"), "cleared": out.get("cleared")})
 
 
+def dig_to_completion(client: DFHackClient, box: tuple[int, ...],
+                      mode: str = "dig",
+                      job_timeout: float = DEFAULT_JOB_TIMEOUT,
+                      complete_timeout: float = 180.0,
+                      timeout: float = 30.0) -> ActionResult:
+    """The end-to-end dig loop (the digging gap): check the site,
+    designate, wait for a Dig job to spawn, wait for the dig to
+    complete (designation gone AND terrain changed).
+
+    The site check (digging.check_dig_box) runs first and refuses
+    unreachable / hazardous sites before anything is designated — a
+    down-stair on buried soil sets the bits but the game never turns
+    it into a job, and a down-stair over magma floods the fort. The
+    job wait uses the burst pattern (_wait_for_paused: short
+    unpaused bursts, reads only while paused) and only a NEW job id
+    counts as spawn evidence (a stale Dig job from an earlier dig
+    must not). Completion is verified by digging.verify_dig, not by
+    the job disappearing (Dig jobs can linger in the list after the
+    terrain changes).
+    """
+    from . import digging
+    started = time.monotonic()
+    # 1. Site check (paused read): reachable + no hazard.
+    check = digging.check_dig_box(client, box, mode)
+    if not check["ok"]:
+        raise _Fail("precondition",
+                    f"dig site refused: {check['reason']}")
+    # 2. Capture the Dig jobs already at these tiles (a stale job
+    # from an earlier dig must not count as spawn evidence).
+    tiles = [[x, y, z] for x in range(box[0], box[3] + 1)
+             for y in range(box[1], box[4] + 1)
+             for z in range(box[2], box[5] + 1)]
+    job_types = ["Dig", "DigChannel"]
+    before = _run_helper(client, "probe_jobs_at.lua",
+                         {"tiles": tiles, "types": job_types},
+                         timeout=timeout)
+    before_ids = {j["id"] for j in before.get("jobs") or []}
+    # 3. Designate.
+    des = designate_dig(client, box, mode=mode, timeout=timeout)
+    if not des.ok:
+        return des
+    # 4. Wait for a NEW Dig job at one of the tiles.
+    def _job() -> Any:
+        cur = _run_helper(client, "probe_jobs_at.lua",
+                          {"tiles": tiles, "types": job_types},
+                          timeout=timeout)
+        fresh = [j for j in cur.get("jobs") or []
+                 if j["id"] not in before_ids]
+        return fresh[0] if fresh else None
+
+    job = _wait_for_paused(client, _job, job_timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    if not job:
+        return ActionResult(
+            ok=False, action="dig_to_completion",
+            before={"dig_total": des.before.get("dig_total")},
+            after={"dig_total": des.after.get("dig_total")},
+            reason=(f"designation set ({des.after.get('dig_total')} "
+                    f"tiles) but no Dig job appeared at their tiles "
+                    f"within {job_timeout}s of unpausing — the site "
+                    f"may be unreachable (see digging.check_dig_site)"),
+            error_kind="timeout", took_ms=took_ms,
+            detail={"box": list(box), "mode": mode,
+                    "site_check": check["reason"]})
+    # 5. Wait for completion (designation gone + terrain changed).
+    def _done() -> Any:
+        v = digging.verify_dig(client, box, mode)
+        return v if v["complete"] else None
+
+    done = _wait_for_paused(client, _done, complete_timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    if not done:
+        cur = digging.verify_dig(client, box, mode)
+        return ActionResult(
+            ok=False, action="dig_to_completion",
+            before={"dig_total": des.before.get("dig_total")},
+            after={"dig_total": des.after.get("dig_total")},
+            reason=(f"Dig job {job.get('id')} spawned but the dig "
+                    f"did not complete within {complete_timeout}s: "
+                    f"{cur['reason']}"),
+            error_kind="timeout", took_ms=took_ms,
+            detail={"box": list(box), "mode": mode,
+                    "job": job, "verify": cur})
+    return ActionResult(
+        ok=True, action="dig_to_completion",
+        before={"dig_total": des.before.get("dig_total")},
+        after={"dig_total": des.after.get("dig_total")},
+        reason=(f"dug {mode} in {list(box)}: Dig job "
+                f"{job.get('id')} spawned, {done['reason']}"),
+        took_ms=took_ms,
+        detail={"box": list(box), "mode": mode, "job": job,
+                "verify": done})
+
+
 def _plants_action(client: DFHackClient, kind: str,
                    box: tuple[int, ...], mark: bool,
                    job_timeout: float = DEFAULT_JOB_TIMEOUT,
@@ -1353,6 +1447,7 @@ def nobles(client: DFHackClient,
 
 ACTIONS: dict[str, Callable[..., ActionResult]] = {
     "designate_dig": designate_dig,
+    "dig_to_completion": dig_to_completion,
     "designate_chop": designate_chop,
     "designate_gather": designate_gather,
     "manager_order_create": manager_order_create,

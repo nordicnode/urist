@@ -89,9 +89,12 @@ BED_ORIGIN: tuple[int, int, int] = (93, 93, 42)
 FARM_SITE: tuple[int, int, int] = (80, 80, 42)
 #: Food stockpile site (surface, near the wagon site).
 FOOD_STOCKPILE_BOX: tuple[int, ...] = (96, 90, 42, 100, 94, 42)
-#: Dig plan: down-stair here, then a room one z-level down.
-DIG_STAIRS: tuple[int, int, int] = (100, 100, 42)
-DIG_ROOM_BOX: tuple[int, ...] = (97, 97, 41, 103, 103, 41)
+#: Dig plan (retired 2026-11-26): the down-stair + room were hardcoded
+#: Athelunol coordinates (100, 100, 42) — the wrong fort and the wrong
+#: level (Erushtathtat's surface is z175). The dig site is now
+#: derived from the areas by digging.derive_dig_site (the Surface
+#: area + the fort centre) and passed in as ``dig_site``; when none
+#: is available the planner does not dig rather than digging blind.
 #: Gather area (surface shrubs — phase-2 verified tiles).
 GATHER_BOX: tuple[int, ...] = (70, 87, 42, 92, 98, 42)
 
@@ -250,7 +253,8 @@ def _distressed(summary: dict[str, Any]) -> list[dict[str, Any]]:
 def decide(state: dict[str, Any],
            events: Optional[list[dict[str, Any]]] = None,
            manager: Optional[bool] = None,
-           blocked: Optional[frozenset] = None) -> list[Decision]:
+           blocked: Optional[frozenset] = None,
+           dig_site: Optional[dict[str, Any]] = None) -> list[Decision]:
     """Decide what to do next from one snapshot (+ recent events).
 
     ``manager`` overrides the noble read (the daemon passes the
@@ -259,7 +263,11 @@ def decide(state: dict[str, Any],
     backoff (the planner passes its failed goals): blocked decisions
     are dropped, and suppression rules ignore blocked goals — so a
     failed still build does not also block the carpenter and the dig
-    that could unblock it. Returns decisions sorted by priority.
+    that could unblock it. ``dig_site`` is the area-derived dig site
+    (digging.derive_dig_site: {"stairs", "room"}); when None the
+    planner does not dig — the hardcoded coordinates are gone, and
+    digging blind is worse than not digging. Returns decisions
+    sorted by priority.
     """
     s = _summary(state)
     decisions: list[Decision] = []
@@ -485,16 +493,22 @@ def decide(state: dict[str, Any],
                 goal_key="production:make_bed"))
 
     # -- 5. Expansion: digging for stone + farm space -------------------
-    if has_s and s["stone"] == 0 and not any(
+    # The dig site is area-derived (digging.derive_dig_site), never
+    # hardcoded: a down-stair on the Surface near the fort centre,
+    # then a room one z-level below. The action is dig_to_completion
+    # (check -> designate -> job -> terrain change), not a bare
+    # designation. No site, no dig.
+    if has_s and s["stone"] == 0 and dig_site is not None and not any(
             d.goal_key.startswith("drink:") and not _blocked(d.goal_key)
             for d in decisions):
+        stairs = dig_site["stairs"]
         decisions.append(Decision(
             5, "expansion", "dig down for stone",
             "stone 0u — no mason/kitchen/still-from-stone until the "
             "fort digs below the surface",
-            "designate_dig",
-            {"box": [DIG_STAIRS[0], DIG_STAIRS[1], DIG_STAIRS[2],
-                     DIG_STAIRS[0], DIG_STAIRS[1], DIG_STAIRS[2]],
+            "dig_to_completion",
+            {"box": [stairs[0], stairs[1], stairs[2],
+                     stairs[0], stairs[1], stairs[2]],
              "mode": "down-stair"},
             goal_key="expansion:dig"))
     if has_b and s["building_summary"].get("Stockpile", 0) == 0:
@@ -707,9 +721,12 @@ class Planner:
     # -- one tick --------------------------------------------------------
     def tick(self, state: dict[str, Any],
              events: Optional[list[dict[str, Any]]] = None,
-             manager: Optional[bool] = None) -> list[dict[str, Any]]:
+             manager: Optional[bool] = None,
+             dig_site: Optional[dict[str, Any]] = None
+             ) -> list[dict[str, Any]]:
         """Decide + execute. Returns one journal-ready record per
-        decision considered (executed, logged, or skipped)."""
+        decision considered (executed, logged, or skipped).
+        ``dig_site`` is the area-derived dig site (see decide)."""
         self.ticks += 1
         s = _summary(state)
         tick = s["tick"]
@@ -721,7 +738,7 @@ class Planner:
             if now - t < self.backoff_s)
         try:
             decisions = decide(state, events, manager=manager,
-                               blocked=blocked)
+                               blocked=blocked, dig_site=dig_site)
         except Exception as exc:  # noqa: BLE001 - planner must not die
             self.journal.log_event(
                 "planner_error", f"decide() failed: {exc}", tick=tick)

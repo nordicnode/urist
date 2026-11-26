@@ -207,10 +207,19 @@ class DecideProductionTests(unittest.TestCase):
 
     def test_stone_zero_digs_down(self):
         state = load_state()  # stone 0 in the fixture
-        decisions = decide(state)
+        # The dig site is area-derived (never hardcoded): without
+        # one the planner does not dig.
+        self.assertFalse(any(d.goal_key == "expansion:dig"
+                             for d in decide(state)))
+        site = {"stairs": (97, 97, 175),
+                "room": (94, 94, 174, 100, 100, 174)}
+        decisions = decide(state, dig_site=site)
         digs = [d for d in decisions if d.goal_key == "expansion:dig"]
         self.assertEqual(len(digs), 1)
         self.assertEqual(digs[0].kwargs["mode"], "down-stair")
+        self.assertEqual(digs[0].action, "dig_to_completion")
+        self.assertEqual(digs[0].kwargs["box"],
+                         [97, 97, 175, 97, 97, 175])
 
     def test_priority_order_survival_first(self):
         state = load_state()

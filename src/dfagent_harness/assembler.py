@@ -482,26 +482,31 @@ def suggest(state: dict[str, Any],
     or reject it. No suggestion when nothing is urgent. The mapping
     is explicit and small — it only suggests actions the harness
     can actually do (the daemon's tasks + the query tools).
+
+    Scans the attention list in priority order and returns the
+    first actionable item: the top item alone is not enough, since
+    a non-actionable item (e.g. a new arrival) can sit above a
+    critical one (e.g. low drink) and mask it.
     """
     if not attention_items:
         return None
-    top = attention_items[0]
-    kind = top.get("kind")
-    text = top.get("text", "")
-    # A hostile is the most urgent problem: look at it first.
-    if kind == "threat" and top.get("unit_id") is not None:
-        return (f"Suggested action: query unit {top['unit_id']} "
-                f"to see what it is and where it is going — "
-                f"{text}")
-    # Low drink: brew. Low food: cook (or gather). These use the
-    # daemon's tasks, which the planner already knows how to run.
-    if "drink" in text.lower() or "thirst" in text.lower():
-        return ("Suggested action: run the brew task "
-                "(POST /v1/tasks/brew) — the fort is short on "
-                "drink and brewing turns plants into drink.")
-    if "food" in text.lower() or "hunger" in text.lower():
-        return ("Suggested action: run the cook task "
-                "(POST /v1/tasks/cook) — the fort is short on food.")
+    for item in attention_items:
+        kind = item.get("kind")
+        text = item.get("text", "")
+        # A hostile is the most urgent problem: look at it first.
+        if kind == "threat" and item.get("unit_id") is not None:
+            return (f"Suggested action: query unit {item['unit_id']} "
+                    f"to see what it is and where it is going — "
+                    f"{text}")
+        # Low drink: brew. Low food: cook (or gather). These use the
+        # daemon's tasks, which the planner already knows how to run.
+        if "drink" in text.lower() or "thirst" in text.lower():
+            return ("Suggested action: run the brew task "
+                    "(POST /v1/tasks/brew) — the fort is short on "
+                    "drink and brewing turns plants into drink.")
+        if "food" in text.lower() or "hunger" in text.lower():
+            return ("Suggested action: run the cook task "
+                    "(POST /v1/tasks/cook) — the fort is short on food.")
     return None
 
 

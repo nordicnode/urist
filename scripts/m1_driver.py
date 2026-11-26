@@ -116,6 +116,9 @@ class DaemonClient:
     def do_action(self, name: str, kwargs: dict) -> dict:
         return self.post(f"/v1/actions/{name}", kwargs)
 
+    def run_task(self, name: str) -> dict:
+        return self.post(f"/v1/tasks/{name}", {})
+
     def pause_daemon_loop(self) -> dict:
         return self.post("/v1/control/daemon/pause")
 
@@ -204,6 +207,25 @@ def parse_model_reply(text: str) -> tuple[str, list[dict]]:
     return reasoning, clean
 
 
+def parse_suggestion(text: str | None) -> tuple[str, str] | None:
+    """Parse the snapshot's free-text suggestion into something the
+    driver can run. Returns ("task", name), ("query", route), or
+    None when the suggestion names nothing runnable. The suggestion
+    is prose ("Suggested action: run the brew task (POST
+    /v1/tasks/brew) — ..."), so this matches its known shapes
+    rather than pretending it is structured."""
+    if not text:
+        return None
+    import re
+    m = re.search(r"run the (\w+) task", text)
+    if m:
+        return ("task", m.group(1))
+    m = re.search(r"query unit (\d+)", text)
+    if m:
+        return ("query", f"/v1/unit/{m.group(1)}")
+    return None
+
+
 class M1Driver:
     def __init__(self, args):
         self.args = args
@@ -220,6 +242,10 @@ class M1Driver:
         self.catalog_text: str | None = None
         self.actions_taken = 0
         self.idle_ticks = 0
+        # Calibrated game-tick rate (ticks per wall second), used by
+        # _advance_clock. Starts at a measured-typical 50/s and is
+        # re-estimated from every window actually run.
+        self._tick_rate = 50.0
 
     def _log(self, kind: str, **fields) -> None:
         rec = {"ts": datetime.now(timezone.utc).isoformat(),
@@ -260,38 +286,83 @@ class M1Driver:
 
     def _model_decide(self, snap: dict) -> tuple[str, list[dict]]:
         if self.args.mock:
-            sugg = snap.get("suggestion") or {}
-            act = sugg.get("action")
-            if not act:
+            # Plumbing test only: run the snapshot's suggestion (a
+            # task or a query), never a raw action. If there is no
+            # suggestion, take no action.
+            parsed = parse_suggestion(snap.get("suggestion"))
+            if parsed is None:
                 return "mock: no suggestion", []
-            return "mock: using suggestion", [
-                {"action": act, "kwargs": sugg.get("kwargs") or {},
-                 "reason": sugg.get("reason", "suggestion")}]
+            kind, name = parsed
+            if kind == "task":
+                return "mock: suggestion task", [
+                    {"action": f"task:{name}", "kwargs": {},
+                     "reason": "mock suggestion"}]
+            return "mock: suggestion query", [
+                {"action": "query", "kwargs": {"route": name},
+                 "reason": "mock suggestion"}]
         text = self.model.chat(self._prompt(snap))
         return parse_model_reply(text)
 
-    def _advance_clock(self, target_tick: int) -> int:
-        """Unpause, wait until year_tick >= target, re-pause. Returns
-        the tick reached. Windows are measured in game ticks."""
+    def _advance_clock(self, target_tick: int, current_tick: int) -> int:
+        """Unpause for a wall-clock estimate of the window, re-pause,
+        and read the tick reached. Returns the tick reached.
+
+        Windows are measured in game ticks, but the tick CANNOT be
+        read while the game is running: /v1/status returns the
+        poller's cached last_state, and the poller only collects
+        while the game is already paused (read safety, world-model
+        design §8). Polling /v1/status during the window therefore
+        returns the stale pre-unpause tick forever and the loop
+        waits the whole deadline — that is what ran the fort 19
+        in-game days and hit drink 0 on 2026-11-26. So: estimate
+        the wall time from a calibrated tick rate, sleep, re-pause,
+        then read the tick from /v1/status (which refreshes within
+        ~6 s once paused) and re-calibrate the rate from the
+        observed advance.
+        """
+        window = target_tick - current_tick
+        if window <= 0:
+            return current_tick
+        sleep_s = window / self._tick_rate
+        sleep_s = max(0.5, min(sleep_s, 30.0))
+        t_unpause = time.time()
         self.daemon.set_paused(False)
-        deadline = time.time() + 120
-        reached = None
+        time.sleep(sleep_s)
+        self.daemon.set_paused(True)
+        unpause_s = time.time() - t_unpause
+        reached = current_tick
+        deadline = time.time() + 10.0
         while time.time() < deadline:
             st = self.daemon.status()
-            tick = ((st.get("status") or {}).get("year_tick")
-                    or (st.get("tick")))
-            if isinstance(tick, int):
+            tick = st.get("tick")
+            if isinstance(tick, int) and tick != current_tick:
                 reached = tick
-                if tick >= target_tick:
-                    break
+                break
             time.sleep(0.5)
-        self.daemon.set_paused(True)
-        return reached if reached is not None else target_tick
+        # Calibrate the tick rate from the UNPAUSE duration only:
+        # the status-poll wait after re-pausing runs while the game
+        # is paused, so counting it would understate the rate.
+        advanced = reached - current_tick
+        if unpause_s > 0 and advanced > 0:
+            rate = advanced / unpause_s
+            self._tick_rate = max(10.0, min(200.0, rate))
+        return reached
 
     def run(self) -> int:
         # The daemon loop is paused so the rule-based planner does
         # not also act; the model is the sole decision-maker.
         self.daemon.pause_daemon_loop()
+        # Clear the snapshot diff baselines so the model's FIRST
+        # observation is the whole fort in full, not "unchanged"
+        # one-liners left over from earlier sessions. Later ticks
+        # diff normally.
+        try:
+            from dfagent_harness.store import Store, default_world_db_path
+            n = Store(default_world_db_path()).clear_snapshots()
+            print(f"m1: cleared {n} snapshot baselines", flush=True)
+        except Exception as exc:
+            print(f"m1: baseline clear failed (continuing): {exc}",
+                  flush=True)
         self._log("run_start", days=self.args.days,
                   window=self.args.window, model=self.args.model,
                   mock=self.args.mock)
@@ -324,9 +395,13 @@ class M1Driver:
                           actions_taken=self.actions_taken,
                           idle_ticks=self.idle_ticks)
                 return 0
-            # Fort dead check: population 0.
+            # Fort dead check: parse the citizen count out of the
+            # status section. (A plain substring check for
+            # "0 citizens" false-positives on "10 citizens".)
+            import re as _re
             status = (snap.get("sections") or {}).get("status", "")
-            if "0 citizens" in status or "population 0" in status:
+            _m = _re.search(r"(\d+) citizens", status)
+            if _m is not None and int(_m.group(1)) == 0:
                 self._log("run_end", reason="fort dead", tick=tick)
                 return 1
             try:
@@ -343,7 +418,7 @@ class M1Driver:
                     return 2
                 # A failed model call ends the TICK, not the run:
                 # advance the clock a little and try again.
-                self._advance_clock(tick + self.args.window)
+                self._advance_clock(tick + self.args.window, tick)
                 continue
             # Split queries from real actions; queries run first and
             # their results join the next prompt.
@@ -366,28 +441,35 @@ class M1Driver:
                           stall_ticks=self.stall_ticks)
                 if self.stall_ticks >= STALL_FALLBACK_TICKS:
                     # Fallback: run the snapshot's suggestion.
-                    sugg = snap.get("suggestion") or {}
-                    if sugg.get("action"):
-                        self._log("fallback",
-                                  action=sugg.get("action"))
+                    parsed = parse_suggestion(snap.get("suggestion"))
+                    if parsed is not None:
+                        kind, name = parsed
+                        self._log("fallback", kind=kind, name=name)
                         try:
-                            res = self.daemon.do_action(
-                                sugg["action"], sugg.get("kwargs") or {})
-                            self._log("action", name=sugg["action"],
+                            if kind == "task":
+                                res = self.daemon.run_task(name)
+                            else:
+                                res = self.daemon.query(name)
+                            self._log("action", name=f"{kind}:{name}",
                                       ok=res.get("ok"),
-                                      reason=str(res.get("reason"))[:200])
+                                      reason=str(res.get("reason")
+                                                 or res.get("detail", ""))[:200])
                             self.actions_taken += 1
                         except Exception as exc:
                             self._log("action_error",
-                                      name=sugg.get("action"),
+                                      name=f"{kind}:{name}",
                                       error=str(exc)[:300])
                         self.stall_ticks = 0
             else:
                 self.stall_ticks = 0
                 for a in real[:MAX_ACTIONS_PER_TICK]:
                     try:
-                        res = self.daemon.do_action(
-                            a["action"], a.get("kwargs") or {})
+                        if a["action"].startswith("task:"):
+                            res = self.daemon.run_task(
+                                a["action"][len("task:"):])
+                        else:
+                            res = self.daemon.do_action(
+                                a["action"], a.get("kwargs") or {})
                         self._log("action", name=a["action"],
                                   ok=res.get("ok"),
                                   reason=str(res.get("reason"))[:300],
@@ -396,7 +478,7 @@ class M1Driver:
                     except Exception as exc:
                         self._log("action_error", name=a["action"],
                                   error=str(exc)[:300])
-            self._advance_clock(tick + self.args.window)
+            self._advance_clock(tick + self.args.window, tick)
         # unreachable
         return 0
 
@@ -425,10 +507,14 @@ def main() -> int:
     try:
         return driver.run()
     finally:
-        # Leave the daemon loop resumed so the fort is tended by the
-        # rule-based planner after the run.
+        # Do NOT resume the daemon loop and do NOT leave the game
+        # running. An unattended run burns drink fast: on 2026-11-26
+        # a mock run's exit resumed the loop and the fort ran 19
+        # in-game days to drink 0 before anyone noticed. Leave the
+        # game paused and the loop paused; the parent decides when
+        # to resume.
         try:
-            driver.daemon.resume_daemon_loop()
+            driver.daemon.set_paused(True)
         except Exception:
             pass
 

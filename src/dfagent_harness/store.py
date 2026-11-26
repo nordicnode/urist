@@ -228,6 +228,18 @@ class Store:
         return {"tick": row["tick"], "hash": row["hash"],
                 "text": row["json"]}
 
+    @_locked
+    def clear_snapshots(self) -> int:
+        """Delete all per-section diff baselines. The next snapshot
+        renders every section in full. Used at the start of an M1/M2
+        run so the model's first observation is the whole fort, not
+        "unchanged" one-liners left over from earlier sessions."""
+        n = self.conn.execute(
+            "SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        self.conn.execute("DELETE FROM snapshots")
+        self.conn.commit()
+        return n
+
     # -- areas ----------------------------------------------------------
     @_locked
     def record_areas(self, tick: int, areas: list[dict[str, Any]],

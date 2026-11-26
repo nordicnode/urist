@@ -521,6 +521,14 @@ class Daemon:
         # 30s apart with zero ticks advanced). The threat hold above
         # already returned early for a critical threat, so reaching
         # here means it is safe to run.
+        # BUT: re-check the loop-pause flag first. A tick that
+        # started before the loop was paused must NOT unpause the
+        # game at the end — the next tick is skipped while paused,
+        # so nothing would re-pause it and the fort would run
+        # unattended (observed 2026-11-26: 1530 ticks, drink 39
+        # -> 35, during a mock run whose loop was paused).
+        if self._loop_paused:
+            return
         with self.lock:
             if get_paused(self.client):
                 set_paused(self.client, False)
@@ -981,6 +989,16 @@ class Daemon:
 
     def set_loop_paused(self, paused: bool) -> None:
         self._loop_paused = paused
+        # Pausing the loop also pauses the game at once: otherwise a
+        # pause request leaves the fort running until the next tick
+        # (which is skipped while paused, so nothing re-pauses it).
+        if paused and self.client is not None:
+            try:
+                with self.lock:
+                    if not get_paused(self.client):
+                        set_paused(self.client, True)
+            except Exception:
+                pass
         self.journal.log_event(
             "daemon_loop_paused" if paused else "daemon_loop_resumed",
             f"loop_paused={paused}")

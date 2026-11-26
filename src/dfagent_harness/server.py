@@ -14,6 +14,12 @@ Routes:
 * ``GET /v1/units``, ``/v1/unit/{id}``, ``/v1/buildings``,
   ``/v1/jobs``, ``/v1/items``, ``/v1/reports``, ``/v1/map``,
   ``/v1/cursor`` — read-only state queries.
+* ``GET /v1/slice?x0&y0&z&x1&y1&layer`` — one ASCII slice
+  (world-model design §3.4; max 64x64, ``&full=1`` for a full
+  z-level, flagged expensive).
+* ``GET /v1/areas``, ``/v1/area/{id|name}``, ``/v1/path?a&b`` —
+  named areas + the connectivity graph (design §3; derived once
+  from a full block scan, cached, ``?refresh=1`` re-derives).
 * ``GET /v1/journal`` — daemon journal (decisions + events).
 * ``GET /v1/goals``, ``POST /v1/goals``, ``GET /v1/goals/{id}``,
   ``POST /v1/goals/{id}/done``, ``DELETE /v1/goals/{id}``.
@@ -174,6 +180,55 @@ def create_server(
                 client,
                 lambda: observe.collect(client, sections=(section,)))
 
+    # -- spatial model (world-model design §3) -------------------------
+    # Areas + the connectivity graph are derived once from a full
+    # block scan and cached in memory; re-derived on demand
+    # (?refresh=1) or after a dig/build action. Never per tick.
+    # The scan is slow (~10 s), so the derivation is one paused_read
+    # holding a single pause for the collect + the scan.
+    spatial_cache: dict[str, Any] = {"areas": None}
+
+    def get_areas(refresh: bool = False) -> dict[str, Any]:
+        from . import observe, spatial
+        from .read_safety import paused_read
+        if client is None:
+            raise ConnectionError("no DFHack client")
+        if spatial_cache["areas"] is not None and not refresh:
+            return spatial_cache["areas"]
+        t0 = time.monotonic()
+
+        def _derive() -> dict[str, Any]:
+            state = observe.collect(
+                client, sections=("buildings", "units", "map",
+                                  "status"))
+            scan = spatial.scan_blocks(client)
+            return spatial.derive_areas(state, scan)
+
+        with rpc_lock:
+            areas = paused_read(client, _derive)
+        areas["cost"] = {
+            "tokens": spatial.estimate_tokens(
+                str(areas.get("areas", []))),
+            "ms": int((time.monotonic() - t0) * 1000),
+            "cached": False,
+        }
+        areas["stale"] = False
+        spatial_cache["areas"] = areas
+        return areas
+
+    def get_slice(x0: int, y0: int, z: int, x1: int, y1: int,
+                  layer: str, allow_full: bool) -> dict[str, Any]:
+        from . import spatial
+        from .read_safety import paused_read
+        if client is None:
+            raise ConnectionError("no DFHack client")
+        with rpc_lock:
+            return paused_read(
+                client,
+                lambda: spatial.render_slice(
+                    client, x0, y0, z, x1, y1, layer=layer,
+                    allow_full=allow_full))
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -232,6 +287,14 @@ def create_server(
                 self._section("reports", collect_section)
             elif path == "/v1/map":
                 self._section("map", collect_section)
+            elif path == "/v1/slice":
+                self._slice(query, get_slice)
+            elif path == "/v1/areas":
+                self._areas(query, get_areas)
+            elif path.startswith("/v1/area/"):
+                self._area(path, query, get_areas, get_slice)
+            elif path == "/v1/path":
+                self._path(query, get_areas)
             elif path == "/v1/cursor":
                 self._cursor()
             elif path == "/v1/events":
@@ -435,6 +498,147 @@ def create_server(
                        {"error": str(exc)})
                 return
             _json(self, 200, state.get(section, state))
+
+        # -- spatial model (world-model design §3) --------------------
+        def _slice(self, query: dict[str, list[str]],
+                   slice_fn: Callable[..., dict[str, Any]]) -> None:
+            try:
+                x0 = int(query["x0"][0])
+                y0 = int(query["y0"][0])
+                z = int(query["z"][0])
+                x1 = int(query["x1"][0])
+                y1 = int(query["y1"][0])
+            except (KeyError, IndexError, ValueError):
+                _error(self, 400, "BAD_REQUEST",
+                       "slice needs integer x0,y0,z,x1,y1 params")
+                return
+            layer = query.get("layer", ["terrain"])[0]
+            allow_full = query.get("full", [""])[0].lower() in (
+                "1", "true")
+            try:
+                out = slice_fn(x0, y0, z, x1, y1, layer, allow_full)
+            except ValueError as exc:
+                _error(self, 400, "BAD_REQUEST", str(exc))
+                return
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "slice unavailable", {"error": str(exc)})
+                return
+            _json(self, 200, out)
+
+        def _areas(self, query: dict[str, list[str]],
+                   areas_fn: Callable[[bool], dict[str, Any]]) -> None:
+            refresh = query.get("refresh", [""])[0].lower() in (
+                "1", "true")
+            try:
+                areas = areas_fn(refresh)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "areas unavailable", {"error": str(exc)})
+                return
+            _json(self, 200, areas)
+
+        def _area(self, path: str, query: dict[str, list[str]],
+                  areas_fn: Callable[[bool], dict[str, Any]],
+                  slice_fn: Callable[..., dict[str, Any]]) -> None:
+            from . import spatial
+            ref = path[len("/v1/area/"):]
+            if not ref:
+                _error(self, 400, "BAD_REQUEST",
+                       "area id or name required")
+                return
+            refresh = query.get("refresh", [""])[0].lower() in (
+                "1", "true")
+            try:
+                areas = areas_fn(refresh)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "areas unavailable", {"error": str(exc)})
+                return
+            area = spatial.resolve_area(areas["areas"], ref)
+            if area is None:
+                _error(self, 404, "NOT_FOUND",
+                       f"no area {ref!r}")
+                return
+            # A slice of the area: its centre, clamped to 40x40, at
+            # the top z for the surface (the ground) and the bottom z
+            # otherwise (the floor). The area may be larger than the
+            # slice cap; the response says so.
+            b = area["bbox"]
+            cx = (b["x0"] + b["x1"]) // 2
+            cy = (b["y0"] + b["y1"]) // 2
+            z = b["z1"] if area["kind"] == "surface" else b["z0"]
+            x0 = max(b["x0"], cx - 20)
+            x1 = min(b["x1"], cx + 19)
+            y0 = max(b["y0"], cy - 20)
+            y1 = min(b["y1"], cy + 19)
+            try:
+                sl = slice_fn(x0, y0, z, x1, y1, "terrain", False)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "area slice unavailable", {"error": str(exc)})
+                return
+            _json(self, 200, {"area": area, "slice": sl})
+
+        def _path(self, query: dict[str, list[str]],
+                  areas_fn: Callable[[bool], dict[str, Any]]) -> None:
+            from . import spatial
+            a = (query.get("a") or [""])[0]
+            b = (query.get("b") or [""])[0]
+            if not a or not b:
+                _error(self, 400, "BAD_REQUEST",
+                       "path needs ?a=<area>&b=<area>")
+                return
+            try:
+                areas = areas_fn(False)
+            except ReadRefused as exc:
+                _error(self, 503, "READ_REFUSED", str(exc),
+                       {"error": str(exc)})
+                return
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "areas unavailable", {"error": str(exc)})
+                return
+            graph = areas["graph"]
+            # Resolve names to ids first.
+            by_id = {x["id"]: x for x in areas["areas"]}
+            a_id = a if a in by_id else (
+                spatial.resolve_area(areas["areas"], a) or {}).get("id")
+            b_id = b if b in by_id else (
+                spatial.resolve_area(areas["areas"], b) or {}).get("id")
+            if a_id is None or b_id is None:
+                _error(self, 404, "NOT_FOUND",
+                       f"unknown area: {a!r} or {b!r}")
+                return
+            ids = spatial.find_path(graph, a_id, b_id)
+            if ids is None:
+                _json(self, 200, {
+                    "from": a_id, "to": b_id, "path": None,
+                    "note": "no connection between these areas "
+                            "(they are separated by solid rock; dig "
+                            "a stairwell or tunnel to link them)"})
+                return
+            _json(self, 200, {
+                "from": a_id, "to": b_id,
+                "path": [{"id": i, "name": by_id[i]["name"],
+                          "kind": by_id[i]["kind"],
+                          "bbox": by_id[i]["bbox"]} for i in ids]})
 
         def _cursor(self) -> None:
             if client is None:

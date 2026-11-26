@@ -49,7 +49,7 @@ def _game_is_up():
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestLiveActions(unittest.TestCase):
-    """Verified live against the Athelunol fort (region1)."""
+    """Verified live against the Dakasdoma fort (region2, Ilassil)."""
 
     @classmethod
     def setUpClass(cls):
@@ -143,15 +143,53 @@ class TestLiveActions(unittest.TestCase):
         return mat.get("accessible", 0) >= 1
 
     def _first_free_workshop_site(self):
-        """First free 3x3 site from a candidate list near the wagon."""
-        for x, y in ((85, 85), (88, 85), (85, 88), (100, 85),
-                     (85, 100), (105, 90), (102, 92)):
-            site = actions._run_helper(
-                self.client, "probe_site.lua",
-                {"x": x, "y": y, "z": 42, "width": 3, "height": 3})
-            if site.get("free"):
-                return (x, y, 42)
+        """First free 3x3 site from a grid scan around the fort.
+
+        Scans a step-4 grid over the fort area and returns the first
+        free site, instead of a fixed candidate list: a fixed list
+        burns out (a deconstructed workshop's site can stay blocked,
+        and most near-wagon tiles here are WALL), while the grid
+        always finds one of the dozen free sites. Returns (x, y, 175).
+        """
+        for x in range(80, 121, 4):
+            for y in range(80, 121, 4):
+                site = actions._run_helper(
+                    self.client, "probe_site.lua",
+                    {"x": x, "y": y, "z": 175, "width": 3, "height": 3})
+                if site.get("free"):
+                    return (x, y, 175)
         self.fail("no free 3x3 workshop site found near the wagon")
+
+    def _find_tree(self):
+        """A tree far from the fort, as a 1x1 box around its des tile.
+
+        Found at runtime, not hardcoded: a designated tree gets chopped
+        (the (100,93,175) tree from the first Dakasdoma run is gone),
+        so the test must pick a fresh tree each run. It picks the tree
+        farthest from the fort centre (97,97) in a wide rect, so no
+        dwarf reaches it during the test's ~1s unpause bursts. The 1x1
+        box is verified to hold exactly that one tree. Returns
+        (box, tree_pos) with tree_pos a [x, y, z] list.
+        """
+        r = actions._run_helper(
+            self.client, "probe_plants.lua",
+            {"x0": 70, "y0": 70, "z0": 175, "x1": 125, "y1": 125,
+             "z1": 175, "kind": "tree"})
+        plants = r.get("plants") or []
+        self.assertGreater(len(plants), 0, "no trees near the fort")
+        # Farthest from the fort centre first.
+        plants.sort(key=lambda p: -((p["des"][0] - 97) ** 2
+                                    + (p["des"][1] - 97) ** 2))
+        for p in plants:
+            x, y, z = p["des"]
+            box = (x, y, z, x, y, z)
+            check = actions._run_helper(
+                self.client, "probe_plants.lua",
+                {"x0": x, "y0": y, "z0": z, "x1": x, "y1": y, "z1": z,
+                 "kind": "tree"})
+            if check.get("total") == 1:
+                return box, [x, y, z]
+        self.fail("no isolated tree found near the fort")
 
     # -- tests -------------------------------------------------------------
 
@@ -182,15 +220,18 @@ class TestLiveActions(unittest.TestCase):
                 self.assertEqual(self._buildings()["count"], before_count)
 
     def test_chop_marks_tree_spawns_job_and_unmarks(self):
-        # Tree at 110,98,32 (des tile the same). The unmark succeeds on
-        # the verified designation, but the FellTree job is NOT removed
-        # by the game — verified live 2026-11-25/26: removeJob, the
-        # game's own designation processing, and ticks all leave it, and
-        # manual deletion crashed the game once, so it is reported in
+        # The unmark succeeds on the verified designation, but the
+        # FellTree job is NOT removed by the game — verified live
+        # 2026-11-25/26: removeJob, the game's own designation
+        # processing, and ticks all leave it, and manual deletion
+        # crashed the game once, so it is reported in
         # detail["remaining_jobs"] rather than failed on. See
-        # docs/ACTIONS.md. The tree itself must still stand, and the
-        # test tolerates a stale FellTree job left by an earlier run.
-        box = (108, 96, 32, 112, 100, 32)  # just the tree at 110,98,32
+        # docs/ACTIONS.md. The tree is found at runtime (see
+        # _find_tree): a hardcoded tree gets chopped between runs, and
+        # the far-from-fort pick means no dwarf reaches it during the
+        # test's ~1s unpause bursts. The test tolerates a stale
+        # FellTree job left by an earlier run.
+        box, tree_pos = self._find_tree()
         # Clear any stale mark first: the reload save can hold a mark
         # from an interrupted earlier run, and the test asserts a
         # clean before-state.
@@ -220,10 +261,10 @@ class TestLiveActions(unittest.TestCase):
                           f"unexpected job evidence: {evidence!r}")
             self.assertTrue(
                 [j for j in self._jobs()["list"]
-                 if j["type"] == "FellTree" and j["pos"] == [110, 98, 32]],
+                 if j["type"] == "FellTree" and j["pos"] == tree_pos],
                 "no FellTree job listed at the tree's tile")
-        # The tree itself must still stand: it is in an unreachable
-        # cavern pocket, so no dwarf ever takes the stale FellTree job.
+        # The tree itself must still stand: it is far from the fort, so
+        # no dwarf reaches it to chop it during the test.
         r2 = actions.act(self.client, "designate_chop", box=box, mark=False)
         self.assertTrue(r2.ok, r2.reason)
         self.assertEqual(r2.after, {"total": 1, "marked": 0})
@@ -232,12 +273,12 @@ class TestLiveActions(unittest.TestCase):
             len(remaining), 1,
             "expected the known stale FellTree job(s) to be reported")
         self.assertTrue(
-            all(j["type"] == "FellTree" and j["pos"] == [110, 98, 32]
+            all(j["type"] == "FellTree" and j["pos"] == tree_pos
                 for j in remaining),
             f"unexpected remaining jobs: {remaining!r}")
 
     def test_dig_designate_and_clear(self):
-        box = (90, 90, 41, 91, 91, 41)  # 4 soil-wall tiles under the fort
+        box = (95, 95, 174, 96, 96, 174)  # 4 soil-wall tiles under the fort
         r = actions.act(self.client, "designate_dig", box=box, mode="dig")
         self.assertTrue(r.ok, r.reason)
         self.assertEqual(r.before, {"dig_total": 0})
@@ -258,8 +299,8 @@ class TestLiveActions(unittest.TestCase):
         # {"harvested": true}) and the assertions below go stale.
         actions.set_paused(self.client, True)
         box = None
-        for x, y, z in [(92, 79, 42), (70, 87, 42), (85, 44, 42),
-                        (51, 90, 42), (73, 95, 42), (59, 100, 42)]:
+        for x, y, z in [(92, 101, 175), (92, 102, 175), (92, 110, 175),
+                        (92, 112, 175), (92, 113, 175), (93, 102, 175)]:
             b = (x, y, z, x, y, z)
             # Clear any stale mark first (the reload save can hold one
             # from an interrupted earlier run).
@@ -324,12 +365,17 @@ class TestLiveActions(unittest.TestCase):
         self.assertEqual(self._jobs()["manager_order_count"], 0)
 
     def test_observe_sections_healthy(self):
-        # Regression guard for the reports.lua 0-based indexing fix: the
-        # fort now has announcements, so a broken take_tail fails here.
+        # Regression guard for the reports.lua 0-based indexing fix: a
+        # broken take_tail fails here (error, or a malformed reports
+        # section). A fresh fort legitimately has zero announcements,
+        # so the count is asserted >= 0, not >= 1 (the old >= 1 assumed
+        # Athelunol's announcement history).
         state = collect(self.client)
         self.assertEqual(state["errors"], [])
+        self.assertIn("reports", state)
+        self.assertIsInstance(state["reports"]["announcement_count"], int)
         self.assertGreaterEqual(
-            state["reports"]["announcement_count"], 1)
+            state["reports"]["announcement_count"], 0)
 
     def test_pause_restored(self):
         self.assertTrue(actions.get_paused(self.client))

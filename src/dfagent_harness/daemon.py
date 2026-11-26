@@ -426,7 +426,7 @@ class Daemon:
         # during map load crashed DF twice (2026-11-26, double-free
         # abort at "Resetting textures"). The probe reads GUI state
         # only; the collect below runs only once a fort is loaded.
-        from .ui import DIALOG_KEYS, dismiss_dialog, fort_loaded, get_focus
+        from .ui import fort_loaded, get_focus
         try:
             probe = get_focus(self.client, timeout=10.0)
             focus = probe.get("focus") if probe.get("ok") else None
@@ -440,25 +440,43 @@ class Daemon:
         # A modal dialog freezes the tick even when the pause flag is
         # clear (verified live: the outpost liaison meeting left the
         # fort at tick 225920 for 20+ minutes while the planner kept
-        # ticking). Dismiss a known dialog and skip the rest of this
-        # tick; any other non-map focus is logged (once per focus
-        # value) and also skips the tick — acting through a dialog
-        # fails or, worse, drives the wrong menu.
+        # ticking). Handle it PROGRAMMATICALLY (dialogs.advance):
+        # dfhack.screen.dismiss marks the screen for removal, no
+        # keystrokes. Mikey rejected the keystroke path (2026-11-26)
+        # and flagging dialogs as a limitation — the programmatic
+        # route is the only dismissal. A modal outside the allowlist
+        # (game-committing or unknown) is named and logged as
+        # dialog_blocked, never dismissed. Acting through a dialog
+        # fails or, worse, drives the wrong menu, so the tick is
+        # skipped either way.
         if focus != "dwarfmode/Default":
-            if focus in DIALOG_KEYS:
-                out = dismiss_dialog(self.client,
-                                     display=self.config.display)
-                self.journal.log_event(
-                    "dialog_dismissed", f"{focus} -> {out}")
-                print(f"dfh planner: dismissed {focus} dialog: {out}",
+            from . import dialogs
+            try:
+                res = dialogs.advance(self.client, max_rounds=3,
+                                      wait_s=2.0)
+            except Exception as exc:  # noqa: BLE001 - retry next tick
+                print(f"dfh planner: dialog advance failed: {exc}",
                       flush=True)
-            elif focus != getattr(self, "_last_dialog_focus", None):
-                self._last_dialog_focus = focus
+                return
+            for audit in res.get("cleared") or []:
                 self.journal.log_event(
-                    "dialog_blocked",
-                    f"game on unexpected focus {focus!r}; tick skipped")
-                print(f"dfh planner: unexpected focus {focus!r}; "
-                      f"tick skipped", flush=True)
+                    "dialog_dismissed",
+                    f"{audit.get('focus')} -> {audit.get('focus_after')} "
+                    f"(dismissed={audit.get('dismissed')}, "
+                    f"removed={audit.get('removed')})")
+                print(f"dfh planner: dismissed {audit.get('focus')} "
+                      f"dialog programmatically",
+                      flush=True)
+            if not res.get("ok"):
+                blocked = res.get("blocked_by")
+                if blocked != getattr(self, "_last_dialog_focus", None):
+                    self._last_dialog_focus = blocked
+                    self.journal.log_event(
+                        "dialog_blocked",
+                        f"game on blocking focus {blocked!r}; "
+                        f"{res.get('reason')}; tick skipped")
+                    print(f"dfh planner: blocking focus {blocked!r}; "
+                          f"{res.get('reason')}", flush=True)
             return
         # The planner decides from a FULL state. The poller's
         # last_state is a lite snapshot (fast sections only: no

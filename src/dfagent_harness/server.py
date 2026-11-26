@@ -559,6 +559,8 @@ def create_server(
                 self._goal_done(path)
             elif path == "/v1/control/quicksave":
                 self._quicksave()
+            elif path == "/v1/control/advance":
+                self._advance()
             elif path == "/v1/control/daemon/pause":
                 self._daemon_pause(True)
             elif path == "/v1/control/daemon/resume":
@@ -1647,6 +1649,45 @@ def create_server(
                 bus.unsubscribe(pending.put)
 
         # -- control ----------------------------------------------------
+        def _advance(self) -> None:
+            """POST /v1/control/advance — the harness advance check.
+
+            While time is not moving, check the current viewscreen; if
+            a blocking screen is present, dismiss it programmatically
+            (dialogs.advance, per the allowlist) and re-check. Names
+            the last blocking screen in a zero-tick failure instead of
+            timing out quietly. The M1 driver calls this when the clock
+            does not advance during a window, so a modal can never
+            stall a run silently. Returns the advance result dict.
+            """
+            if client is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "no DFHack client")
+                return
+            from . import dialogs
+            try:
+                with rpc_lock:
+                    res = dialogs.advance(client, max_rounds=3,
+                                         wait_s=2.0)
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "RPC_ERROR",
+                       f"advance failed: {exc}")
+                return
+            if daemon is not None:
+                for audit in res.get("cleared") or []:
+                    daemon.journal.log_event(
+                        "dialog_dismissed",
+                        f"{audit.get('focus')} -> "
+                        f"{audit.get('focus_after')} "
+                        f"(dismissed={audit.get('dismissed')}, "
+                        f"removed={audit.get('removed')})")
+                if not res.get("ok") and res.get("blocked_by"):
+                    daemon.journal.log_event(
+                        "dialog_blocked",
+                        f"advance refused {res.get('blocked_by')!r}: "
+                        f"{res.get('reason')}")
+            _json(self, 200, res)
+
         def _quicksave(self) -> None:
             if daemon is None:
                 _error(self, 503, "GAME_NOT_RUNNING",

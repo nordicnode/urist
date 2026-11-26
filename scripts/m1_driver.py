@@ -445,6 +445,20 @@ class M1Driver:
         if unpause_s > 0 and advanced > 0:
             rate = advanced / unpause_s
             self._tick_rate = max(10.0, min(200.0, rate))
+        if advanced <= 0:
+            # The clock did not move during the window. A modal
+            # dialog freezes the tick even when the pause flag is
+            # clear — run the advance check (POST /v1/control/
+            # advance): it dismisses a blocking screen
+            # programmatically (per the allowlist) or names the
+            # blocking screen as a failure, so a modal can never
+            # stall a run silently.
+            try:
+                res = self.daemon.post("/v1/control/advance", {})
+                self._log("advance", result=res)
+                print(f"m1: advance check: {res}", flush=True)
+            except Exception as exc:
+                self._log("advance_error", error=str(exc)[:300])
         return reached
 
     def run(self) -> int:

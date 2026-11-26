@@ -151,16 +151,16 @@ Headline fortress stocks, counted over `world.items.other.IN_PLAY`
 
 | Field | Meaning |
 |---|---|
-| `list` | Queued jobs from the `world.jobs` linked list: `{id, type, pos, suspend, repeat_}`. `type` is the `df.job_type` name. |
+| `list` | Queued jobs from the `world.jobs` linked list: `{id, type, pos, suspend, repeat_}`. `type` is the `df.job_type` name. Verified on non-empty lists in phase 2 (FellTree, Dig, GatherPlants, Drink2, RecoverWounded, ConstructBuilding jobs all walked). |
 | `count`, `counts_by_type` | Total and `[{type, count}]` |
-| `manager_orders`, `manager_order_count` | Manager orders from `world.manager_orders`. Each order is a generic scalar dump of its struct fields plus `job_type_name` where readable. **Unverified on a non-empty list** — no orders existed on the fresh fort (see Limitations). |
+| `manager_orders`, `manager_order_count` | Manager orders from `world.manager_orders`. Each order is a generic scalar dump of its struct fields plus `job_type_name` where readable. Verified on non-empty data in phase 2 (MakeBarrel x5 created and removed; observed fields include `id`, `job_type`, `job_type_name`, `amount_left`, `amount_total`). |
 
 ### `reports`
 
 | Field | Meaning |
 |---|---|
-| `announcements`, `announcement_count` | Last 20 announcements (oldest→newest of the tail) + total count. Each entry is a generic scalar dump of its struct fields plus best-effort `text`, `year`, `year_tick`, `pos`. **Unverified on non-empty lists** (fresh fort: 0). |
-| `reports`, `report_count` | Same, for combat reports in `world.status.reports`. |
+| `announcements`, `announcement_count` | Last 20 announcements (oldest→newest of the tail) + total count. Each entry is a generic scalar dump of its struct fields plus best-effort `text`, `year`, `time`, `pos` (the struct field is `time`, tick within the year — not `year_tick`). Verified on non-empty lists in phase 2 (build-cancellation and weather announcements; the 0-based `take_tail` fix in `reports.lua` was required for non-empty lists to read at all). |
+| `reports`, `report_count` | Same, for combat reports in `world.status.reports`. Combat reports themselves are still unverified on non-empty data (no combat on this fort). |
 
 ### `map`
 
@@ -237,18 +237,17 @@ Example dumps: `tests/fixtures/observe-athelunol.txt` (and `.json`).
    are reported raw (ticks since last satisfied). What values mean
    "hungry" / "thirsty" / "exhausted" is not established — do not
    invent thresholds until phase 3 measures them on a live fort.
-5. **Manager orders, announcements, combat reports unverified on
-   non-empty data.** Both lists are empty on a fresh fort, so their
-   struct fields could not be probed live. The helpers dump every
-   scalar field generically (`dfh_dump`) plus best-effort named fields,
-   so they will surface data rather than crash — but the exact field
-   names/shapes need a live check once the fort has orders/reports
-   (phase 2 work will exercise them).
-6. **Jobs enumeration verified only on an empty list.** The
-   `world.jobs` linked-list walk (`.item` / `.next`) is structurally
-   confirmed (empty head node has `item=nil, next=nil`), but no job
-   has existed yet to walk. Phase 2 (first designation) will verify it
-   on a non-empty list.
+5. **Manager orders and announcements verified on non-empty data
+   (phase 2, 2026-11-25/26).** Manager orders were exercised by
+   creating/removing a MakeBarrel x5 order; announcements by the
+   build-cancellation and weather entries. Combat reports are still
+   unverified on non-empty data (no combat on this fort).
+6. **Jobs enumeration verified on non-empty lists (phase 2).** The
+   `world.jobs` linked-list walk (`.item` / `.next`) was confirmed
+   against FellTree, Dig, GatherPlants, Drink2, RecoverWounded and
+   ConstructBuilding jobs. One caveat lives in the action layer, not
+   the observation layer: see `docs/ACTIONS.md` (FellTree jobs are
+   never removed from the list by the game).
 7. **Designation scan is slow (~4 s).** Full block scan, 8352 blocks ×
    256 tiles. Opt-in only. Job counts by type are the cheap proxy for
    designation activity in the default dump.

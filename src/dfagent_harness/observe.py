@@ -362,7 +362,7 @@ def render_text(state: dict[str, Any]) -> str:
             f"Announcements ({reports.get('announcement_count')} total, "
             f"last {len(anns)}):")
         for a in anns:
-            lines.append(f"  [{a.get('year')}-{a.get('year_tick')}] "
+            lines.append(f"  [{a.get('year')}-{a.get('time')}] "
                          f"{a.get('text')}")
         reps = reports.get("reports") or []
         lines.append(

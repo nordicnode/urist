@@ -101,9 +101,15 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   — the units would fight them for :99/:98 and RPC 5000. Run the
   install script (it hands over) or stop the manual processes first.
   /etc survives a reboot but NOT a VM replacement: after a replacement,
-  run recover.sh, then install-supervisor.sh. A full VM reboot test
-  has NOT been done yet (verified: kill-restart + target stop/start);
-  the next real reboot is the proof.
+  run recover.sh, then install-supervisor.sh. **Verified 2026-11-27
+  ~13:09 PT: a real VM replacement wiped /etc/systemd units, /tmp, and
+  the running stack; recover.sh + install-supervisor.sh restored it
+  end to end in minutes (RECOVER-OK, HANDOVER-OK, fort reloaded at
+  tick 115166 with drink 97 — identical to pre-reboot).** A full VM
+  reboot test (plain reboot, no replacement) has NOT been done yet:
+  /etc survives a reboot by design, so the units should survive one,
+  but no real reboot has happened since the supervisor was installed,
+  so do not claim reboot-proof until one does.
 - **The M1 model:** DeepSeek V4.1 Flash via Free Pi, model id
   `deepseek-v4.1-flash-1017`, JWT at `~/.free-pi/agent/jwt.txt` (0600).
   Free Pi is the weak link (IncompleteRead, HTTP 429 "concurrent" when

@@ -48,18 +48,23 @@ from dfhack_rpc import DFHackClient
 # it declines to engage, it does not commit the game to anything.
 #   textviewer: an announcement / help text. Dismissing closes it.
 #     Proven live 2026-11-26 (dfhack.screen.dismiss).
-#   topicmeeting: the outpost liaison meeting. NOT dismissable —
-#     proven live 2026-11-27 (see DIALOGS.md): dfhack.screen.dismiss
-#     on the child AND the parent marks dismissed, but the game
-#     re-creates the meeting screen on the next tick (the game ticked
-#     exactly +1, then the screen re-appeared) because the meeting is
-#     a scripted conversation (dipscript) that only ends when the
-#     player makes the menu choice ("a - Finish peeking in on
-#     conversation"). Writing option_key_pressed and the popup
-#     close_screen flag are both ignored, and feed() cannot express
-#     the letter key (no single-letter interface_key exists). So the
-#     meeting needs a menu choice no Lua route can make; it is
-#     refused and named, and the decision is escalated.
+#   topicmeeting: the outpost liaison meeting. NOT dismissable by
+#     plain screen.dismiss — proven live 2026-11-27 (see DIALOGS.md):
+#     dfhack.screen.dismiss on the child AND the parent marks
+#     dismissed, but the game re-creates the meeting screen on the
+#     next tick because the meeting is a scripted conversation
+#     (dipscript) that only ends when the player makes the menu
+#     choice ("a - Finish peeking in on conversation"). Writing
+#     option_key_pressed and the popup close_screen flag are both
+#     ignored, and feed() cannot express the letter key (no
+#     single-letter interface_key exists). BUT it is resolvable
+#     without any keypress: resolve_topicmeeting() jumps the
+#     dipscript to its farewell step (cur_step write, proven live
+#     the same day — the bye textviewer appears, the game sets
+#     cur_step to -1, the liaison leaves, the clock runs). So
+#     advance() routes a blocking topicmeeting to
+#     resolve_topicmeeting() instead of refusing; the allowlist
+#     entry stays "undismissable" only in the plain-dismiss sense.
 #   announcelist: the announcements list. Dismissing closes it.
 # Undismissable = refusing to dismiss; the caller names the screen
 # and returns it as a failure. These are screens where closing
@@ -69,7 +74,7 @@ from dfhack_rpc import DFHackClient
 #   table is REFUSED by default — an unknown modal is never dismissed.)
 ALLOWLIST: dict[str, tuple[bool, str]] = {
     "textviewer": (True, "announcement/help text; closing it commits nothing"),
-    "topicmeeting": (False, "liaison meeting; screen.dismiss re-creates it every tick — the peek needs the 'a' (finish peeking) menu choice and no Lua route expresses it; see DIALOGS.md"),
+    "topicmeeting": (False, "liaison meeting; plain screen.dismiss re-creates it every tick — use resolve_topicmeeting() (dipscript jump to the farewell step, proven live 2026-11-27); see DIALOGS.md"),
     "announcelist": (True, "announcements list; closing it commits nothing"),
 }
 
@@ -196,6 +201,44 @@ dfh_print(out)
             "removed": focus_after != focus_before}
 
 
+def resolve_topicmeeting(client: DFHackClient) -> dict[str, Any]:
+    """Resolve a topicmeeting (liaison meeting peek view) programmatically.
+
+    Proven live 2026-11-27 on the scratch fort (region5, tick 222291):
+    the topicmeeting cannot be ended with ``dfhack.screen.dismiss`` —
+    the game re-creates it every tick while the meeting's dipscript is
+    mid-conversation (five failed experiments: dismiss child, parent,
+    both, ``option_key_pressed`` write, popup close-flag write). The
+    programmatic route runs ``lua/resolve_meeting.lua``: it writes
+    ``meeting.cur_step`` to the LAST dipscript step (the farewell
+    textviewer, whose ``next_step_idx`` is -1 = script end) and
+    dismisses the topicmeeting child + parent meetingst. The next
+    tick presents the bye textviewer (dismissable by the proven
+    textviewer route); the game sets ``cur_step`` to -1 (its own done
+    marker), the liaison leaves, and the clock runs. No keypress is
+    used anywhere in this route — the 'a' keypress Mikey allowed as
+    an absolute last resort was never needed.
+
+    The jump skips only the remaining discussion DISPLAY: by the time
+    the peek view is showing, the discussion steps' state effects
+    (topic list built, history recorded) have already happened; the
+    farewell text is still shown. No agreement is made (there is
+    none in this script) and the liaison returns next year.
+
+    Returns the Lua helper's audit dict (ok False + reason when the
+    route does not apply — e.g. the last step is not a farewell
+    textviewer — in which case nothing is written). The caller
+    (``advance``) then clears the bye textviewer and verifies the
+    clock.
+    """
+    from pathlib import Path
+
+    lua_dir = Path(__file__).resolve().parent / "lua"
+    prelude = (lua_dir / "json.lua").read_text()
+    helper = (lua_dir / "resolve_meeting.lua").read_text()
+    return client.run_lua_json(prelude + "\n" + helper, timeout=15.0)
+
+
 def advance(client: DFHackClient, *, max_rounds: int = 5,
             wait_s: float = 2.0) -> dict[str, Any]:
     """The harness ``advance`` check (dfkit's ``advance`` equivalent).
@@ -219,6 +262,22 @@ def advance(client: DFHackClient, *, max_rounds: int = 5,
                     "reason": "clock advancing; no blocking modal"}
         focus = check.get("focus")
         kind = check.get("kind")
+        # A topicmeeting is not dismissable by screen.dismiss, but
+        # it IS resolvable: jump the dipscript to its farewell step
+        # (resolve_topicmeeting, proven live 2026-11-27). The bye
+        # textviewer that follows is an ordinary dismissable screen,
+        # cleared by the next round.
+        if kind == "undismissable" and focus and focus.startswith("topicmeeting"):
+            audit = resolve_topicmeeting(client)
+            audit["focus"] = focus
+            cleared.append(audit)
+            if not audit.get("ok"):
+                return {"ok": False, "cleared": cleared,
+                        "blocked_by": focus,
+                        "reason": (f"topicmeeting could not be resolved "
+                                   f"programmatically: "
+                                   f"{audit.get('reason') or audit.get('error')}")}
+            continue
         if kind != "dismissable":
             return {"ok": False, "cleared": cleared, "blocked_by": focus,
                     "reason": (f"blocking modal {focus!r} is {kind} "

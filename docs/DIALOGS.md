@@ -84,7 +84,7 @@ unknown modal is never dismissed.
 | Focus (prefix) | Dismissable | Reason |
 |---|---|---|
 | `textviewer` | yes | Announcement/help text; closing it commits nothing. Proven live. |
-| `topicmeeting` | **no** | Liaison meeting; `screen.dismiss` re-creates it every tick — the peek needs the 'a' (finish peeking) menu choice and no Lua route expresses it. Proven live 2026-11-27; decision escalated. |
+| `topicmeeting` | **no** (plain dismiss) — resolvable via `resolve_topicmeeting()` | Liaison meeting; plain `screen.dismiss` re-creates it every tick. Resolved programmatically by jumping the dipscript to its farewell step (see below). Proven live 2026-11-27; no keypress used. |
 | `announcelist` | yes | Announcements list; closing it commits nothing. |
 | anything else | **no** | Unknown or game-committing; named and returned as a failure. |
 
@@ -106,10 +106,11 @@ Verified live 2026-11-26:
 The meeting screen is the proven blocking case: DeepSeek's dfkit
 showed the live meeting screen ignored LEAVESCREEN and only closed
 with its menu key, and the outpost liaison meeting left a fort at
-tick 225920 for 20+ minutes. It is in the allowlist (dismiss = end
-the meeting with no agreement), and the dismiss mechanism is proven
-on native viewscreens, so the same `dfhack.screen.dismiss` call
-applies.
+tick 225920 for 20+ minutes. It was first written into the allowlist
+as dismissable (dismiss = end the meeting with no agreement) on
+the assumption that the dismiss mechanism proven on native
+viewscreens would apply — the live case below proves it does NOT,
+and gives the resolution that does apply instead.
 
 **Live verification on a REAL meeting screen: DONE 2026-11-27 — and it
 CORRECTS the allowlist.** The scratch fort (region5, 238-07-18) was
@@ -141,20 +142,44 @@ are raw SDL keysyms, not interface keys. Structure found live:
 stack dwarfmodest -> meetingst (parent) -> topicmeetingst (child);
 `meeting_diplomat_info` (civ 68, diplomat 4275, cur_step 3, topics
 [8,6,5], no agreement yet); no flaggable "peek" state in the
-meeting/popup flags. **So `topicmeeting` is UNDISMISSABLE in
-`dialogs.ALLOWLIST` (not dismissable as previously written): the
-meeting is a scripted conversation (dipscript) that only ends when
-the player makes the menu choice, and no Lua route can make it. The
-only ways to press 'a' are RFR PassKeyboardEvent (sym=97) or
-xdotool — both rejected by the dialog directive — so the decision is
-escalated, not taken unilaterally.** Ending the peek commits
-NOTHING (no agreement, no trade; the NPCs keep talking off-screen
-and the meeting concludes on its own), which is why a narrow
-keypress exception for this one non-committal option is the thing to
-decide — not a general keystroke exception. The scratch fort is
-frozen at tick 222291 (paused, meeting open) until that decision.
-The 07-18 backup preserves the state but was saved AFTER the
-meeting opened, so reloading it restores the same frozen meeting.
+meeting/popup flags. **So `topicmeeting` is UNDISMISSABLE by plain
+`screen.dismiss` in `dialogs.ALLOWLIST` (not dismissable as
+previously written): the meeting is a scripted conversation
+(dipscript) that only ends when the player makes the menu choice,
+and no dismiss route can make it.**
+
+**RESOLVED programmatically 2026-11-27 — no keypress was ever
+needed.** Mikey's decision (same day): programmatic routes first,
+thoroughly; the 'a' keypress only as an absolute last resort. The
+route found: the dipscript itself is the state machine, and its
+state is writable from Lua. The meeting's `dipscript_info` (code
+`DWARF_LIAISON`, script file `data/dipscript/dwarf_liaison`) holds
+5 steps: 0 textviewer (`dwarf_liaison1`, next 1), 1 topic
+discussion (next 2), 2 diphistory `SHORT` (next 3), 3 topic
+discussion (next 4), 4 textviewer (`dwarf_liaison_bye`,
+next -1 = script end). The live meeting was at `cur_step` 3.
+Writing `meeting.cur_step = 4` (the farewell step) and dismissing
+the topicmeeting child + parent meetingst in one Lua call made the
+next tick present the bye textviewer; `advance` dismissed it by
+the proven textviewer route; the game set `cur_step` to -1 (its
+own done marker), the liaison left the map, the popup vector
+emptied, and the clock ran 6000+ ticks over 60 s with focus
+`dwarfmode/Default` and no re-presentation. Citizens stayed 11.
+The jump skips only the remaining discussion DISPLAY: by the time
+the peek view is showing, the discussion steps' state effects
+(topic list built, history recorded) have already happened; the
+farewell text is still shown. No agreement is made (there is none
+in this script) and the liaison returns next year. This is
+implemented as `dialogs.resolve_topicmeeting()` (`lua/
+resolve_meeting.lua`, which refuses unless the last step is a
+farewell textviewer with `next_step_idx == -1`) and `advance()`
+routes a blocking topicmeeting to it. The 'a' keypress Mikey
+allowed as a last resort was never used — the route is fully
+programmatic. Ending the peek commits NOTHING (no agreement, no
+trade; the NPCs keep talking off-screen and the meeting concludes
+on its own). The scratch fort, frozen at tick 222291 before the
+resolution, is unblocked (tick 228925 after verification, paused).
+The 07-18 backup preserves the pre-resolution state.
 
 Two corrections to the earlier (2026-11-26) reasoning, both from
 this live case:

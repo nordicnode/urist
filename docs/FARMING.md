@@ -5,6 +5,12 @@ to plant the wrong crop in the wrong place. A crop in the wrong place
 is a failure the harness must **prevent**, not just report (Mikey,
 2026-11-26).
 
+> The system around planting — crop strategy, seed management,
+> sizing, irrigation, fertilizer, harvest handling, the
+> farm-to-kitchen/still chain, labor, scaling, and failure modes —
+> is in `docs/FARMING_PLAN.md`. This file is the mechanics
+> reference; the plan is the design record.
+
 ## The rules (wiki "Farming", verified live 2026-11-27)
 
 - A farm plot grows **one kind of plant per season**; the crop is

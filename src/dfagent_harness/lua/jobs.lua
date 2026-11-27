@@ -22,8 +22,8 @@ local ok, err = pcall(function()
         -- CustomReaction + BREW_DRINK_FROM_PLANT; the name alone
         -- cannot tell a brew from a MAKE WOODEN BED). Without
         -- these the model queued 4 brews against 2 empty barrels
-        # (run #12): the Materials line said "enough for 2 brews"
-        # even after 2 were already queued.
+        -- (run #12): the Materials line said "enough for 2 brews"
+        -- even after 2 were already queued.
         job_type = job.job_type,
         reaction = dfh_try(function() return job.reaction_name end,
                            nil),

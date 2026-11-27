@@ -358,12 +358,19 @@ class FakeGame:
             # from the game's counter immediately — a fresh job
             # carries a real id, never -1. (-1 was the 1-arg
             # linkIntoWorld no-op; a -1 id is corrupt and the
-            # action layer now rejects it.)
+            # action layer now rejects it.) It also attaches a
+            # BUILDING_HOLDER general_ref to the workshop — without
+            # it the game segfaults when a dwarf works the job
+            # (run #12/#13/#14 deaths; 3/3 advances died without
+            # the ref, 3/3 survived with it, and a bed job
+            # completed). The mock records the holder the same way.
             count = params.get("count", 1)
             ids = []
             for _ in range(count):
                 self.jobs.append({"id": self.next_job_id,
                                   "type": "CustomReaction",
+                                  "holder_building_id":
+                                      params["building_id"],
                                   "pos": [0, 0, 0]})
                 ids.append(self.next_job_id)
                 self.next_job_id += 1
@@ -788,6 +795,66 @@ class TestQueueJobMaterials(unittest.TestCase):
         self.assertEqual(r.error_kind, "verification")
         self.assertIn("-1", r.reason)
         self.game.next_job_id = orig
+
+
+class TestQueueJobHolderRef(unittest.TestCase):
+    """Every workshop job carries a BUILDING_HOLDER general_ref to
+    its workshop (2026-11-27): without it the game segfaults when a
+    dwarf claims and works the job — the root cause of the run
+    #12/#13/#14 deaths. 3/3 advances died with a correctly-built
+    job lacking the ref; 3/3 survived with it, and a bed job
+    completed and produced a bed."""
+
+    def setUp(self):
+        self.game = FakeGame()
+        self.client = _run_with_fake(self, self.game)
+        self.game.buildings += [
+            {"id": 7, "type": "Workshop", "subtype": "Carpenters",
+             "jobs": 0},
+            {"id": 8, "type": "Workshop", "subtype": "Still",
+             "jobs": 0}]
+
+    def test_queued_jobs_carry_holder_building_id(self):
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=3)
+        self.assertTrue(r.ok, r.reason)
+        queued = [j for j in self.game.jobs
+                  if j["type"] == "CustomReaction"]
+        self.assertEqual(len(queued), 3)
+        self.assertTrue(all(j.get("holder_building_id") == 8
+                            for j in queued))
+
+    def test_helper_creates_holder_ref_and_verifies_it(self):
+        # Regression guard on the real Lua: the ref must be created
+        # and the helper must fail fast if getHolder does not return
+        # the workshop, or a future edit could silently reintroduce
+        # the crash.
+        src = (actions._LUA_DIR / "act_job.lua").read_text()
+        self.assertIn("general_ref_building_holderst", src)
+        self.assertIn("ref.building_id = b.id", src)
+        self.assertIn("job.general_refs:insert('#', ref)", src)
+        self.assertIn("dfhack.job.getHolder(job)", src)
+        self.assertIn("has no BUILDING_HOLDER ref", src)
+
+
+class TestLuaHelpersSyntax(unittest.TestCase):
+    """No Lua helper may contain a line starting with '#'
+    (2026-11-27): a '#' comment line slipped into jobs.lua in
+    1c0fd07 ('# (run #12): ...'), which is a Lua syntax error
+    ('#' is the length operator, not a comment) — every jobs
+    section read then failed, which broke queue_job verification
+    and the snapshot. There is no Lua parser in the offline env,
+    so this scans for the mistake directly: no helper line may
+    start with optional whitespace followed by '#'."""
+
+    def test_no_hash_comment_lines(self):
+        bad = []
+        for path in sorted(actions._LUA_DIR.glob("*.lua")):
+            for i, line in enumerate(
+                    path.read_text().splitlines(), 1):
+                if re.match(r"^\s*#", line):
+                    bad.append(f"{path.name}:{i}: {line.strip()}")
+        self.assertEqual(bad, [])
 
 
 class TestSiteFixHint(unittest.TestCase):

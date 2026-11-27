@@ -68,6 +68,19 @@ local ok, err = pcall(function()
         job.job_items:insert('#', ji)
       end
     end
+    -- The game expects every workshop job to carry a BUILDING_HOLDER
+    -- general_ref pointing at its workshop. Without it,
+    -- dfhack.job.getHolder(job) returns nil and the game segfaults
+    -- (silent death in the game thread) when a dwarf claims and
+    -- works the job. This was the root cause of the run #12/#13/#14
+    -- deaths (verified live 2026-11-27: 3/3 advances died with a
+    -- correctly-built job lacking the ref; 3/3 survived with the
+    -- ref, a dwarf claimed and worked the job, and a bed job
+    -- completed and produced a bed). The ref is added here, before
+    -- the job is linked into the world.
+    local ref = df.general_ref_building_holderst:new()
+    ref.building_id = b.id
+    job.general_refs:insert('#', ref)
     -- linkIntoWorld(job, true): the second arg is REQUIRED. With
     -- one arg it is a no-op — it assigns no id and inserts nothing
     -- (verified live 2026-11-27: id stays -1, world.jobs.list
@@ -80,6 +93,14 @@ local ok, err = pcall(function()
     -- from the game's counter and inserts into world.jobs.list.
     dfhack.job.linkIntoWorld(job, true)
     b.jobs:insert('#', job)
+    -- Fail fast: a workshop job without a holder is corrupt and
+    -- crashes the game when a dwarf works it (see above). If the
+    -- ref did not stick, reject the queue instead of handing the
+    -- game a job that will kill it.
+    local holder = dfhack.job.getHolder(job)
+    if holder == nil or holder.id ~= b.id then
+      error('job #' .. tostring(job.id) .. ' has no BUILDING_HOLDER ref')
+    end
     table.insert(made, job.id)
   end
   result = {ok = true, action = 'queue-job', building_id = bid,

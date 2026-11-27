@@ -389,9 +389,10 @@ class TestQuicksaveLocks(unittest.TestCase):
 
     def test_quicksave_endpoint_holds_rpc_lock(self):
         # Server half of H3: while a quicksave is in flight, a
-        # concurrent GET /v1/health — which takes rpc_lock for its
-        # version read — must wait. If _quicksave did not hold the
-        # lock, health would answer while the game is running.
+        # concurrent GET /v1/health must NOT make an RPC read
+        # (the game is running) — and, since the T3 row 6 fix, it
+        # must not block on rpc_lock either: it answers at once
+        # with busy=true instead of waiting for the quicksave.
         entered = threading.Event()
         release = threading.Event()
 
@@ -400,7 +401,16 @@ class TestQuicksaveLocks(unittest.TestCase):
                 entered.set()
                 release.wait(timeout=10)
 
-        server, port = _serve(EventBus(), client=_FakeClient(),
+        class _CountingClient(_FakeClient):
+            def __init__(self):
+                self.version_calls = 0
+
+            def get_version(self):
+                self.version_calls += 1
+                return super().get_version()
+
+        client = _CountingClient()
+        server, port = _serve(EventBus(), client=client,
                               daemon=_BlockingDaemon(), token="<redacted>")
         try:
             result = {}
@@ -414,10 +424,10 @@ class TestQuicksaveLocks(unittest.TestCase):
             try:
                 self.assertTrue(entered.wait(timeout=5),
                                 "quicksave never started")
-                with self.assertRaises(
-                        (urllib.error.URLError, TimeoutError)):
-                    urllib.request.urlopen(
-                        f"http://127.0.0.1:{port}/v1/health", timeout=1)
+                status, body = _get(port, "/v1/health", token="<redacted>")
+                self.assertEqual(status, 200)
+                self.assertTrue(body["busy"])
+                self.assertEqual(client.version_calls, 0)
             finally:
                 release.set()
             t.join(timeout=5)
@@ -426,6 +436,8 @@ class TestQuicksaveLocks(unittest.TestCase):
             status, body = _get(port, "/v1/health", token="<redacted>")
             self.assertEqual(status, 200)
             self.assertTrue(body["df_reachable"])
+            self.assertFalse(body["busy"])
+            self.assertEqual(client.version_calls, 1)
         finally:
             server.shutdown()
             server.server_close()

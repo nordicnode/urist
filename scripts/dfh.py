@@ -98,28 +98,48 @@ def _wait_healthy(config: DaemonConfig, token: str | None,
     return False
 
 
-def _apply_flags(args: argparse.Namespace,
-                 config: DaemonConfig) -> DaemonConfig:
+def _apply_persisted_flags(args: argparse.Namespace,
+                           config: DaemonConfig) -> DaemonConfig:
+    """Apply the CLI flags that ARE persisted to config.json:
+    the ports. Called before save_config."""
     if args.port is not None:
         config.http_port = args.port
     if args.df_port is not None:
         config.df_port = args.df_port
+    return config
+
+
+def _apply_runtime_flags(args: argparse.Namespace,
+                         config: DaemonConfig) -> DaemonConfig:
+    """Apply the CLI flags that are runtime-only and must NEVER be
+    persisted (H11): --no-auth and --allow-raw weaken the daemon's
+    security, and saving them turned one debug start into a
+    permanently unauthenticated daemon. Called AFTER save_config,
+    so a debug flag can never leak into config.json. Prints a loud
+    warning when either is used."""
     if args.no_auth:
         config.no_auth = True
+        print("WARNING: dfh started with --no-auth: the HTTP API "
+              "accepts unauthenticated requests for this run only "
+              "(not saved to config.json)", file=sys.stderr)
     if args.allow_raw:
         config.allow_raw_actions = True
+        print("WARNING: dfh started with --allow-raw: the raw "
+              "Lua/DFHack command actions are enabled for this run "
+              "only (not saved to config.json)", file=sys.stderr)
     return config
 
 
 def _cmd_start(args: argparse.Namespace) -> int:
     state_dir = _state_dir()
-    config = _apply_flags(args, load_config(state_dir))
+    config = _apply_persisted_flags(args, load_config(state_dir))
     pid = _read_pid(state_dir)
     if pid is not None:
         print(f"dfh: daemon already running (pid {pid})")
         return 1
-    token = load_or_create_token(state_dir, config.no_auth)
     save_config(state_dir, config)
+    config = _apply_runtime_flags(args, config)
+    token = load_or_create_token(state_dir, config.no_auth)
     log_path = state_dir / "daemon.log"
     log_fh = open(log_path, "ab")
     cmd = [sys.executable, str(Path(__file__).resolve()), "daemon",
@@ -236,8 +256,9 @@ class _TimestampedWriter:
 
 def _cmd_daemon(args: argparse.Namespace) -> int:
     state_dir = _state_dir()
-    config = _apply_flags(args, load_config(state_dir))
+    config = _apply_persisted_flags(args, load_config(state_dir))
     save_config(state_dir, config)
+    config = _apply_runtime_flags(args, config)
     sys.stdout = _TimestampedWriter(sys.stdout)
     sys.stderr = _TimestampedWriter(sys.stderr)
     daemon = Daemon(config=config, state_dir=state_dir)
@@ -285,10 +306,11 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--df-port", type=int, default=None,
                        help="DFHack RPC port (default 5000)")
         p.add_argument("--no-auth", action="store_true",
-                       help="disable the bearer token (localhost only)")
+                       help="disable the bearer token (localhost "
+                            "only; this run only, never saved)")
         p.add_argument("--allow-raw", action="store_true",
                        help="enable the guarded /lua and /command "
-                            "endpoints")
+                            "endpoints (this run only, never saved)")
 
     p_start = sub.add_parser("start", help="start the daemon")
     _add_common(p_start)

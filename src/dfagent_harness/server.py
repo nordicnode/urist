@@ -85,14 +85,16 @@ GAME_NOT_RUNNING`` when the game is unreachable.
 
 from __future__ import annotations
 
+import hmac
 import json
 import queue
 import threading
 import time
+import traceback
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from dfhack_rpc import DFHackClient
 from dfhack_rpc.proto import CoreProtocol_pb2 as core
@@ -191,6 +193,94 @@ def _action_envelope(result: Any) -> dict[str, Any]:
     if isinstance(result, dict):
         return result
     return result.to_dict()
+
+
+def _cursor_array(value: Any) -> list[Any]:
+    """Coerce a cursor value to the documented [x, y, z] array.
+
+    The Lua side wraps the cursor in dfh_arr(), so a live read is
+    already a list. A dict with string keys "1"/"2"/"3" is the old
+    plain-table encoding (H10) — normalize it instead of serving
+    the wrong shape. Anything else is [None] * 3.
+    """
+    if isinstance(value, list):
+        return (value + [None] * 3)[:3]
+    if isinstance(value, dict):
+        try:
+            return [value["1"], value["2"], value["3"]]
+        except KeyError:
+            pass
+    return [None] * 3
+
+
+def _req_int(value: Any, field: str,
+             default: Optional[int] = None) -> int:
+    """Coerce a client-supplied value to int, or raise ValueError.
+
+    Raises on None (missing field), bools, non-numeric strings and
+    non-integral floats. A client-input error, mapped to 400 by
+    the caller — never a 502 and never a dropped connection (T3).
+    """
+    if value is None:
+        if default is not None:
+            return default
+        raise ValueError(f"bad {field}: missing")
+    if isinstance(value, bool):
+        raise ValueError(f"bad {field}: {value!r} is not an integer")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"bad {field}: {value!r} is not an integer") from None
+    raise ValueError(f"bad {field}: {value!r} is not an integer")
+
+
+def _req_float(value: Any, field: str,
+               default: Optional[float] = None) -> float:
+    """Coerce a client-supplied value to float, or raise ValueError."""
+    if value is None:
+        if default is not None:
+            return default
+        raise ValueError(f"bad {field}: missing")
+    if isinstance(value, bool):
+        raise ValueError(f"bad {field}: {value!r} is not a number")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            raise ValueError(
+                f"bad {field}: {value!r} is not a number") from None
+    raise ValueError(f"bad {field}: {value!r} is not a number")
+
+
+def _req_seq(value: Any, field: str, length: int) -> tuple[int, ...]:
+    """Coerce a client-supplied value to a tuple of `length` ints.
+
+    Raises ValueError on None, non-sequences, strings and wrong
+    lengths — the `tuple(body.get("box"))` TypeError that used to
+    escape as a 502 (T3 row 1).
+    """
+    if value is None:
+        raise ValueError(f"bad {field}: missing")
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"bad {field}: must be a list of {length}")
+    try:
+        items = tuple(value)
+    except TypeError:
+        raise ValueError(
+            f"bad {field}: must be a list of {length}") from None
+    if len(items) != length:
+        raise ValueError(
+            f"bad {field}: want {length} items, got {len(items)}")
+    return tuple(_req_int(item, f"{field}[{i}]")
+                 for i, item in enumerate(items))
 
 
 # -- route matchers -------------------------------------------------
@@ -299,18 +389,24 @@ def create_server(
             return spatial.derive_areas(state, scan)
 
         with rpc_lock:
+            # Re-check inside the lock (T3 row 7): two cold
+            # requests used to both run the ~10 s derivation.
+            # The cache is stored before the lock releases, so a
+            # second caller waiting here always finds it warm.
+            if spatial_cache["areas"] is not None and not refresh:
+                return spatial_cache["areas"]
             areas = paused_read(client, _derive)
-        areas["cost"] = {
-            "tokens": spatial.estimate_tokens(
-                str(areas.get("areas", []))),
-            "ms": int((time.monotonic() - t0) * 1000),
-            "cached": False,
-        }
-        areas["stale"] = False
-        spatial_cache["areas"] = areas
-        # The scan is cached for the overview route (no second scan).
-        if holder.get("scan") is not None:
-            spatial_cache["scan"] = holder["scan"]
+            areas["cost"] = {
+                "tokens": spatial.estimate_tokens(
+                    str(areas.get("areas", []))),
+                "ms": int((time.monotonic() - t0) * 1000),
+                "cached": False,
+            }
+            areas["stale"] = False
+            spatial_cache["areas"] = areas
+            # The scan is cached for the overview route (no second scan).
+            if holder.get("scan") is not None:
+                spatial_cache["scan"] = holder["scan"]
         return areas
 
     def _enrich_area_descriptions(areas: dict[str, Any]) -> None:
@@ -426,7 +522,8 @@ def create_server(
                 lambda: (observe.collect(
                     client, sections=("status",)).get("status") or {}
                 ).get("year_tick"))
-        if cached is not None and not refresh:
+
+        def _cached_copy(cached: dict[str, Any]) -> dict[str, Any]:
             derived = cached.get("derived_at_tick")
             stale = (isinstance(now_tick, int)
                      and isinstance(derived, int)
@@ -438,6 +535,9 @@ def create_server(
                 "ms": 0, "scan_seconds": cached.get("scan_seconds"),
                 "cached": True}
             return out
+
+        if cached is not None and not refresh:
+            return _cached_copy(cached)
         t0 = time.monotonic()
 
         def _run() -> dict[str, Any]:
@@ -456,16 +556,24 @@ def create_server(
                 tick=areas.get("derived_at_tick"))
 
         with rpc_lock:
+            # Re-check inside the lock (T3 row 7): a second cold
+            # request waits here while the first runs the ~25 s
+            # survey, then finds the cache warm instead of
+            # re-running it. The cache is stored before the lock
+            # releases.
+            cached = spatial_cache.get("survey")
+            if cached is not None and not refresh:
+                return _cached_copy(cached)
             built = paused_read(client, _run)
-        built["stale"] = False
-        built["cost"] = {
-            "tokens": spatial.estimate_tokens(str(built.get("summary",
-                                                           []))),
-            "ms": int((time.monotonic() - t0) * 1000),
-            "scan_seconds": built.get("scan_seconds"),
-            "cached": False,
-        }
-        spatial_cache["survey"] = built
+            built["stale"] = False
+            built["cost"] = {
+                "tokens": spatial.estimate_tokens(str(built.get(
+                    "summary", []))),
+                "ms": int((time.monotonic() - t0) * 1000),
+                "scan_seconds": built.get("scan_seconds"),
+                "cached": False,
+            }
+            spatial_cache["survey"] = built
         return built
 
     # -- route table --------------------------------------------------
@@ -594,7 +702,7 @@ def create_server(
             if token is None or path == HEALTH_PATH:
                 return True
             auth = self.headers.get("Authorization", "")
-            return auth == f"Bearer {token}"
+            return hmac.compare_digest(auth, f"Bearer {token}")
 
         def _read_json(self) -> tuple[Optional[dict[str, Any]], bool]:
             length = int(self.headers.get("Content-Length") or 0)
@@ -626,21 +734,47 @@ def create_server(
                     return True
             return False
 
+        def _dispatch_safe(self, method: str, path: str,
+                           query: dict[str, list[str]],
+                           body: Optional[dict[str, Any]]
+                           ) -> Optional[bool]:
+            """Dispatch with the last-resort net (T3 row 2): a
+            handler must never drop the connection. ValueError
+            (bad client input) is 400; anything else is 502 with
+            a traceback in the daemon log. Returns None when the
+            net answered, so the caller must not answer again."""
+            try:
+                return self._dispatch(method, path, query, body)
+            except ValueError as exc:
+                try:
+                    _error(self, 400, "BAD_REQUEST", str(exc))
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+                try:
+                    _error(self, 502, "RPC_ERROR",
+                           "handler failed at the transport")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            return None
+
         def do_GET(self) -> None:  # noqa: N802 - http.server naming
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
-            path = parsed.path.rstrip("/") or "/"
+            path = unquote(parsed.path).rstrip("/") or "/"
             if not self._auth_ok(path):
                 _error(self, 401, "UNAUTHORIZED",
                        "missing or wrong bearer token")
                 return
-            if not self._dispatch("GET", path, query, None):
+            matched = self._dispatch_safe("GET", path, query, None)
+            if matched is False:
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
         def do_POST(self) -> None:  # noqa: N802 - http.server naming
             parsed = urlparse(self.path)
-            path = parsed.path.rstrip("/") or "/"
+            path = unquote(parsed.path).rstrip("/") or "/"
             if not self._auth_ok(path):
                 _error(self, 401, "UNAUTHORIZED",
                        "missing or wrong bearer token")
@@ -649,32 +783,50 @@ def create_server(
             if not ok:
                 return
             assert body is not None
-            if not self._dispatch("POST", path, {}, body):
+            matched = self._dispatch_safe("POST", path, {}, body)
+            if matched is False:
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
         def do_DELETE(self) -> None:  # noqa: N802 - http.server naming
             parsed = urlparse(self.path)
-            path = parsed.path.rstrip("/") or "/"
+            path = unquote(parsed.path).rstrip("/") or "/"
             if not self._auth_ok(path):
                 _error(self, 401, "UNAUTHORIZED",
                        "missing or wrong bearer token")
                 return
-            if not self._dispatch("DELETE", path, {}, None):
+            matched = self._dispatch_safe("DELETE", path, {}, None)
+            if matched is False:
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
         # -- read endpoints ------------------------------------------
         def _health(self) -> None:
+            # Never block on rpc_lock (T3 row 6): a long RPC call
+            # (or a slow client) used to stall /v1/health for
+            # seconds. Try the lock; when it is held, fall back to
+            # the poller's last state and say busy, so a caller can
+            # tell "game up, just busy" from "game down".
             version: dict[str, Any] = {}
             reachable = False
+            busy = False
             if client is not None:
-                try:
-                    with rpc_lock:
+                if rpc_lock.acquire(blocking=False):
+                    try:
                         version = client.get_version()
+                        reachable = True
+                    except Exception:
+                        reachable = False
+                    finally:
+                        rpc_lock.release()
+                elif poller is not None \
+                        and poller.last_state is not None:
+                    version = (poller.last_state.get("meta") or {}).get(
+                        "version") or {}
                     reachable = True
-                except Exception:
-                    reachable = False
+                    busy = True
+                else:
+                    busy = True
             elif poller is not None and poller.last_state is not None:
                 version = (poller.last_state.get("meta") or {}).get(
                     "version") or {}
@@ -684,6 +836,7 @@ def create_server(
                 "daemon": "dfh/phase4",
                 "df_reachable": reachable,
                 "version": version,
+                "busy": busy,
             })
 
         def _pause(self) -> None:
@@ -1346,7 +1499,7 @@ def create_server(
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "cursor read failed", {"error": str(exc)})
                 return
-            _json(self, 200, {"cursor": (out.get("cursor") or [None] * 3)})
+            _json(self, 200, {"cursor": _cursor_array(out.get("cursor"))})
 
         def _daemon_control(self) -> None:
             payload = {
@@ -1579,9 +1732,13 @@ def create_server(
                 _error(self, 400, "BAD_REQUEST",
                        "goal needs name, expression and task")
                 return
-            gid = daemon.journal.create_goal(
-                str(name), str(expression), str(task),
-                int(body.get("priority", 5)))
+            try:
+                gid = daemon.journal.create_goal(
+                    str(name), str(expression), str(task),
+                    _req_int(body.get("priority", 5), "priority"))
+            except ValueError as exc:
+                _error(self, 400, "BAD_REQUEST", str(exc))
+                return
             _json(self, 200, daemon.journal.get_goal(gid))
 
         def _goal_done(self, path: str) -> None:
@@ -1672,17 +1829,22 @@ def create_server(
                                             "running (tasks run "
                                             "synchronously)"})
                 return
-            wait = float(body.get("wait", 120))
-            count = int(body.get("count", 1))
-            kwargs: dict[str, Any] = {}
-            if body.get("building_id") is not None:
-                kwargs["building_id"] = int(body["building_id"])
-            if body.get("plant") is not None:
-                kwargs["plant"] = str(body["plant"])
-            if body.get("season") is not None:
-                kwargs["season"] = int(body["season"])
-            out = daemon.run_task(name, wait=wait, count=count,
-                                  **kwargs)
+            try:
+                wait = _req_float(body.get("wait", 120), "wait")
+                count = _req_int(body.get("count", 1), "count")
+                kwargs: dict[str, Any] = {}
+                if body.get("building_id") is not None:
+                    kwargs["building_id"] = _req_int(
+                        body["building_id"], "building_id")
+                if body.get("plant") is not None:
+                    kwargs["plant"] = str(body["plant"])
+                if body.get("season") is not None:
+                    kwargs["season"] = _req_int(body["season"], "season")
+                out = daemon.run_task(name, wait=wait, count=count,
+                                      **kwargs)
+            except ValueError as exc:
+                _error(self, 400, "BAD_REQUEST", str(exc))
+                return
             _json(self, 200, out)
 
         # -- actions ----------------------------------------------------
@@ -1740,30 +1902,30 @@ def create_server(
                         "detail": f"game {'paused' if paused else 'running'}",
                         "evidence": {"paused": paused}, "took_ms": 0}
             if name == "dig":
-                box = body.get("box")
                 mode = body.get("mode", "dig")
                 return _action_envelope(act(
                     client, "designate_dig",
-                    box=tuple(box), mode=mode))
+                    box=_req_seq(body.get("box"), "box", 6), mode=mode))
             if name == "undesignate":
                 return _action_envelope(act(
                     client, "designate_dig",
-                    box=tuple(body.get("box")), mode="clear"))
+                    box=_req_seq(body.get("box"), "box", 6), mode="clear"))
             if name in ("chop", "gather"):
                 return _action_envelope(act(
                     client, f"designate_{name}",
-                    box=tuple(body.get("box")),
+                    box=_req_seq(body.get("box"), "box", 6),
                     mark=bool(body.get("mark", True))))
             if name == "build":
                 return _action_envelope(act(
                     client, "build_workshop", kind=body.get("kind"),
-                    pos=tuple(body.get("pos")),
+                    pos=_req_seq(body.get("pos"), "pos", 3),
                     placement=self._placement_cache(),
                     from_pos=self._placement_from()))
             if name == "deconstruct":
                 return _action_envelope(act(
                     client, "deconstruct_building",
-                    building_id=int(body.get("building_id"))))
+                    building_id=_req_int(body.get("building_id"),
+                                         "building_id")))
             if name == "stockpile":
                 # Programmatic stockpile (constructBuilding
                 # abstract=true) — the ui.create_stockpile keystroke
@@ -1772,13 +1934,14 @@ def create_server(
                 # + single-letter category form is still accepted).
                 box = body.get("box")
                 if box is not None:
+                    box = _req_seq(box, "box", 6)
                     pos = (box[0], box[1], box[2])
                     width = box[3] - box[0] + 1
                     height = box[4] - box[1] + 1
                 else:
-                    pos = tuple(body.get("pos"))
-                    width = int(body.get("width", 5))
-                    height = int(body.get("height", 5))
+                    pos = _req_seq(body.get("pos"), "pos", 3)
+                    width = _req_int(body.get("width", 5), "width")
+                    height = _req_int(body.get("height", 5), "height")
                 category = body.get("category", "food")
                 if len(str(category)) == 1:
                     # Old single-letter form (f = food, w = wood,
@@ -1795,41 +1958,43 @@ def create_server(
                 return _action_envelope(act(
                     client, "create_zone",
                     zone_type=body.get("zone_type", "meeting_area"),
-                    pos=tuple(body.get("pos")),
-                    width=int(body.get("width", 5)),
-                    height=int(body.get("height", 5)),
+                    pos=_req_seq(body.get("pos"), "pos", 3),
+                    width=_req_int(body.get("width", 5), "width"),
+                    height=_req_int(body.get("height", 5), "height"),
                     placement=self._placement_cache(),
                     from_pos=self._placement_from()))
             if name == "farm":
                 return _action_envelope(act(
                     client, "build_farm_plot",
-                    x=int(body.get("x")), y=int(body.get("y")),
-                    z=int(body.get("z")),
-                    width=int(body.get("width", 3)),
-                    height=int(body.get("height", 3)),
+                    x=_req_int(body.get("x"), "x"),
+                    y=_req_int(body.get("y"), "y"),
+                    z=_req_int(body.get("z"), "z"),
+                    width=_req_int(body.get("width", 3), "width"),
+                    height=_req_int(body.get("height", 3), "height"),
                     placement=self._placement_cache(),
                     from_pos=self._placement_from()))
             if name == "furniture":
                 return _action_envelope(act(
                     client, "build_furniture", kind=body.get("kind"),
-                    pos=tuple(body.get("pos")),
+                    pos=_req_seq(body.get("pos"), "pos", 3),
                     placement=self._placement_cache(),
                     from_pos=self._placement_from()))
             if name == "order":
                 return _action_envelope(act(
                     client, "manager_order_create",
                     job_type=body.get("job_type"),
-                    amount=int(body.get("amount", 1))))
+                    amount=_req_int(body.get("amount", 1), "amount")))
             if name == "order-remove":
                 return _action_envelope(act(
                     client, "manager_order_remove",
-                    order_id=int(body.get("order_id"))))
+                    order_id=_req_int(body.get("order_id"), "order_id")))
             if name == "queue-job":
                 return _action_envelope(act(
                     client, "queue_job",
-                    building_id=int(body.get("building_id")),
+                    building_id=_req_int(body.get("building_id"),
+                                         "building_id"),
                     job=body.get("job"),
-                    count=int(body.get("count", 1))))
+                    count=_req_int(body.get("count", 1), "count")))
             if name == "labor":
                 unit = body.get("unit_id", body.get("unit"))
                 if isinstance(unit, str) and unit.isdigit():
@@ -1842,7 +2007,8 @@ def create_server(
                 return self._send_keys(body.get("keys") or [])
             if name == "cursor":
                 from .ui import set_cursor
-                out = set_cursor(client, *tuple(body.get("pos")))
+                out = set_cursor(
+                    client, *_req_seq(body.get("pos"), "pos", 3))
                 return {"ok": bool(out.get("ok")), "action": "cursor",
                         "detail": "cursor moved",
                         "evidence": {"cursor": out.get("cursor")},
@@ -1945,11 +2111,16 @@ def create_server(
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
+            # Subscribe BEFORE replaying (T3 row 4): an event
+            # published between the replay and the subscribe was
+            # lost. The live loop dedups by seq, so events that
+            # arrive in both the replay and the queue are written
+            # once.
+            pending: queue.Queue[dict[str, Any]] = queue.Queue()
+            bus.subscribe(pending.put)
             replayed = bus.replay(since_seq=since)
             max_seen = max([e["seq"] for e in replayed],
                            default=since if since is not None else 0)
-            pending: queue.Queue[dict[str, Any]] = queue.Queue()
-            bus.subscribe(pending.put)
             try:
                 for event in replayed:
                     self.wfile.write(_sse_event(event["seq"], event))

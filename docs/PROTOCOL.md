@@ -438,7 +438,7 @@ Base: `http://127.0.0.1:8765/v1`. All bodies JSON. All responses JSON.
 
 | Method | Endpoint | Returns |
 |---|---|---|
-| GET | `/v1/health` | `{"ok": true, "daemon": "…", "df_reachable": bool, "version": {…}}` — no auth required (liveness only) |
+| GET | `/v1/health` | `{"ok": true, "daemon": "…", "df_reachable": bool, "version": {…}, "busy": bool}` — no auth required (liveness only). `busy` is true while another RPC call holds the lock (health never blocks on it); `df_reachable` is then the poller's last-known state, or false when there is none. |
 | GET | `/v1/state` | Full snapshot: versions, mode/viewscreen, pause, date, population, food/drink/wood, threats, jobs, buildings summary, recent reports. The "one call to orient" endpoint. |
 | GET | `/v1/status` | Compact status (same fields as the Lua `status` probe: viewscreen, game_mode, paused, year, year_tick, population, dwarves, idlers, animals, threats, food, drink, wood, jobs, wounded, dead, citizens[], threat_list[]) |
 | GET | `/v1/units?limit=&citizens_only=` | Unit list (id, name, race, profession, pos, job, health flags, mood/stress where available) |

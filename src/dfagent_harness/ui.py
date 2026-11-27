@@ -217,8 +217,9 @@ def set_cursor(client: DFHackClient, x: int, y: int, z: int,
     code = (f"df.global.cursor.x = {x}\n"
             f"df.global.cursor.y = {y}\n"
             f"df.global.cursor.z = {z}\n"
-            f"result = {{ok = true, cursor = {{df.global.cursor.x, "
-            f"df.global.cursor.y, df.global.cursor.z}}}}\n"
+            f"result = {{ok = true, cursor = dfh_arr({{"
+            f"df.global.cursor.x, df.global.cursor.y, "
+            f"df.global.cursor.z}})}}\n"
             f"dfh_print(result)\n")
     return client.run_lua_json(prelude + "\n" + code, timeout=timeout)
 
@@ -226,8 +227,9 @@ def set_cursor(client: DFHackClient, x: int, y: int, z: int,
 def get_cursor(client: DFHackClient,
                timeout: float = 30.0) -> dict[str, Any]:
     """Read the map cursor."""
-    code = ("result = {ok = true, cursor = {df.global.cursor.x, "
-            "df.global.cursor.y, df.global.cursor.z}}\n"
+    code = ("result = {ok = true, cursor = dfh_arr({"
+            "df.global.cursor.x, df.global.cursor.y, "
+            "df.global.cursor.z})}\n"
             "dfh_print(result)\n")
     prelude = (Path(__file__).resolve().parent / "lua" / "json.lua"
                ).read_text()

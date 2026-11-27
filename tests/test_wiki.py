@@ -153,5 +153,40 @@ class TestWikiLive(unittest.TestCase):
         self.assertEqual(payload.get("slug"), "alcohol")
 
 
+class TestWikiDirConfig(unittest.TestCase):
+    """DFH_WIKI_DIR (review step 10): the export location is
+    configurable; the default stays the author's layout."""
+
+    def test_env_override(self):
+        import importlib
+        from unittest import mock
+
+        with mock.patch.dict(os.environ,
+                             {"DFH_WIKI_DIR": "/tmp/elsewhere"}):
+            importlib.reload(wiki)
+        try:
+            self.assertEqual(str(wiki.WIKI_DIR), "/tmp/elsewhere")
+            self.assertEqual(str(wiki.DFQ), "/tmp/elsewhere/dfq.py")
+            self.assertEqual(str(wiki.VENV_PYTHON),
+                             "/tmp/elsewhere/venv/bin/python")
+        finally:
+            importlib.reload(wiki)
+
+    def test_default_is_author_layout(self):
+        import importlib
+        from unittest import mock
+
+        env = dict(os.environ)
+        env.pop("DFH_WIKI_DIR", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            importlib.reload(wiki)
+        try:
+            self.assertEqual(
+                str(wiki.WIKI_DIR),
+                str(Path.home() / "workspace" / "df-wiki-export"))
+        finally:
+            importlib.reload(wiki)
+
+
 if __name__ == "__main__":
     unittest.main()

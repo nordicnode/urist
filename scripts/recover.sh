@@ -14,7 +14,11 @@
 # leaves it alone entirely.
 set -euo pipefail
 
-HARNESS=~/workspace/df-agent-harness
+# Path-relative (2026-11-27, review step 10): the harness dir is
+# derived from this script's own location, not hardcoded to
+# ~/workspace/df-agent-harness — a fresh clone anywhere else must
+# work, run from any cwd.
+HARNESS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DF="$HARNESS/third_party/df_47_05"
 mkdir -p "$HARNESS/logs"
 
@@ -83,12 +87,14 @@ fi
 #    SDL/GTK libs are still missing. If libSDL is not installed by then,
 #    extract the already-cached .debs into scratch/deblibs and launch DF
 #    with that LD_LIBRARY_PATH instead of waiting — DF only needs the
-#    five libs, and the replay installs them system-wide later anyway.
+#    six libs, and the replay installs them system-wide later anyway.
+#    The list MUST match _DEBLIB_PKGS in scripts/reload_fort.py (the
+#    LD_LIBRARY_PATH below names all six dirs); keep them in sync.
 if ! ldconfig -p 2>/dev/null | grep -q libSDL-1.2.so.0; then
   DEBLIBS="$HARNESS/scratch/deblibs"
   mkdir -p "$DEBLIBS"
   for deb in libsdl1.2debian libsdl-image1.2 libsdl-ttf2.0-0 \
-             libgtk2.0-0t64; do
+             libgtk2.0-0t64 libglu1-mesa libgl1; do
     f=$(ls /var/cache/apt/archives/${deb}_*.deb 2>/dev/null | head -1)
     if [ -n "$f" ]; then
       dpkg-deb -x "$f" "$DEBLIBS/$deb" 2>/dev/null || true
@@ -114,7 +120,7 @@ for i in $(seq 1 30); do
   fi
   sleep 2
 done
-.venv/bin/python scripts/rpc_smoke.py --port 5000
+"$HARNESS/.venv/bin/python" "$HARNESS/scripts/rpc_smoke.py" --port 5000
 echo "RECOVER-OK: DF 0.47.05 + DFHack up, RPC on port 5000"
 
 # 5. Boot supervisor (2026-11-27): install the systemd units so the

@@ -88,8 +88,25 @@ class TestKillDf(unittest.TestCase):
 
 
 class TestDeblibsEnv(unittest.TestCase):
+    # Hermetic: every test builds its own fake deblibs tree in a
+    # temp dir instead of reading the machine's scratch/deblibs.
+    # On a fresh clone that dir does not exist, and these three
+    # tests failed there (assertIsNotNone / KeyError) — the suite
+    # must pass on a fresh checkout, not only on the author's
+    # machine. The "absent" case is already covered by
+    # test_deblibs_path_none_when_absent below.
+    def _deblibs_tree(self, tmp, pkgs=None):
+        base = Path(tmp) / "scratch" / "deblibs"
+        for pkg in (reload_fort._DEBLIB_PKGS if pkgs is None else pkgs):
+            (base / pkg / "usr" / "lib" / "x86_64-linux-gnu"
+             ).mkdir(parents=True)
+        return base
+
     def test_deblibs_path_includes_all_six_packages(self):
-        ld = reload_fort.deblibs_ld_library_path()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._deblibs_tree(tmp)
+            with mock.patch.object(reload_fort, "HARNESS", Path(tmp)):
+                ld = reload_fort.deblibs_ld_library_path()
         self.assertIsNotNone(ld)
         for pkg in reload_fort._DEBLIB_PKGS:
             self.assertIn(pkg, ld)
@@ -102,18 +119,36 @@ class TestDeblibsEnv(unittest.TestCase):
                                    Path(tmp)):
                 self.assertIsNone(reload_fort.deblibs_ld_library_path())
 
+    def test_deblibs_path_partial_extraction(self):
+        # Only dirs that exist are included, so a partial
+        # extraction never breaks the launch with a dangling entry.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._deblibs_tree(tmp, pkgs=("libsdl1.2debian",))
+            with mock.patch.object(reload_fort, "HARNESS", Path(tmp)):
+                ld = reload_fort.deblibs_ld_library_path()
+        self.assertIsNotNone(ld)
+        self.assertIn("libsdl1.2debian", ld)
+        self.assertNotIn("libgl1", ld)
+
     def test_launch_env_sets_display_and_deblibs(self):
-        env = reload_fort.launch_env()
+        with tempfile.TemporaryDirectory() as tmp:
+            self._deblibs_tree(tmp)
+            with mock.patch.object(reload_fort, "HARNESS", Path(tmp)):
+                env = reload_fort.launch_env()
         self.assertEqual(env["DISPLAY"], ":99")
         self.assertEqual(env["TERM"], "xterm")
         self.assertIn("libsdl1.2debian", env["LD_LIBRARY_PATH"])
 
     def test_launch_env_preserves_existing_ld_path(self):
-        with mock.patch.dict(os.environ,
-                             {"LD_LIBRARY_PATH": "/opt/extra/lib"}):
-            env = reload_fort.launch_env()
-            self.assertTrue(env["LD_LIBRARY_PATH"].endswith(
-                ":/opt/extra/lib"))
+        with tempfile.TemporaryDirectory() as tmp:
+            self._deblibs_tree(tmp)
+            with mock.patch.dict(os.environ,
+                                 {"LD_LIBRARY_PATH": "/opt/extra/lib"}):
+                with mock.patch.object(reload_fort, "HARNESS",
+                                       Path(tmp)):
+                    env = reload_fort.launch_env()
+        self.assertTrue(env["LD_LIBRARY_PATH"].endswith(
+            ":/opt/extra/lib"))
 
 
 if __name__ == "__main__":

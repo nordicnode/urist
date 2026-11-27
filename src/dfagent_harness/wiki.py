@@ -30,8 +30,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-# The wiki export lives next to the harness workspace.
-WIKI_DIR = Path.home() / "workspace" / "df-wiki-export"
+# The wiki export lives next to the harness workspace; override
+# with DFH_WIKI_DIR when it lives elsewhere (a fresh clone on a
+# machine whose export is somewhere else, or CI). The default is
+# the author's layout, so existing setups need no change.
+WIKI_DIR = Path(os.environ.get(
+    "DFH_WIKI_DIR", Path.home() / "workspace" / "df-wiki-export"))
 DFQ = WIKI_DIR / "dfq.py"
 VENV_PYTHON = WIKI_DIR / "venv" / "bin" / "python"
 SYSTEM_PYTHON = "python3"
@@ -63,7 +67,8 @@ def wiki_search(query: str, mode: str = "hybrid",
     if not DFQ.exists():
         raise RuntimeError(
             f"wiki query tool not found: {DFQ} (the DF wiki export "
-            f"is missing; rebuild it before using wiki lookup)")
+            f"is missing; rebuild it, or set DFH_WIKI_DIR to its "
+            f"location, before using wiki lookup)")
     # Semantic modes need the venv python (fastembed); plain FTS
     # search runs on the system python.
     python = str(VENV_PYTHON) if mode in ("semantic", "hybrid") \

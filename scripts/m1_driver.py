@@ -711,8 +711,9 @@ def main() -> int:
               "daemon first (dfh start)", file=sys.stderr)
         return 2
     driver = M1Driver(args)
+    rc = 1
     try:
-        return driver.run()
+        rc = driver.run()
     finally:
         # Do NOT resume the daemon loop and do NOT leave the game
         # running. An unattended run burns drink fast: on 2026-11-26
@@ -737,6 +738,25 @@ def main() -> int:
         else:
             print("m1: exit — WARNING: pause could not be verified; "
                   "the game may still be running", flush=True)
+        # Persist the run's progress. DF dies often (the
+        # Resetting-textures abort) and every death wipes the
+        # in-memory progress — runs #9/#10 built a still and a
+        # stockpile, then a death reloaded the clean 04-01 state
+        # and the model had to rebuild them. A successful run end
+        # (day complete / max_ticks) saves the fort so the next run
+        # starts from the progressed state, not from 04-01. Only
+        # on rc 0: a dead or refused run must not overwrite the
+        # good save with a bad state. Best-effort — a failed save
+        # never changes the exit code.
+        if rc == 0 and paused_ok:
+            try:
+                driver.daemon.post("/v1/control/quicksave", {})
+                print("m1: exit — quicksave requested (progress "
+                      "persisted)", flush=True)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                print(f"m1: exit — WARNING: quicksave failed: {exc}",
+                      flush=True)
+    return rc
 
 
 if __name__ == "__main__":

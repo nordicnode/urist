@@ -1,0 +1,2 @@
+{"ts": "2026-11-27T01:04:59.723834+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-27T01:04:59.726257+00:00", "tick_no": 0, "kind": "fatal", "error": "first snapshot failed: GET /v1/snapshot -> HTTP 503: {\"error\": {\"code\": \"GAME_NOT_RUNNING\", \"message\": \"snapshot collect failed\", \"detail\": {\"error\": \"could not connect to DFHack RPC at 127.0.0.1:5000: [Errno 111] Connection refused\"}}, \"request_id\": \"2ea8d8888369\"}"}

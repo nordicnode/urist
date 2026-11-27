@@ -913,32 +913,80 @@ class Daemon:
         if self.client is None:
             return
         self._last_quicksave = now
-        save_path = (self.df_dir / "data" / "save" / "region1"
-                     / "world.sav")
-        before = save_path.stat().st_mtime if save_path.exists() else 0.0
+        # The region is the one CURRENTLY LOADED, not a hardcoded
+        # one: the daemon was built for region1 (Athelunol) and the
+        # quicksave check kept watching region1/world.sav after the
+        # fort moved to region2, so it reported failure even when
+        # region2 saved fine — and the save was never verified.
+        # df.global.world.cur_savegame.save_dir names the loaded
+        # region (e.g. "region2").
+        save_dir = "region2"
+        try:
+            out = self.client.run_lua(
+                "print(df.global.world.cur_savegame.save_dir)")
+            name = (out or "").strip().split()[-1] if out else ""
+            if name.startswith("region"):
+                save_dir = name
+        except Exception:  # noqa: BLE001 - fall back to region2
+            pass
+        save_root = self.df_dir / "data" / "save"
+        save_path = save_root / save_dir / "world.sav"
+        before_mtime = (save_path.stat().st_mtime
+                        if save_path.exists() else 0.0)
+        before_backups = {p.name for p in save_root.iterdir()
+                          if p.is_dir() and p.name.startswith(save_dir)}
+        # The save mechanism (verified live 2026-11-27): DFHack's
+        # `quicksave` command shows an overlay whose render() sets
+        # the autosave flag — but the overlay never renders while
+        # the game is paused, so the flag is never set and no save
+        # lands (the daemon's quicksave silently did nothing for
+        # weeks; phase 4 already noted a quicksave that did not
+        # update the save). Set the flag DIRECTLY via Lua
+        # (ui.main.autosave_request = true) and UNPAUSE the game so
+        # its main loop processes it — the save only happens while
+        # the game is running. The autosave writes a dated backup
+        # folder (it does NOT update the base world.sav), so the
+        # verification looks for a NEW backup folder. The game is
+        # re-paused in a finally — a save must never leave it
+        # running.
         try:
             with self.lock:
-                self.client.run_command("quicksave")
+                self.client.run_lua(
+                    "df.global.ui.main.autosave_request = true")
         except Exception as exc:  # noqa: BLE001 - save failure is logged
             self.journal.log_event(
-                "daemon_error", f"quicksave failed: {exc}")
+                "daemon_error", f"quicksave failed to set the flag: {exc}")
             return
-        # Quicksave blocks RPC ~30-40s; wait for the save to land,
-        # then verify the region save actually advanced (phase 4
-        # found a quicksave that did not update region1/world.sav).
-        time.sleep(45)
-        after = save_path.stat().st_mtime if save_path.exists() else 0.0
+        try:
+            set_paused(self.client, False)
+            deadline = time.time() + 90.0
+            saved = False
+            while time.time() < deadline:
+                time.sleep(5)
+                now_backups = {p.name for p in save_root.iterdir()
+                               if p.is_dir()
+                               and p.name.startswith(save_dir)}
+                after_mtime = (save_path.stat().st_mtime
+                               if save_path.exists() else 0.0)
+                if (now_backups - before_backups) or \
+                        after_mtime > before_mtime:
+                    saved = True
+                    break
+        finally:
+            try:
+                set_paused(self.client, True)
+            except Exception:  # noqa: BLE001 - pause is best-effort
+                pass
         if self.bus is not None:
             self.bus.publish(make_event(
-                "save", "info", {"region_mtime_advanced": after > before},
+                "save", "info", {"saved": saved},
                 source="daemon"))
-        if after <= before:
+        if not saved:
             self.journal.log_event(
                 "daemon_error",
-                "quicksave finished but region1/world.sav mtime did "
-                "not advance — the save may only exist in "
-                "data/save/current/; use the in-game Save Game "
-                "instead")
+                f"quicksave finished but no new {save_dir} backup "
+                "appeared and world.sav did not advance — the save "
+                "may not have processed; the game was re-paused")
 
     # -- composed tasks --------------------------------------------------
     def run_task(self, name: str, wait: float = 120.0,

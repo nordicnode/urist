@@ -31,6 +31,7 @@ import argparse
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -47,6 +48,121 @@ from dfhack_rpc.proto import CoreProtocol_pb2 as core  # noqa: E402
 
 DF_DIR = HARNESS / "third_party" / "df_47_05"
 SAVE_DIR = DF_DIR / "data" / "save"
+
+# Deblibs: the SDL/GTK/GL .debs extracted under scratch/deblibs
+# (apt is locked by the system replay; see scripts/recover.sh).
+# DF dies on missing libSDL without them — a hand-listed path once
+# omitted libglu1-mesa and broke a relaunch, so this builds the path
+# from the same package list recover.sh uses.
+_DEBLIB_PKGS = (
+    "libsdl1.2debian",
+    "libsdl-image1.2",
+    "libsdl-ttf2.0-0",
+    "libgtk2.0-0t64",
+    "libglu1-mesa",
+    "libgl1",
+)
+
+
+def deblibs_ld_library_path() -> str | None:
+    """LD_LIBRARY_PATH for the extracted deblibs, or None when they
+    are absent (then the system libs are used as-is). Only dirs that
+    exist are included, so a partial extraction never breaks the
+    launch with a dangling path entry."""
+    base = HARNESS / "scratch" / "deblibs"
+    dirs = []
+    for pkg in _DEBLIB_PKGS:
+        d = base / pkg / "usr" / "lib" / "x86_64-linux-gnu"
+        if d.is_dir():
+            dirs.append(str(d))
+    if not dirs:
+        return None
+    existing = os.environ.get("LD_LIBRARY_PATH")
+    return ":".join(dirs) + (f":{existing}" if existing else "")
+
+
+def launch_env() -> dict:
+    """Environment for the relaunched DF: display, terminal, and the
+    deblibs LD_LIBRARY_PATH when the extracted libs are present."""
+    env = dict(os.environ)
+    env["DISPLAY"] = ":99"
+    env["TERM"] = "xterm"
+    ld = deblibs_ld_library_path()
+    if ld:
+        env["LD_LIBRARY_PATH"] = ld
+    return env
+
+
+def _df_pids() -> list[int]:
+    """PIDs of running Dwarf_Fortress processes (by exact name)."""
+    out = subprocess.run(["pgrep", "-x", "Dwarf_Fortress"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return []
+    pids = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def _pid_cwd(pid: int) -> Path | None:
+    """The working directory of a process, or None if it cannot be
+    read (the process exited between the pgrep and the read)."""
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).resolve()
+    except OSError:
+        return None
+
+
+def kill_df(df_dir: Path, timeout: float = 10.0) -> list[int]:
+    """SIGKILL only the DF processes whose cwd is df_dir.
+
+    DF ignores SIGTERM, so SIGKILL is the only stop. NEVER kill by
+    bare process name: ``pkill -x Dwarf_Fortress`` matches every DF
+    on the machine, and the scratch DF (embark work) runs beside the
+    main one — a bare pkill killed the main fort while targeting the
+    scratch DF on 2026-11-27. A pid whose cwd cannot be read is left
+    alone: an unknown process is never killed on a guess.
+
+    Returns the killed PIDs; other DF instances are named in the
+    output and left running.
+    """
+    target = df_dir.resolve()
+    killed: list[int] = []
+    skipped: list[int] = []
+    for pid in _df_pids():
+        if _pid_cwd(pid) == target:
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+        else:
+            skipped.append(pid)
+    if skipped:
+        print(f"reload: leaving other DF processes alone: {skipped}",
+              flush=True)
+    deadline = time.time() + timeout
+    for pid in list(killed):
+        while time.time() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                break
+            # A zombie (reaped by init only when its parent waits)
+            # is dead for our purposes even though the pid lingers.
+            try:
+                with open(f"/proc/{pid}/stat", "rb") as fh:
+                    if fh.read().rsplit(b")", 1)[-1].split()[0] == b"Z":
+                        break
+            except OSError:
+                break
+            time.sleep(0.2)
+        else:
+            print(f"reload: WARNING — pid {pid} still alive after "
+                  f"{timeout}s", flush=True)
+    return killed
 
 # Dated AUTOBACKUP folders: <base>-YYYYY-MM-DD, e.g.
 # region2-00125-07-01 (in-game year 125, month 07, day 01).
@@ -224,16 +340,17 @@ def main() -> int:
     preserve_crash_evidence()
 
     print("killing DF ...", flush=True)
-    # -x matches the exact process name; pkill's own name is "pkill",
-    # so there is no self-match (the hazard from the log).
-    subprocess.run(["pkill", "-9", "-x", "Dwarf_Fortress"],
-                   capture_output=True)
+    # PID-based kill only (kill_df): a bare `pkill -x Dwarf_Fortress`
+    # matches every DF on the machine and killed the main fort while
+    # targeting the scratch DF on 2026-11-27.
+    killed = kill_df(DF_DIR)
+    print(f"reload: killed DF pids {killed} in {DF_DIR}", flush=True)
     time.sleep(2)
 
     print("launching ./dfhack ...", flush=True)
-    env = dict(os.environ)
-    env["DISPLAY"] = ":99"
-    env["TERM"] = "xterm"
+    # launch_env sets the deblibs LD_LIBRARY_PATH itself (apt is
+    # locked; without it DF dies on missing libSDL).
+    env = launch_env()
     log = open(HARNESS / "logs" / "dfhack.log", "ab")
     # Detach fully: new session (setsid) + stdin from /dev/null +
     # SIGHUP ignored. Without this DF dies ~20 s after this script

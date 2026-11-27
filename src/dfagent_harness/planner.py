@@ -75,20 +75,12 @@ THREAT_CRITICAL_TILES = 5
 #: How long a failed goal waits before the planner retries it (s).
 DEFAULT_BACKOFF_S = 180.0
 
-#: Candidate workshop sites near the wagon/fort centre (95,95,42),
-#: tried in order; probe_site verifies each before use.
-WORKSHOP_SITES: list[tuple[int, int, int]] = [
-    (88, 85, 42), (91, 85, 42), (85, 88, 42), (100, 85, 42),
-    (85, 100, 42), (102, 92, 42), (105, 90, 42), (88, 100, 42),
-]
-
-#: Dormitory bed grid origin (surface, near the wagon site).
-BED_ORIGIN: tuple[int, int, int] = (93, 93, 42)
-#: Farm plot site (surface, for surface crops until underground
-#: digging opens soil below).
-FARM_SITE: tuple[int, int, int] = (80, 80, 42)
-#: Food stockpile site (surface, near the wagon site).
-FOOD_STOCKPILE_BOX: tuple[int, ...] = (96, 90, 42, 100, 94, 42)
+#: The stale Athelunol z=42 site constants (WORKSHOP_SITES,
+#: BED_ORIGIN, FARM_SITE, FOOD_STOCKPILE_BOX) were removed
+#: 2026-11-26: they were the wrong fort (Erushtathtat's surface is
+#: z175) and the planner fell back to them when sites was None.
+#: Area-derived sites are the only source now (sites.derive_sites
+#: via the daemon); when sites is None the planner does not build.
 #: Dig plan (retired 2026-11-26): the down-stair + room were hardcoded
 #: Athelunol coordinates (100, 100, 42) — the wrong fort and the wrong
 #: level (Erushtathtat's surface is z175). The dig site is now
@@ -272,9 +264,11 @@ def decide(state: dict[str, Any],
     digging blind is worse than not digging. ``sites`` is the
     area-derived site dict (sites.derive_sites: workshop_sites,
     bed_origin, farm_site, food_stockpile_box); when None the
-    planner falls back to the module constants (Athelunol z=42 —
-    the wrong fort, kept only so the offline tests have sites to
-    decide on; the daemon always passes the derived sites live).
+    planner does NOT build — the stale Athelunol z=42 constants
+    (WORKSHOP_SITES etc.) were removed as the fallback 2026-11-26:
+    area-derived sites are the source, and building blind at z=42
+    on the wrong fort is worse than not building. Callers that need
+    build decisions (the offline tests) pass explicit sites.
     ``gather_box`` is the shrub-probed gather box (the daemon
     derives it, like the dig site); when None the planner falls
     back to GATHER_BOX. Returns decisions sorted by priority.
@@ -283,22 +277,23 @@ def decide(state: dict[str, Any],
     decisions: list[Decision] = []
     events = events or []
     blocked = blocked or frozenset()
-    # The sites: the daemon's area-derived ones when provided, the
-    # module constants (Athelunol z=42) only as a fallback for the
-    # offline tests (when sites is None). An empty workshop_sites
-    # list means "no free site" — it must NOT fall back to the
-    # constants, or the planner would build at z=42 on the wrong
-    # fort. Hence the explicit None checks, not `or`.
+    # The sites: the daemon's area-derived ones when provided. When
+    # sites is None (or a key is missing) the planner does NOT build
+    # — no fallback to the stale Athelunol z=42 constants (removed
+    # 2026-11-26). An empty workshop_sites list means "no free site";
+    # a None bed_origin / farm_site / food_box means "no site".
+    # The build rules below guard on these, so a missing site skips
+    # the build instead of crashing or building blind.
     if sites is None:
-        workshop_sites = WORKSHOP_SITES
-        bed_origin = BED_ORIGIN
-        farm_site = FARM_SITE
-        food_box = FOOD_STOCKPILE_BOX
+        workshop_sites: list[tuple[int, int, int]] = []
+        bed_origin = None
+        farm_site = None
+        food_box = None
     else:
         workshop_sites = sites.get("workshop_sites") or []
-        bed_origin = sites.get("bed_origin") or BED_ORIGIN
-        farm_site = sites.get("farm_site") or FARM_SITE
-        food_box = sites.get("food_stockpile_box") or FOOD_STOCKPILE_BOX
+        bed_origin = sites.get("bed_origin")
+        farm_site = sites.get("farm_site")
+        food_box = sites.get("food_stockpile_box")
     gather = gather_box or GATHER_BOX
 
     def _blocked(key: str) -> bool:
@@ -378,23 +373,28 @@ def decide(state: dict[str, Any],
                          "job": "make_barrel", "count": 3},
                         goal_key="drink:barrels"))
                 else:
-                    decisions.append(Decision(
-                        1, "needs", "build a carpenter (no barrels)",
-                        f"drink {drink}u (critical), brewable plants "
-                        f"available, but 0 barrels and no carpenter "
-                        f"to make them",
-                        "build_workshop",
-                        {"kind": "carpenter",
-                         "pos": list(workshop_sites[1])},
-                        goal_key="drink:barrels"))
+                    # No verified workshop site, no build: the
+                    # action would have nowhere to place it.
+                    if len(workshop_sites) > 1:
+                        decisions.append(Decision(
+                            1, "needs", "build a carpenter (no barrels)",
+                            f"drink {drink}u (critical), brewable plants "
+                            f"available, but 0 barrels and no carpenter "
+                            f"to make them",
+                            "build_workshop",
+                            {"kind": "carpenter",
+                             "pos": list(workshop_sites[1])},
+                            goal_key="drink:barrels"))
         else:
-            decisions.append(Decision(
-                1, "needs", "build a still (drink critical)",
-                f"drink {drink}u (critical <= {DRINK_CRITICAL}) and no "
-                f"still exists — wood {s['wood']}u, stone {s['stone']}u",
-                "build_workshop",
-                {"kind": "still", "pos": list(workshop_sites[0])},
-                goal_key="drink:still"))
+            # No verified workshop site, no build.
+            if workshop_sites:
+                decisions.append(Decision(
+                    1, "needs", "build a still (drink critical)",
+                    f"drink {drink}u (critical <= {DRINK_CRITICAL}) and no "
+                    f"still exists — wood {s['wood']}u, stone {s['stone']}u",
+                    "build_workshop",
+                    {"kind": "still", "pos": list(workshop_sites[0])},
+                    goal_key="drink:still"))
     elif has_s and has_b and drink <= drink_warn:
         if has_j and still is not None and _brewable_plants(s) > 0 \
                 and s["barrels"] > 0 \
@@ -470,6 +470,7 @@ def decide(state: dict[str, Any],
     # -- 4. Production: workshops ---------------------------------------
     carpenter = _workshop(s, "Carpenters")
     if has_b and has_s and carpenter is None and s["wood"] >= 1 \
+            and len(workshop_sites) > 1 \
             and not any(
             d.goal_key == "drink:still" and not _blocked(d.goal_key)
             for d in decisions):
@@ -480,7 +481,8 @@ def decide(state: dict[str, Any],
             "build_workshop",
             {"kind": "carpenter", "pos": list(workshop_sites[1])},
             goal_key="production:carpenter"))
-    if has_b and has_s and kitchen is None and s["stone"] >= 1:
+    if has_b and has_s and kitchen is None and s["stone"] >= 1 \
+            and len(workshop_sites) > 2:
         decisions.append(Decision(
             4, "production", "build a kitchen",
             f"no kitchen; stone {s['stone']}u — needed to cook meals",
@@ -493,7 +495,7 @@ def decide(state: dict[str, Any],
     bed_items = s["items_by_type"].get("BED", 0)
     if has_b and has_i and carpenter is not None \
             and beds < s["citizens"]:
-        if bed_items > 0:
+        if bed_items > 0 and bed_origin is not None:
             # Place beds in a grid from bed_origin; find the first
             # free 1x1 the daemon will verify (site check happens in
             # the action). Queue one placement per tick.
@@ -538,19 +540,27 @@ def decide(state: dict[str, Any],
                      stairs[0], stairs[1], stairs[2]],
              "mode": "down-stair"},
             goal_key="expansion:dig"))
-    if has_b and s["building_summary"].get("Stockpile", 0) == 0:
+    if has_b and s["building_summary"].get("Stockpile", 0) == 0 \
+            and food_box is not None:
+        # Programmatic stockpile (create_stockpile, constructBuilding
+        # abstract=true) — the ui:create_stockpile keystroke route is
+        # forbidden for game actions. The box is the verified 5x5
+        # stockpile site from the daemon's placement cache.
         decisions.append(Decision(
             5, "expansion", "create a food stockpile",
             "no stockpile yet — food sits where it falls and rots; "
             "a food stockpile near the fort keeps it hauled in",
-            "ui:create_stockpile",
-            {"box": list(food_box), "category": "f"},
+            "create_stockpile",
+            {"category": "food",
+             "pos": [food_box[0], food_box[1], food_box[2]],
+             "width": food_box[3] - food_box[0] + 1,
+             "height": food_box[4] - food_box[1] + 1},
             goal_key="expansion:food-stockpile"))
     # Farm plot once a still exists and seeds are on hand (surface
     # plot first; underground when the dug room exists).
     farm_plots = s["building_summary"].get("FarmPlot", 0)
     if has_b and has_s and farm_plots == 0 and s["seeds"] >= 5 \
-            and still is not None:
+            and still is not None and farm_site is not None:
         decisions.append(Decision(
             5, "expansion", "build a farm plot",
             f"{s['seeds']} seeds in stock and no farm plot — surface "
@@ -758,13 +768,28 @@ class Planner:
              manager: Optional[bool] = None,
              dig_site: Optional[dict[str, Any]] = None,
              sites: Optional[dict[str, Any]] = None,
-             gather_box: Optional[tuple[int, ...]] = None
+             gather_box: Optional[tuple[int, ...]] = None,
+             placement: Optional[dict[str, Any]] = None,
+             from_pos: Optional[tuple[int, int, int]] = None
              ) -> list[dict[str, Any]]:
         """Decide + execute. Returns one journal-ready record per
         decision considered (executed, logged, or skipped).
         ``dig_site`` is the area-derived dig site, ``sites`` the
         area-derived site dict, ``gather_box`` the shrub-probed
-        gather box (see decide)."""
+        gather box (see decide). ``placement`` is the daemon's
+        verified-site cache and ``from_pos`` the walkable origin —
+        both are forwarded to the placement-aware build actions so
+        a site-not-free failure names a verified alternative.
+        """
+        self.ticks += 1
+        s = _summary(state)
+        tick = s["tick"]
+        year = s["year"]
+        records: list[dict[str, Any]] = []
+        now = time.time()
+        blocked = frozenset(
+            k for k, t in self._last_failure.items()
+            if now - t < self.backoff_s)
         self.ticks += 1
         s = _summary(state)
         tick = s["tick"]
@@ -824,7 +849,9 @@ class Planner:
                     executed += 1
                 continue
             started = time.monotonic()
-            result = act(self.client, d.action, state=state, **d.kwargs)
+            result = act(self.client, d.action, state=state,
+                         placement=placement, from_pos=from_pos,
+                         **d.kwargs)
             took_ms = round((time.monotonic() - started) * 1000)
             # The recorded result carries the fix (layer 4) so the
             # journal shows cause AND fix, and the loop detector can

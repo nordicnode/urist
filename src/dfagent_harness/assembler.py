@@ -234,14 +234,22 @@ def _stocks(state: dict[str, Any], store: Optional[Store],
     lines.append("Stocks: " + (", ".join(head) if head else "none")
                  + ".")
     # Burn rates + days-remaining from the Store's trends. The
-    # agent never computes a burn rate from a single snapshot.
+    # agent never computes a burn rate from a single snapshot. The
+    # days-remaining uses the CURRENT snapshot's stock value, not
+    # the last trend sample (a stale zero sample used to print
+    # "0.0 days left" while the real stock was 39).
     if store is not None and isinstance(tick, int):
+        stock_keys = {"drink": "drink_units", "food": "food_units",
+                      "wood": "wood_units", "stone": "stone_units"}
         for metric, label in (("drink", "drink"),
                               ("food", "food"),
                               ("wood", "wood"),
                               ("stone", "stone")):
             rate = store.burn_rate(metric, tick)
-            days = store.days_remaining(metric, tick)
+            current = stocks.get(stock_keys[metric])
+            current = (float(current)
+                       if isinstance(current, (int, float)) else None)
+            days = store.days_remaining(metric, tick, current=current)
             if rate is None:
                 continue
             if rate > 0:
@@ -439,20 +447,76 @@ def _jobs(state: dict[str, Any]) -> tuple[str, str]:
     return "\n".join(lines), f"{len(lst)} jobs"
 
 
+def _placement(placement: Optional[dict[str, Any]]
+               ) -> tuple[str, str]:
+    """Compact placement section: verified free + reachable sites.
+
+    The placement cache is {kind: [site, ...]} where a site is
+    {pos, kind, width, height, reachable, why}. Renders a few named
+    options per kind with what makes each one good (format_compact),
+    token-light — the full detail (checks, blocked reasons) lives
+    behind GET /v1/sites. Returns ("", short) when there are no
+    verified sites, so the section is omitted, not rendered empty.
+    When the cache is missing, the section says the placement is
+    unavailable rather than implying no site exists.
+    """
+    if placement is None:
+        return ("Placement: unavailable (no placement cache yet).",
+                "unavailable")
+    from .placement import PLACEMENT_KINDS, format_compact
+    # Only real placement kinds — the cache also carries "centre"
+    # and "from" (lists of ints), which are not site lists; passing
+    # them to format_compact breaks it ('int' has no .get).
+    by_kind = {k: v for k, v in placement.items()
+               if k in PLACEMENT_KINDS
+               and isinstance(v, list) and v}
+    text = format_compact(by_kind)
+    if not text:
+        return ("Placement: no verified sites on hand — query "
+                "/v1/sites?kind=<kind> to search.",
+                "no verified sites")
+    n = sum(len(v) for v in by_kind.values())
+    return text, f"{n} verified sites"
+
+
+def _report_line(entry: Any) -> str:
+    """One announcement/combat report as one line of text.
+
+    The collect dumps the raw DFHack struct (unk_v40_1, zoom_type,
+    pos, ...) alongside the named fields — printing the dict
+    wastes tokens and noise. Format: [y125 t100800] It is now
+    summer. A plain string is returned as-is.
+    """
+    if isinstance(entry, str):
+        return entry
+    if not isinstance(entry, dict):
+        return str(entry)
+    text = entry.get("text") or ""
+    year = entry.get("year")
+    time = entry.get("time")
+    if year is not None and time is not None:
+        return f"[y{year} t{time}] {text}"
+    if time is not None:
+        return f"[t{time}] {text}"
+    return str(text)
+
+
 def _reports(state: dict[str, Any]) -> tuple[str, str]:
     if "reports" not in state:
         return ("Reports: unavailable (section failed to collect).",
                 "unavailable")
     reports = state.get("reports") or {}
     anns = reports.get("announcements") or []
-    combat = reports.get("combat") or []
+    # The Lua helper names the combat reports "reports", not
+    # "combat" — read the real field (the old key never fired).
+    combat = reports.get("reports") or reports.get("combat") or []
     if not anns and not combat:
         return "Reports: nothing new.", "0 reports"
     lines = ["Reports:"]
     for a in anns[-MAX_REPORTS:]:
-        lines.append(f"  - {a}")
+        lines.append(f"  - {_report_line(a)}")
     for c in combat[-2:]:
-        lines.append(f"  - combat: {c}")
+        lines.append(f"  - combat: {_report_line(c)}")
     return "\n".join(lines), f"{len(anns)} announcements"
 
 
@@ -641,6 +705,7 @@ def assemble(state: dict[str, Any],
              areas: Optional[list[dict[str, Any]]] = None,
              survey: Optional[dict[str, Any]] = None,
              sites: Optional[dict[str, Any]] = None,
+             placement: Optional[dict[str, Any]] = None,
              accountant: Optional[TokenAccountant] = None
              ) -> dict[str, Any]:
     """Build the per-tick snapshot (text first, diff + index).
@@ -676,6 +741,12 @@ def assemble(state: dict[str, Any],
     areas_text, areas_short = _areas(areas, survey)
     events_text, events_short = _events(events)
     history_text, history_short = _history(decisions)
+    # Placement (verified free + reachable sites, compact): a few
+    # named options per kind with what makes each one good — not a
+    # dump of every free tile. The full detail lives behind
+    # GET /v1/sites. The section is diffed like the others, so an
+    # unchanged placement renders as a one-liner.
+    placement_text, placement_short = _placement(placement)
 
     # The suggestion comes from the top attention item. The sites
     # (probe-verified free workshop sites, derived by the daemon)
@@ -705,6 +776,8 @@ def assemble(state: dict[str, Any],
                  cut=lambda: _reports_trimmed(state)),
         _section("areas", areas_text, areas_short, 45,
                  cut=lambda: _areas_compact(areas, survey)),
+        _section("placement", placement_text, placement_short, 55,
+                 cut=lambda: ""),
         _section("events", events_text, events_short, 75,
                  cut=lambda: ""),
         _section("history", history_text, history_short, 30,
@@ -781,7 +854,7 @@ def _reports_trimmed(state: dict[str, Any]) -> str:
     anns = reports.get("announcements") or []
     if not anns:
         return "Reports: nothing new."
-    return f"Reports: {anns[-1]}"
+    return f"Reports: {_report_line(anns[-1])}"
 
 
 def _areas_compact(areas: Optional[list[dict[str, Any]]],
@@ -811,8 +884,20 @@ def sample_daily(state: dict[str, Any], store: Store) -> bool:
     if not isinstance(tick, int):
         return False
     day = tick // TICKS_PER_DAY
-    # The last sampled day is the max trend tick for drink.
+    # Reload check: if the current tick is BEHIND the last sampled
+    # tick, the game was reloaded to an earlier save and the old
+    # timeline is dead. Its samples would corrupt every burn rate
+    # (the least-squares slope mixes two timelines — verified live
+    # 2026-11-27: drink samples from the drink-0 timeline gave a
+    # 0.3/day rate and "0.0 days left" while the real stock was 39)
+    # and freeze sampling entirely (the day number went backwards,
+    # so the day-advance check below never fires). Drop the trends
+    # and start fresh.
     pts = store.trend_samples("drink")
+    if pts and tick < pts[-1][0]:
+        store.clear_trends()
+        pts = []
+    # The last sampled day is the max trend tick for drink.
     if pts and pts[-1][0] // TICKS_PER_DAY >= day:
         return False
     stocks = state.get("stocks") or {}

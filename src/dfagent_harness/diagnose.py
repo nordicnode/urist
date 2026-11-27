@@ -49,8 +49,8 @@ def diagnose_failure(action: str, reason: str,
     # Brewing (the fort's most common failure: the drink chain).
     if "brew" in action_l:
         if "barrel" in reason_l:
-            return ("Fix: queue MakeBarrel at the carpenter "
-                    "(action queue_job, job_type MakeBarrel). "
+            return ("Fix: queue make_barrel at the carpenter "
+                    "(action queue_job, job make_barrel). "
                     f"Needs 1 wood. {wood_txt}")
         if "plant" in reason_l or "brewable" in reason_l:
             return ("Fix: gather plants (action designate_gather) "
@@ -74,11 +74,16 @@ def diagnose_failure(action: str, reason: str,
         if "job" in reason_l and ("spawn" in reason_l
                                   or "did not" in reason_l
                                   or "timeout" in reason_l):
-            return ("Fix: do NOT retry the same designation. The "
-                    "game will not create Dig jobs from designations "
-                    "in this fort (verified live 2026-11-26). This "
-                    "is a known blocker — escalate it instead of "
-                    "repeating the dig.")
+            # Digging works since f0e8617 (the designation sets the
+            # map-block flag and the wait covers the job type the
+            # mode creates). A job that never spawns now means the
+            # site or the miner is wrong, not a game blocker.
+            return ("Fix: the designation did not become a job. "
+                    "Check the site (a down-stair needs a FLOOR a "
+                    "dwarf can stand on; the tile must be reachable) "
+                    "and that a dwarf has the MINER labor and a pick, "
+                    "then retry with a verified site from "
+                    "digging.derive_dig_site.")
         if "shape" in reason_l or "valid shape" in reason_l:
             return ("Fix: a down-stair/channel is dug through a "
                     "FLOOR (the ground surface), a regular dig or "
@@ -96,13 +101,15 @@ def diagnose_failure(action: str, reason: str,
                     f"dig for stone. {wood_txt}")
         if "bed" in reason_l:
             return ("Fix: make a bed at the carpenter (action "
-                    f"queue_job, job_type MakeBed). {wood_txt}")
+                    f"queue_job, job make_bed). {wood_txt}")
         if "barrel" in reason_l:
-            return ("Fix: queue MakeBarrel at the carpenter "
-                    f"(action queue_job). Needs 1 wood. {wood_txt}")
+            return ("Fix: queue make_barrel at the carpenter "
+                    f"(action queue_job, job make_barrel). "
+                    f"Needs 1 wood. {wood_txt}")
         if "bucket" in reason_l:
-            return ("Fix: queue MakeBucket at the carpenter "
-                    f"(action queue_job). Needs 1 wood. {wood_txt}")
+            return ("Fix: queue make_bucket at the carpenter "
+                    f"(action queue_job, job make_bucket). "
+                    f"Needs 1 wood. {wood_txt}")
     # Gathering / farming.
     if "gather" in action_l or "farm" in action_l:
         if "plant" in reason_l or "no " in reason_l:

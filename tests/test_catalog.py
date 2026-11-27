@@ -67,15 +67,66 @@ class TestCatalogOffline(unittest.TestCase):
         self.assertIn("down-stair", str(desc["constraints"]))
         self.assertIn("FLOOR", str(desc["constraints"]))
 
-    def test_dig_to_completion_names_the_blocker(self):
+    def test_dig_to_completion_no_stale_blocker(self):
+        # The "KNOWN BLOCKER / will not create Dig jobs" text was
+        # removed when f0e8617 fixed digging (2026-11-26). The
+        # catalog must not tell the model NOT to dig.
         desc = catalog.describe("dig_to_completion")
-        self.assertIn("KNOWN BLOCKER", str(desc["constraints"]))
-        self.assertIn("will not create Dig jobs", str(desc["constraints"]))
+        self.assertNotIn("KNOWN BLOCKER", str(desc["constraints"]))
+        self.assertNotIn("will not create Dig jobs",
+                         str(desc["constraints"]))
+        self.assertIn("f0e8617", str(desc["constraints"]))
 
     def test_manager_order_names_the_noble_requirement(self):
         desc = catalog.describe("manager_order_create")
         self.assertIn("manager noble", str(desc["constraints"]))
-        self.assertIn("make_barrel", desc["params"]["job_type"]["about"])
+        # job_type is a df.job_type name (MakeBarrel), NOT a
+        # JOB_SPECS key — the params must say so, and the example
+        # must be a real job_type name.
+        self.assertIn("MakeBarrel",
+                      desc["params"]["job_type"]["about"])
+        self.assertNotIn("make_barrel",
+                         desc["params"]["job_type"]["about"])
+        self.assertEqual(desc["example"]["job_type"], "MakeBarrel")
+
+    def test_every_example_matches_declared_params(self):
+        # Every example's keys must be declared params (from the
+        # real function signature), and every string example value
+        # must appear in its param's "about" text (the legal values
+        # the catalog declares). This catches the 2026-11-27
+        # mismatches: labor_toggle example used "enable" (param is
+        # "on"), build_farm_plot used "w"/"h" (params are
+        # "width"/"height"), queue_job used "MakeBarrel" (the
+        # JOB_SPECS key is "make_barrel").
+        for action in catalog.catalog()["actions"]:
+            name = action["name"]
+            example = action.get("example") or {}
+            params = action.get("params") or {}
+            for key in example:
+                self.assertIn(key, params,
+                              f"{name} example key {key!r} is not a "
+                              f"declared param")
+            for key, value in example.items():
+                if not isinstance(value, str):
+                    continue
+                about = (params[key].get("about") or "")
+                # Only check when the about text names legal values
+                # (a list or an "e.g." set); free-text params
+                # (unit names) have no list to check against.
+                if ("One of:" in about or "e.g." in about
+                        or ", " in about):
+                    self.assertIn(value, about,
+                                  f"{name} example {key}={value!r} "
+                                  f"is not among the values its "
+                                  f"param declares: {about!r}")
+
+    def test_queue_job_example_is_a_job_specs_key(self):
+        # queue_job's "job" is a JOB_SPECS key (lowercase); the
+        # example must be one, not a df.job_type name.
+        desc = catalog.describe("queue_job")
+        self.assertIn(desc["example"]["job"], actions.JOB_SPECS)
+        self.assertIn(desc["example"]["job"],
+                      desc["params"]["job"]["about"])
 
     def test_every_action_has_an_example(self):
         for action in catalog.catalog()["actions"]:

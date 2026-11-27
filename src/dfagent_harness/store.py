@@ -318,18 +318,28 @@ class Store:
 
     @_locked
     def trend_samples(self, metric: str,
-                      since_tick: Optional[int] = None
+                      since_tick: Optional[int] = None,
+                      until_tick: Optional[int] = None
                       ) -> list[tuple[int, float]]:
-        if since_tick is None:
-            rows = self.conn.execute(
-                "SELECT tick, value FROM trends WHERE metric=? "
-                "ORDER BY tick", (metric,)).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT tick, value FROM trends WHERE metric=? "
-                "AND tick >= ? ORDER BY tick",
-                (metric, since_tick)).fetchall()
-        return [(r["tick"], r["value"]) for r in rows]
+        rows = self.conn.execute(
+            "SELECT tick, value FROM trends WHERE metric=? "
+            "ORDER BY tick", (metric,)).fetchall()
+        out = [(r["tick"], r["value"]) for r in rows]
+        if since_tick is not None:
+            out = [p for p in out if p[0] >= since_tick]
+        if until_tick is not None:
+            out = [p for p in out if p[0] <= until_tick]
+        return out
+
+    @_locked
+    def clear_trends(self) -> None:
+        """Drop every trend sample. Used when the game was reloaded
+        to an earlier tick: the old timeline is dead, and its
+        samples would corrupt every burn rate (the least-squares
+        slope mixes two timelines) and freeze sampling (the day
+        number went backwards, so no new sample is ever taken)."""
+        self.conn.execute("DELETE FROM trends")
+        self.conn.commit()
 
     @_locked
     def burn_rate(self, metric: str, tick: int,
@@ -338,10 +348,14 @@ class Store:
 
         Least-squares over the samples in the window. Positive
         means the stock is FALLING (burning). None when fewer than
-        two samples or no time span.
+        two samples or no time span. The window is capped at the
+        current tick: samples from a later tick belong to a dead
+        timeline (a reload moved the clock backwards) and must not
+        pollute the slope.
         """
         since = tick - days * TICKS_PER_DAY
-        pts = self.trend_samples(metric, since_tick=since)
+        pts = self.trend_samples(metric, since_tick=since,
+                                until_tick=tick)
         if len(pts) < 2:
             return None
         xs = [(t - pts[0][0]) / TICKS_PER_DAY for t, _ in pts]
@@ -359,17 +373,30 @@ class Store:
 
     @_locked
     def days_remaining(self, metric: str, tick: int,
-                       days: int = TREND_WINDOW_DAYS
+                       days: int = TREND_WINDOW_DAYS,
+                       current: Optional[float] = None
                        ) -> Optional[float]:
         """Stock / burn rate, in in-game days. None when the stock
-        is not falling, or there is no slope to compute from."""
+        is not falling, or there is no slope to compute from.
+
+        ``current`` is the stock value RIGHT NOW (the snapshot's
+        value). It must be passed by callers that have it — the
+        last trend sample is stale by definition (it is from a
+        previous day, and after a reload it can be a zero from a
+        dead timeline while the real stock is positive, which used
+        to print "0.0 days left" and panic the model). When current
+        is None the last sample is used. A positive current always
+        gives a positive answer; 0.0 is returned only when the
+        stock genuinely is 0.
+        """
         rate = self.burn_rate(metric, tick, days=days)
         if rate is None or rate <= 0:
             return None
-        pts = self.trend_samples(metric)
-        if not pts:
-            return None
-        current = pts[-1][1]
+        if current is None:
+            pts = self.trend_samples(metric, until_tick=tick)
+            if not pts:
+                return None
+            current = pts[-1][1]
         if current <= 0:
             return 0.0
         return current / rate

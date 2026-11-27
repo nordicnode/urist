@@ -87,6 +87,10 @@ __all__ = [
     "build_farm_plot",
     "build_furniture",
     "deconstruct_building",
+    "create_stockpile",
+    "create_zone",
+    "STOCKPILE_CATEGORIES",
+    "ZONE_KINDS",
     "nobles",
     "get_paused",
     "set_paused",
@@ -956,6 +960,68 @@ def manager_order_remove(client: DFHackClient, order_id: int,
                                  "job_type": out.get("job_type")})
 
 
+def _alternative_site(client: DFHackClient, kind: str,
+                      width: int, height: int,
+                      failed_pos: tuple[int, int, int],
+                      placement: Optional[dict[str, Any]],
+                      from_pos: Optional[tuple[int, int, int]],
+                      timeout: float = 30.0) -> str:
+    """Name a VERIFIED alternative site for a failed placement.
+
+    Placement system (2026-11-26): a blocked site must never be the
+    only site the model knows about. The alternative comes from the
+    daemon's placement cache (verified free + reachable) if one of
+    the right kind/size is on hand, else from a fresh placement
+    search centred on the failed site. The alternative is only
+    named when it is verified (free AND reachable); if no verified
+    alternative exists, the message says so explicitly and points
+    at the query route — never silently hand the model an
+    unverified site.
+    """
+    # Deferred import: placement imports _run_helper from here.
+    from .placement import find_sites
+    failed = tuple(failed_pos)
+
+    def _describe(site: dict[str, Any]) -> str:
+        p = site["pos"]
+        why = site.get("why") or ""
+        return (f"Verified alternative site: ({p[0]},{p[1]},{p[2]})"
+                f" — {why}." if why else
+                f"Verified alternative site: ({p[0]},{p[1]},{p[2]}).")
+
+    if placement:
+        cands = [s for s in (placement.get(kind) or [])
+                 if s.get("width") == width
+                 and s.get("height") == height
+                 and tuple(s.get("pos") or []) != failed
+                 and s.get("reachable") is True]
+        if cands:
+            # Nearest the failed site first (the model was already
+            # trying there), so it does not have to travel far.
+            cands.sort(key=lambda s: (
+                (s["pos"][0] - failed[0]) ** 2
+                + (s["pos"][1] - failed[1]) ** 2))
+            return _describe(cands[0])
+    if from_pos is None:
+        return ("No verified alternative site on hand (reachability "
+                "cannot be checked without a from-point) — query "
+                f"/v1/sites?kind={kind}&w={width}&h={height} for "
+                "verified sites.")
+    try:
+        found = find_sites(client, kind, width, height,
+                           (failed[0], failed[1]), failed[2],
+                           from_pos, limit=1, timeout=timeout)
+    except Exception:  # noqa: BLE001 - a failed search is no site
+        found = {"sites": []}
+    sites = found.get("sites") or []
+    if sites:
+        return _describe(sites[0])
+    return (f"No verified alternative {kind} site found near "
+            f"({failed[0]},{failed[1]},{failed[2]}) — query "
+            f"/v1/sites?kind={kind}&w={width}&h={height} for "
+            "verified sites.")
+
+
 def _site_fix_hint(problems: list[str]) -> str:
     """Actionable fix for a 'site not free' failure.
 
@@ -985,7 +1051,10 @@ def _site_fix_hint(problems: list[str]) -> str:
 def build_workshop(client: DFHackClient, kind: str,
                    pos: tuple[int, int, int],
                    build_timeout: float = DEFAULT_BUILD_TIMEOUT,
-                   timeout: float = 30.0) -> ActionResult:
+                   timeout: float = 30.0,
+                   placement: Optional[dict[str, Any]] = None,
+                   from_pos: Optional[tuple[int, int, int]] = None
+                   ) -> ActionResult:
     """Place a workshop and wait for its construction to complete.
 
     Preconditions: the kind is known, the site is free, and at least one
@@ -1015,7 +1084,10 @@ def build_workshop(client: DFHackClient, kind: str,
     width, height = spec["width"], spec["height"]
     site = _run_helper(client, "probe_site.lua",
                        {"x": pos[0], "y": pos[1], "z": pos[2],
-                        "width": width, "height": height},
+                        "width": width, "height": height,
+                        "from_x": from_pos[0] if from_pos else None,
+                        "from_y": from_pos[1] if from_pos else None,
+                        "from_z": from_pos[2] if from_pos else None},
                        timeout=timeout)
     if not site.get("ok", False):
         raise _Fail("transport",
@@ -1024,7 +1096,10 @@ def build_workshop(client: DFHackClient, kind: str,
         problems = site.get("problems") or []
         raise _Fail("precondition",
                     "site not free: " + "; ".join(problems) + ". "
-                    + _site_fix_hint(problems))
+                    + _site_fix_hint(problems) + " "
+                    + _alternative_site(client, "workshop", width,
+                                        height, tuple(pos), placement,
+                                        from_pos, timeout=timeout))
     mat = None
     for mat_type in spec.get("materials") or [spec["material"]]:
         probe = _run_helper(client, "probe_material.lua",
@@ -1294,7 +1369,10 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
 def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
                     width: int = 3, height: int = 3,
                     build_timeout: float = DEFAULT_BUILD_TIMEOUT,
-                    timeout: float = 30.0) -> ActionResult:
+                    timeout: float = 30.0,
+                    placement: Optional[dict[str, Any]] = None,
+                    from_pos: Optional[tuple[int, int, int]] = None
+                    ) -> ActionResult:
     """Place a farm plot and wait for its construction to finish.
 
     Verification: the plot appears in the buildings list, then its
@@ -1308,7 +1386,10 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
                     f"bad farm size {width}x{height} (want >= 1)")
     site = _run_helper(client, "probe_site.lua",
                        {"x": x, "y": y, "z": z,
-                        "width": width, "height": height},
+                        "width": width, "height": height,
+                        "from_x": from_pos[0] if from_pos else None,
+                        "from_y": from_pos[1] if from_pos else None,
+                        "from_z": from_pos[2] if from_pos else None},
                        timeout=timeout)
     if not site.get("ok", False):
         raise _Fail("transport",
@@ -1317,7 +1398,10 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
         problems = site.get("problems") or []
         raise _Fail("precondition",
                     "site not free: " + "; ".join(problems) + ". "
-                    + _site_fix_hint(problems))
+                    + _site_fix_hint(problems) + " "
+                    + _alternative_site(client, "farm_plot", width,
+                                        height, (x, y, z), placement,
+                                        from_pos, timeout=timeout))
     before = _read_section(client, "buildings", timeout=timeout)
     out = _helper_or_fail(client, "act_farm.lua",
                           {"x": x, "y": y, "z": z,
@@ -1367,7 +1451,10 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
 def build_furniture(client: DFHackClient, kind: str,
                     pos: tuple[int, int, int],
                     build_timeout: float = DEFAULT_BUILD_TIMEOUT,
-                    timeout: float = 30.0) -> ActionResult:
+                    timeout: float = 30.0,
+                    placement: Optional[dict[str, Any]] = None,
+                    from_pos: Optional[tuple[int, int, int]] = None
+                    ) -> ActionResult:
     """Place one furniture building (bed, table, chair, ...) and wait
     for its construction to finish.
 
@@ -1386,7 +1473,10 @@ def build_furniture(client: DFHackClient, kind: str,
         raise _Fail("precondition", f"bad pos: {pos!r} (want 3 ints)")
     site = _run_helper(client, "probe_site.lua",
                        {"x": pos[0], "y": pos[1], "z": pos[2],
-                        "width": 1, "height": 1},
+                        "width": 1, "height": 1,
+                        "from_x": from_pos[0] if from_pos else None,
+                        "from_y": from_pos[1] if from_pos else None,
+                        "from_z": from_pos[2] if from_pos else None},
                        timeout=timeout)
     if not site.get("ok", False):
         raise _Fail("transport",
@@ -1395,7 +1485,10 @@ def build_furniture(client: DFHackClient, kind: str,
         problems = site.get("problems") or []
         raise _Fail("precondition",
                     "site not free: " + "; ".join(problems) + ". "
-                    + _site_fix_hint(problems))
+                    + _site_fix_hint(problems) + " "
+                    + _alternative_site(client, "furniture", 1, 1,
+                                        tuple(pos), placement, from_pos,
+                                        timeout=timeout))
     items = _read_section(client, "items", timeout=timeout)
     have = next((e.get("units", 0)
                  for e in items.get("by_type") or []
@@ -1447,6 +1540,172 @@ def build_furniture(client: DFHackClient, kind: str,
         reason=(f"{kind} #{building_id} built at "
                 f"{done['building'].get('center')}"),
         took_ms=took_ms, detail=base)
+
+
+#: Stockpile categories (settings.flags names, verified live on a
+#: fresh stockpile 2026-11-26). The category flag is what the action
+#: sets; the category's sub-vectors are left as constructBuilding
+#: leaves them (see act_stockpile.lua for the open sub-vector
+#: question).
+STOCKPILE_CATEGORIES: frozenset[str] = frozenset({
+    "food", "wood", "stone", "refuse", "furniture", "animals",
+    "armor", "bars_blocks", "cloth", "coins", "finished_goods",
+    "gems", "leather", "ore", "sheet", "weapons", "ammo", "corpses",
+})
+
+#: Activity-zone kinds (zone_flags names, verified live on civzone
+#: #9 2026-11-26). The kind flag + zone_flags.active + type
+#: ActivityZone is what the action sets.
+ZONE_KINDS: frozenset[str] = frozenset({
+    "meeting_area", "pen_pasture", "pit_pond", "hospital",
+    "animal_training", "fishing", "garbage_dump", "gather",
+    "clay", "sand", "water_source",
+})
+
+
+def create_stockpile(client: DFHackClient, category: str,
+                     pos: tuple[int, int, int],
+                     width: int = 5, height: int = 5,
+                     timeout: float = 30.0,
+                     placement: Optional[dict[str, Any]] = None,
+                     from_pos: Optional[tuple[int, int, int]] = None
+                     ) -> ActionResult:
+    """Create a stockpile programmatically at a verified site.
+
+    The route (verified live 2026-11-26): dfhack.buildings.
+    constructBuilding with type=Stockpile and abstract=true, the
+    category flag set on the stockpile's settings, then
+    dfhack.job.checkBuildingsNow(). A stockpile is abstract — it
+    exists at once, no construction job. The site is verified
+    first (probe + reachability); on a site-not-free failure the
+    error names a verified alternative site.
+    """
+    started = time.monotonic()
+    category = str(category).strip().lower()
+    if category not in STOCKPILE_CATEGORIES:
+        raise _Fail("precondition",
+                    f"unknown stockpile category {category!r} (choose "
+                    f"from {', '.join(sorted(STOCKPILE_CATEGORIES))})")
+    if len(pos) != 3 or not all(isinstance(v, int) for v in pos):
+        raise _Fail("precondition", f"bad pos: {pos!r} (want 3 ints)")
+    if width < 1 or height < 1 or width > 31 or height > 31:
+        raise _Fail("precondition",
+                    f"bad stockpile size {width}x{height} (want 1..31)")
+    site = _run_helper(client, "probe_site.lua",
+                       {"x": pos[0], "y": pos[1], "z": pos[2],
+                        "width": width, "height": height,
+                        "from_x": from_pos[0] if from_pos else None,
+                        "from_y": from_pos[1] if from_pos else None,
+                        "from_z": from_pos[2] if from_pos else None},
+                       timeout=timeout)
+    if not site.get("ok", False):
+        raise _Fail("transport",
+                    f"site read-back failed: {site.get('error')}")
+    if not site.get("free", False):
+        problems = site.get("problems") or []
+        raise _Fail("precondition",
+                    "site not free: " + "; ".join(problems) + ". "
+                    + _site_fix_hint(problems) + " "
+                    + _alternative_site(client, "stockpile", width,
+                                        height, tuple(pos), placement,
+                                        from_pos, timeout=timeout))
+    before = _read_section(client, "buildings", timeout=timeout)
+    out = _helper_or_fail(client, "act_stockpile.lua",
+                          {"x": pos[0], "y": pos[1], "z": pos[2],
+                           "width": width, "height": height,
+                           "category": category},
+                          timeout=timeout)
+    building_id = out["building_id"]
+    after_place = _read_section(client, "buildings", timeout=timeout)
+    placed = next((b for b in after_place.get("list") or []
+                   if b.get("id") == building_id), None)
+    if placed is None:
+        raise _Fail("verification",
+                    f"stockpile #{building_id} placed but not found "
+                    f"in buildings on re-read")
+    return ActionResult(
+        ok=True, action="create_stockpile",
+        before={"building_count": before.get("count")},
+        after={"building_count": after_place.get("count"),
+               "building": placed},
+        reason=(f"{category} stockpile #{building_id} created at "
+                f"({pos[0]},{pos[1]},{pos[2]}) ({width}x{height})"),
+        took_ms=round((time.monotonic() - started) * 1000),
+        detail={"category": category, "pos": list(pos),
+                "size": [width, height], "building_id": building_id})
+
+
+def create_zone(client: DFHackClient, zone_type: str,
+                pos: tuple[int, int, int],
+                width: int = 5, height: int = 5,
+                timeout: float = 30.0,
+                placement: Optional[dict[str, Any]] = None,
+                from_pos: Optional[tuple[int, int, int]] = None
+                ) -> ActionResult:
+    """Create an activity zone (civzone) programmatically at a
+    verified site.
+
+    The route (verified live 2026-11-26): dfhack.buildings.
+    constructBuilding with type=Civzone and abstract=true, the
+    building's type set to ActivityZone, the kind flag set in
+    zone_flags (+ active), then dfhack.job.checkBuildingsNow().
+    A civzone is abstract — it exists at once, no construction
+    job. The site is verified first; on a site-not-free failure
+    the error names a verified alternative site.
+    """
+    started = time.monotonic()
+    zone_type = str(zone_type).strip().lower()
+    if zone_type not in ZONE_KINDS:
+        raise _Fail("precondition",
+                    f"unknown zone kind {zone_type!r} (choose from "
+                    f"{', '.join(sorted(ZONE_KINDS))})")
+    if len(pos) != 3 or not all(isinstance(v, int) for v in pos):
+        raise _Fail("precondition", f"bad pos: {pos!r} (want 3 ints)")
+    if width < 1 or height < 1 or width > 31 or height > 31:
+        raise _Fail("precondition",
+                    f"bad zone size {width}x{height} (want 1..31)")
+    site = _run_helper(client, "probe_site.lua",
+                       {"x": pos[0], "y": pos[1], "z": pos[2],
+                        "width": width, "height": height,
+                        "from_x": from_pos[0] if from_pos else None,
+                        "from_y": from_pos[1] if from_pos else None,
+                        "from_z": from_pos[2] if from_pos else None},
+                       timeout=timeout)
+    if not site.get("ok", False):
+        raise _Fail("transport",
+                    f"site read-back failed: {site.get('error')}")
+    if not site.get("free", False):
+        problems = site.get("problems") or []
+        raise _Fail("precondition",
+                    "site not free: " + "; ".join(problems) + ". "
+                    + _site_fix_hint(problems) + " "
+                    + _alternative_site(client, "zone", width, height,
+                                        tuple(pos), placement, from_pos,
+                                        timeout=timeout))
+    before = _read_section(client, "buildings", timeout=timeout)
+    out = _helper_or_fail(client, "act_zone.lua",
+                          {"x": pos[0], "y": pos[1], "z": pos[2],
+                           "width": width, "height": height,
+                           "zone_type": zone_type},
+                          timeout=timeout)
+    building_id = out["building_id"]
+    after_place = _read_section(client, "buildings", timeout=timeout)
+    placed = next((b for b in after_place.get("list") or []
+                   if b.get("id") == building_id), None)
+    if placed is None:
+        raise _Fail("verification",
+                    f"zone #{building_id} placed but not found in "
+                    f"buildings on re-read")
+    return ActionResult(
+        ok=True, action="create_zone",
+        before={"building_count": before.get("count")},
+        after={"building_count": after_place.get("count"),
+               "building": placed},
+        reason=(f"{zone_type} zone #{building_id} created at "
+                f"({pos[0]},{pos[1]},{pos[2]}) ({width}x{height})"),
+        took_ms=round((time.monotonic() - started) * 1000),
+        detail={"zone_type": zone_type, "pos": list(pos),
+                "size": [width, height], "building_id": building_id})
 
 
 def deconstruct_building(client: DFHackClient, building_id: int,
@@ -1518,6 +1777,8 @@ ACTIONS: dict[str, Callable[..., ActionResult]] = {
     "build_farm_plot": build_farm_plot,
     "build_furniture": build_furniture,
     "deconstruct_building": deconstruct_building,
+    "create_stockpile": create_stockpile,
+    "create_zone": create_zone,
 }
 
 
@@ -1543,6 +1804,20 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
     # The observe state, for failure diagnosis only — never forwarded
     # to the action function (it takes only its own parameters).
     state = kwargs.pop("state", None)
+    # Placement context (the daemon's verified-site cache + the
+    # walkable origin): forwarded only to the actions that accept
+    # them (the placement-aware builds). The build actions name a
+    # verified alternative site on a site-not-free failure instead
+    # of leaving the model to guess.
+    placement = kwargs.pop("placement", None)
+    from_pos = kwargs.pop("from_pos", None)
+    import inspect
+    _extra: dict[str, Any] = {}
+    _sig = inspect.signature(fn)
+    if "placement" in _sig.parameters:
+        _extra["placement"] = placement
+    if "from_pos" in _sig.parameters:
+        _extra["from_pos"] = from_pos
     started = time.monotonic()
     # Read safety (world-model design §8): the whole action runs
     # under the pause-before-read gate. The action's read-backs
@@ -1557,7 +1832,8 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
     # Deferred import: read_safety imports from this module.
     from .read_safety import ReadRefused, paused_read
     try:
-        result = paused_read(client, lambda: fn(client, **kwargs))
+        result = paused_read(client, lambda: fn(client, **kwargs,
+                                                **_extra))
     except ReadRefused as exc:
         result = ActionResult(
             ok=False, action=name,

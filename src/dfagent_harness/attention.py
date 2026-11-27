@@ -209,20 +209,46 @@ def describe_unit(rec: dict[str, Any],
     return text + "."
 
 
+def _level_gap(pos: tuple[int, int, int],
+                 surface_z: Optional[int]) -> str:
+    """Plain-words vertical distance from the fort: "174 levels
+    below the fort", "3 levels below the fort", "on the fort's
+    level", "2 levels above the fort". The model cannot tell a
+    threat 174 levels down from one 3 levels down from the
+    coordinates alone — the gap has to be stated.
+    """
+    if surface_z is None or pos[2] is None:
+        return ""
+    gap = surface_z - pos[2]
+    if gap == 0:
+        # On the fort's level is the default — saying so adds
+        # nothing.
+        return ""
+    if gap > 0:
+        return (f"{gap} level{'s' if gap != 1 else ''} "
+                f"below the fort")
+    gap = -gap
+    return f"{gap} level{'s' if gap != 1 else ''} above the fort"
+
+
 def _where(pos: tuple[int, int, int],
            surface_z: Optional[int]) -> str:
     """Plain-words location for a position: surface / underground /
-    deep in the caverns. ``surface_z`` is the embark level (175 on
-    Erushtathtat); without it the answer is just the coordinates.
+    deep in the caverns, plus the vertical distance from the fort.
+    ``surface_z`` is the embark level (175 on Erushtathtat);
+    without it the answer is just the coordinates.
     """
     if surface_z is None:
         return ""
     z = pos[2]
     if z >= surface_z - 8:
-        return "on the surface"
-    if z < surface_z - 40:
-        return "deep underground, in the caverns"
-    return "underground"
+        base = "on the surface"
+    elif z < surface_z - 40:
+        base = "deep underground, in the caverns"
+    else:
+        base = "underground"
+    gap = _level_gap(pos, surface_z)
+    return f"{base}, {gap}" if gap else base
 
 
 def describe_arrival(data: dict[str, Any],
@@ -351,6 +377,17 @@ def build_attention(state: dict[str, Any],
                 data.get("dist_nearest_citizen"), int)
              and data["dist_nearest_citizen"] <= 15 else "info")
         priority = 2 if severity == "warning" else 3
+        # Far below the fort: a wild animal 174 levels down in the
+        # caverns is not an urgent arrival, however close it looks
+        # in the horizontal plane. Demote it to info (P3) — the
+        # level gap is now in its text, so the model can still see
+        # it. Visitors are never demoted: they come to the fort.
+        pos = data.get("pos") or [None, None, None]
+        if (data.get("kind") != "visitor"
+                and surface_z is not None
+                and isinstance(pos[2], int)
+                and surface_z - pos[2] > 40):
+            priority = 3
         items.append({
             "priority": priority, "kind": "new_arrival",
             "text": describe_arrival(data, surface_z),

@@ -39,10 +39,12 @@ STATE = {"stocks": {"drink_units": 9, "food_units": 25,
 
 class TestDiagnoseOffline(unittest.TestCase):
     def test_brew_no_barrels_names_the_fix(self):
+        # queue_job takes a JOB_SPECS key (make_barrel), not the
+        # df.job_type name (MakeBarrel is a manager-order name).
         fix = diagnose.diagnose_failure(
             "brew", "no empty barrels", "precondition", STATE)
         self.assertIsNotNone(fix)
-        self.assertIn("MakeBarrel", fix)
+        self.assertIn("make_barrel", fix)
         self.assertIn("1 wood", fix)
         self.assertIn("Wood: 211", fix)
 
@@ -68,14 +70,19 @@ class TestDiagnoseOffline(unittest.TestCase):
         self.assertIn("different site", fix)
         self.assertIn("derive_dig_site", fix)
 
-    def test_dig_job_never_spawns_says_do_not_retry(self):
+    def test_dig_job_never_spawns_names_the_retry(self):
+        # The stale "KNOWN BLOCKER / do NOT retry" text was removed
+        # by fix 2 (2026-11-27): digging works since f0e8617, so a
+        # job that never spawns means the site or the miner is
+        # wrong — check both, then retry with a verified site.
         fix = diagnose.diagnose_failure(
             "dig_to_completion",
             "no Dig job spawned within 60.0s",
             "timeout", STATE)
         self.assertIsNotNone(fix)
-        self.assertIn("do NOT retry", fix)
-        self.assertIn("known blocker", fix)
+        self.assertIn("MINER", fix)
+        self.assertIn("derive_dig_site", fix)
+        self.assertNotIn("known blocker", fix.lower())
 
     def test_dig_wrong_shape_names_the_shape(self):
         fix = diagnose.diagnose_failure(

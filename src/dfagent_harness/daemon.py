@@ -282,6 +282,13 @@ class Daemon:
         # after it).
         self._recent_events: list[dict[str, Any]] = []
         self._goal_check_at = 0.0
+        # Placement cache (kind -> [verified site, ...]): populated
+        # by _derive_sites on each planner tick. A site is verified
+        # free + reachable (canWalkBetween from the fort centre).
+        # None until the first derivation; the snapshot and the
+        # /v1/sites route derive on demand when it is missing.
+        self._placement_cache: Optional[dict[str, Any]] = None
+        self._placement_cache_at = 0.0
 
     # -- lifecycle -------------------------------------------------------
     def start(self) -> None:
@@ -554,11 +561,15 @@ class Daemon:
         # handled by the fix hint, not a bad build.
         self._sites_cache = sites
         self._sites_cache_at = time.monotonic()
+        _from = self._placement_cache.get("from") \
+            if self._placement_cache else None
         records = self.planner.tick(
             state, list(self._recent_events),
             manager=manager, dig_site=self._derive_dig_site(state),
             sites=sites,
-            gather_box=self._derive_gather_box(state))
+            gather_box=self._derive_gather_box(state),
+            placement=self._placement_cache,
+            from_pos=tuple(_from) if _from else None)
         print(f"dfh planner: tick {self.planner.ticks} done: "
               f"{len(records)} decision(s), "
               f"{sum(1 for r in records if r.get('ok'))} ok, "
@@ -691,66 +702,148 @@ class Daemon:
         from the areas (never hardcoded): the Surface area + the
         fort centre (the Surface bbox centre) + the surface z.
         Returns None when the areas are not cached yet — the planner
-        then falls back to the module constants (Athelunol z=42),
-        which are the wrong fort; the fallback is only for the
-        offline tests, and the daemon logs it so it is visible.
-        Failures are None, never fatal to the tick."""
+        then does not build rather than building blind (the stale
+        Athelunol z=42 fallback is removed; see planner.py).
+        Failures are None, never fatal to the tick.
+
+        Placement system (2026-11-26): the workshop and stockpile
+        sites come from placement.find_sites — verified free AND
+        reachable (canWalkBetween from the fort centre) — not from
+        fixed offsets. The verified sites are also stored on
+        self._placement_cache (kind -> [site, ...]) for the snapshot
+        (/v1/snapshot placement section), the /v1/sites query route,
+        and the build actions' verified-alternative naming. The
+        food_stockpile_box is the first verified 5x5 stockpile site
+        (not the fixed offset derive_sites would otherwise use).
+        """
+        from . import placement as placement_mod
         from . import sites as sites_mod
         cache = getattr(self.server, "spatial_cache", None) \
             if self.server is not None else None
         areas = cache.get("areas") if cache else None
         if not areas:
             return None
-        surface_z = areas.get("surface_z")
-        if not isinstance(surface_z, int):
-            return None
-        centre = _fort_centre(areas)
-        if centre is None:
-            return None
-        # The workshop sites must be searched for, not assumed: the
-        # surface is hilly, so fixed offsets land on WALL/RAMP/
-        # BOULDER (verified live: all 8 fixed candidates around
-        # (95, 95) were unbuildable). Render a slice at the surface
-        # z and one above, find the 3x3 floor rects nearest the
-        # fort centre, and verify each with probe_site (plants,
-        # units, stale occupancy). A slice is one Lua call per
-        # level; the probes are ~50 ms each, bounded to 8.
-        from . import sites as sites_mod
-        from .actions import _run_helper
-        from .spatial import render_slice
-        rects: list[tuple[int, int, int]] = []
-        cx, cy = centre
-        for z in (surface_z, surface_z + 1):
-            if rects:
-                break
-            try:
-                sl = render_slice(
-                    self.client, max(0, cx - 20), max(0, cy - 20), z,
-                    min(191, cx + 20), min(191, cy + 20))
-            except Exception:  # noqa: BLE001 - no slice is no rects
-                continue
-            grid = sl.get("grid") or []
-            if not grid:
-                continue
-            for pos in sites_mod.find_free_rects(
-                    grid, max(0, cx - 20), max(0, cy - 20), z,
-                    centre=centre):
-                try:
-                    probe = _run_helper(
-                        self.client, "probe_site.lua",
-                        {"x": pos[0], "y": pos[1], "z": pos[2],
-                         "width": 3, "height": 3})
-                except Exception:  # noqa: BLE001 - a failed probe
-                    continue  # is not a free site
-                if probe.get("free"):
-                    rects.append(pos)
-                if len(rects) >= 8:
-                    break
+        # The anchor: where the fort actually is (buildings first,
+        # then citizens) — NOT the Surface bbox centre (the map
+        # centre) or the lowest citizen z (the hills). The old
+        # derivation gave (95,95,176) and 0 sites (2026-11-27).
         try:
-            return sites_mod.derive_sites(areas, centre, surface_z,
-                                          floor_rects=rects)
+            centre, surface_z, from_pos = \
+                placement_mod.placement_anchor(state, areas)
+        except ValueError:
+            return None
+        cx, cy = centre
+        # Workshop sites (3x3) and stockpile sites (5x5), verified
+        # free + reachable from the fort centre. A site with no path
+        # is not a free site.
+        try:
+            ws = placement_mod.find_sites(
+                self.client, "workshop", 3, 3, centre, surface_z,
+                from_pos, limit=8)
+        except Exception:  # noqa: BLE001 - no sites is "no build"
+            ws = {"sites": []}
+        try:
+            sp = placement_mod.find_sites(
+                self.client, "stockpile", 5, 5, centre, surface_z,
+                from_pos, limit=3)
+        except Exception:  # noqa: BLE001 - no sites is "no build"
+            sp = {"sites": []}
+        workshop_sites = [tuple(s["pos"]) for s in ws.get("sites") or []]
+        stockpile_sites = [tuple(s["pos"]) for s in sp.get("sites") or []]
+        self._placement_cache = {
+            "workshop": ws.get("sites") or [],
+            "stockpile": sp.get("sites") or [],
+            "zone": sp.get("sites") or [],
+            "centre": [cx, cy, surface_z],
+            "from": list(from_pos),
+        }
+        self._placement_cache_at = time.monotonic()
+        try:
+            out = sites_mod.derive_sites(areas, centre, surface_z,
+                                          floor_rects=workshop_sites)
         except Exception:  # noqa: BLE001 - no sites is "no build"
             return None
+        # The food stockpile box is the first VERIFIED 5x5 stockpile
+        # site, not derive_sites' fixed offset.
+        if stockpile_sites:
+            sx, sy, sz = stockpile_sites[0]
+            out["food_stockpile_box"] = (sx, sy, sz, sx + 4, sy + 4, sz)
+        return out
+
+    def get_placement(self, kind: str, width: int, height: int,
+                      limit: int = 5, max_age: float = 120.0
+                      ) -> dict[str, Any]:
+        """Verified sites for a kind + size, on demand.
+
+        Returns the cached placement for the kind when it is fresh
+        (derived within max_age seconds) and has sites of the right
+        size; otherwise derives fresh via placement.find_sites (a
+        paused read — no game time advances). The result is the
+        placement.find_sites dict ({kind, width, height, sites,
+        blocked, centre, from}). When the areas are not cached yet
+        (no fort centre / surface z), returns {"sites": []} with a
+        "reason" — never a guessed site, and the caller says so.
+        """
+        from . import placement as placement_mod
+        cache = self._placement_cache
+        if cache and (time.monotonic() - self._placement_cache_at
+                      <= max_age):
+            sites = [s for s in (cache.get(kind) or [])
+                     if s.get("width") == width
+                     and s.get("height") == height
+                     and s.get("reachable") is True]
+            if sites:
+                return {"kind": kind, "width": width, "height": height,
+                        "sites": sites[:limit], "blocked": [],
+                        "centre": cache.get("centre"),
+                        "from": cache.get("from"), "cached": True}
+        # Derive fresh (needs the areas for the centre + surface z,
+        # and a fresh state for the anchor — the buildings/citizens,
+        # not the map centre).
+        spatial = getattr(self.server, "spatial_cache", None) \
+            if self.server is not None else None
+        areas = spatial.get("areas") if spatial else None
+        if not areas:
+            return {"kind": kind, "width": width, "height": height,
+                    "sites": [], "blocked": [],
+                    "reason": "areas not cached yet — no fort centre"}
+        # A fresh paused collect for the anchor (buildings +
+        # citizens). The poller's last_state is lite (no buildings
+        # most polls) and cannot anchor the search.
+        try:
+            from . import observe
+            from .read_safety import paused_read
+            state = paused_read(self.client,
+                                lambda: observe.collect(self.client))
+        except Exception as exc:  # noqa: BLE001 - no state, no sites
+            return {"kind": kind, "width": width, "height": height,
+                    "sites": [], "blocked": [],
+                    "reason": f"state collect failed: {exc}"}
+        try:
+            centre, surface_z, from_pos = \
+                placement_mod.placement_anchor(state, areas)
+        except ValueError as exc:
+            return {"kind": kind, "width": width, "height": height,
+                    "sites": [], "blocked": [], "reason": str(exc)}
+        try:
+            found = placement_mod.find_sites(
+                self.client, kind, width, height, centre, surface_z,
+                from_pos, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - no sites is empty
+            return {"kind": kind, "width": width, "height": height,
+                    "sites": [], "blocked": [],
+                    "reason": f"placement search failed: {exc}"}
+        # Warm the placement cache with the fresh result, so the
+        # snapshot's placement section and the build actions'
+        # verified-alternative naming can use it without waiting
+        # for a planner tick to derive sites.
+        if self._placement_cache is None:
+            self._placement_cache = {}
+        self._placement_cache[kind] = found.get("sites") or []
+        self._placement_cache["centre"] = found.get("centre")
+        self._placement_cache["from"] = found.get("from")
+        self._placement_cache_at = time.monotonic()
+        return found
 
     def _derive_gather_box(self, state: dict[str, Any]
                            ) -> Optional[tuple[int, ...]]:
@@ -947,9 +1040,9 @@ class Daemon:
             if barrels == 0:
                 return {"ok": False, "action": f"task:{name}",
                         "detail": "no barrels in stock — cannot brew",
-                        "fix": "Fix: queue MakeBarrel at the "
-                               "carpenter (action queue_job, job_type "
-                               "MakeBarrel). Needs 1 wood. "
+                        "fix": "Fix: queue make_barrel at the "
+                               "carpenter (action queue_job, job "
+                               "make_barrel). Needs 1 wood. "
                                f"Wood: {stocks.get('wood_units')}.",
                         "evidence": None,
                         "took_ms": round((time.monotonic() - started)

@@ -132,6 +132,45 @@ class TestStoreTrends(unittest.TestCase):
         self.assertIsNotNone(rate)
         self.assertAlmostEqual(rate, 0.0, places=1)
 
+    def test_days_remaining_uses_current_value(self):
+        # The last trend sample is stale by definition (a previous
+        # day). After a reload it can be a zero from a dead timeline
+        # while the real stock is positive — days_remaining must
+        # use the CURRENT snapshot value, never the stale sample.
+        # Verified live 2026-11-27: the last sample was 0.0 (the
+        # drink-0 timeline) while the real stock was 39, and the
+        # model was told "0.0 days left".
+        # Drink falls 2/day for 7 days and ends at 0.
+        self._sample_drink([12, 10, 8, 6, 4, 2, 0])
+        tick = 6 * TICKS_PER_DAY
+        # Without a current value the stale zero gives 0.0 (the
+        # old behaviour, kept for callers with no snapshot).
+        self.assertEqual(self.store.days_remaining("drink", tick),
+                         0.0)
+        # With the current snapshot value (39) the answer is
+        # positive, never 0.0.
+        days = self.store.days_remaining("drink", tick, current=39.0)
+        self.assertGreater(days, 0)
+        self.assertAlmostEqual(days, 39.0 / 2.0, places=1)
+
+    def test_burn_rate_ignores_future_samples(self):
+        # Samples from a LATER tick belong to a dead timeline (a
+        # reload moved the clock backwards). They must not pollute
+        # the rate at the current tick.
+        self._sample_drink([20, 18, 16, 14, 12, 10, 8])
+        # A dead-timeline sample far in the future (drink 0).
+        self.store.sample_trend(100 * TICKS_PER_DAY, "drink", 0)
+        tick = 6 * TICKS_PER_DAY
+        rate = self.store.burn_rate("drink", tick)
+        self.assertIsNotNone(rate)
+        self.assertAlmostEqual(rate, 2.0, places=2)
+
+    def test_clear_trends(self):
+        self._sample_drink([20, 18, 16])
+        self.assertEqual(len(self.store.trend_samples("drink")), 3)
+        self.store.clear_trends()
+        self.assertEqual(self.store.trend_samples("drink"), [])
+
 
 class TestStoreUnitHistoryDeaths(unittest.TestCase):
     def setUp(self):

@@ -85,7 +85,7 @@ HOW THIS WORKS
 - Each turn you receive an observation: the fort's state in plain words, what needs attention, and one suggested action for the single most urgent problem.
 - You reply with JSON only: {"reasoning": "<one or two sentences>", "actions": [{"action": "<name>", "kwargs": {...}, "reason": "<why, in game terms>"}]}.
 - At most 2 actions per turn. You may also reply with zero actions if nothing needs doing — but a fort always has something to do; an empty turn is suspicious.
-- You may also use a "query" action to pull detail the observation only indexes: {"action": "query", "kwargs": {"route": "/v1/column?x=97&y=97"}}. Valid query routes: /v1/slice, /v1/column, /v1/overview, /v1/areas, /v1/area/<id|name>, /v1/path, /v1/survey, /v1/unit/<id>, /v1/units, /v1/wiki. The result comes back in your next observation. A query does not count toward the 2-action limit, but do not query when the observation already answers the question.
+- You may also use a "query" action to pull detail the observation only indexes: {"action": "query", "kwargs": {"route": "/v1/column?x=97&y=97"}}. Valid query routes: /v1/slice, /v1/column, /v1/overview, /v1/areas, /v1/area/<id|name>, /v1/path, /v1/survey, /v1/sites?kind=workshop, /v1/unit/<id>, /v1/units, /v1/wiki. The result comes back in your next observation. A query does not count toward the 2-action limit, but do not query when the observation already answers the question. To find a place to build, query /v1/sites?kind=<workshop|stockpile|zone|farm_plot|furniture|trap|room>&w=N&h=N — it returns verified-free sites with their coordinates, and a failed build names a verified alternative to use instead of the blocked site.
 - The harness executes your actions through the real game and reports what happened (ok or failed, with the cause and the fix). A failed action is information, not a reason to stop: change approach next turn.
 - NEVER invent coordinates, ids, or values. Use only what the observation and the catalog give you. If a coordinate is not in the observation, ask for it with a query or use the suggested action's parameters.
 - NEVER decide the run is over. The run continues until the harness says so. You decide actions, not whether to keep playing.
@@ -289,11 +289,44 @@ class M1Driver:
         print(f"[m1 tick {self.tick_no} {kind}] "
               + json.dumps(fields)[:300], flush=True)
 
+    # The catalog cap: the compact catalog (no full docstrings)
+    # is ~12K chars for 14 actions. The cap is a safety net, not a
+    # target — the catalog is a fixed cost and the prompt budget is
+    # enforced by the assembler. If the catalog ever outgrows the
+    # cap, whole actions are dropped (never a mid-string cut), and
+    # the omitted actions are named so the model can query for them.
+    CATALOG_MAX_CHARS = 20000
+
     def _catalog(self) -> str:
         if self.catalog_text is None:
             cat = self.daemon.catalog()
-            # The catalog route returns the whole catalog + how_to_call.
-            text = json.dumps(cat)[:12000]
+            # Compact: drop each action's full 'detail' docstring
+            # (the 'about' first line + constraints carry the
+            # meaning). The full catalog was 16,950 chars and the
+            # old code hard-truncated it to 12,000 mid-JSON — the
+            # model received unclosed JSON cut off mid-word on
+            # every tick (2026-11-27 review).
+            for a in cat.get("actions", []):
+                a.pop("detail", None)
+            text = json.dumps(cat, separators=(",", ":"))
+            if len(text) > self.CATALOG_MAX_CHARS:
+                # Truncate at a JSON boundary: drop whole actions
+                # from the end until it fits. Never cut mid-string.
+                actions = cat.get("actions", [])
+                omitted: list[str] = []
+                while (actions and
+                       len(text) > self.CATALOG_MAX_CHARS):
+                    omitted.append(actions.pop()["name"])
+                    text = json.dumps(cat, separators=(",", ":"))
+                if omitted:
+                    cat["omitted_actions"] = sorted(omitted)
+                    cat["omitted_note"] = (
+                        "These actions were omitted for size; query "
+                        "/v1/catalog for their details.")
+                    text = json.dumps(cat, separators=(",", ":"))
+            # The catalog the model receives must be valid, closed
+            # JSON — verify before caching it.
+            json.loads(text)
             self.catalog_text = text
         return self.catalog_text
 

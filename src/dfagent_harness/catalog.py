@@ -57,12 +57,11 @@ NOTES: dict[str, dict[str, Any]] = {
                     "up-down-stair, or ramp.",
         },
         "constraints": [
-            "KNOWN BLOCKER (verified live 2026-11-26): the game "
-            "will not create Dig jobs from designations in this "
-            "fort, so this action times out waiting for a job. Do "
-            "not retry it with the same site — escalate instead.",
             "Checks the site first (reachability + hazard: magma, "
             "aquifer, water above/below) and refuses unsafe sites.",
+            "Digging works (verified live 2026-11-26, f0e8617): "
+            "the designation sets the map-block flag and the wait "
+            "covers the job type the mode creates.",
         ],
         "example": {"box": [97, 97, 175, 97, 97, 175],
                     "mode": "down-stair"},
@@ -85,21 +84,27 @@ NOTES: dict[str, dict[str, Any]] = {
                    "gatherable plants, one level.",
         },
         "constraints": [
-            "Gathering needs a dwarf with the Plant Gathering "
-            "labor. Gathered plants are the brewable stock.",
+            "Gathering needs a dwarf with the HERBALIST labor. "
+            "Gathered plants are the brewable stock.",
         ],
         "example": {"box": [70, 70, 175, 125, 125, 175]},
     },
     "manager_order_create": {
         "params": {
-            "job_type": f"One of: {', '.join(sorted(JOB_SPECS))}.",
+            "job_type": "A df.job_type name, e.g. MakeBarrel, "
+                        "MakeBucket, PrepareMeal. NOT a JOB_SPECS "
+                        "key — brew, make_bed, cook are queue_job "
+                        "names, not manager-order job types.",
         },
         "constraints": [
             "Manager orders NEVER work without a manager noble "
             "appointed (position id 10).",
-            "There is NO BrewDrink / MakeBed / CookMeal job type — "
-            "brewing is a CustomReaction (BREW_DRINK_FROM_PLANT), "
-            "cooking is PrepareMeal, bed-making is MakeBed.",
+            "There is no BrewDrink / MakeBed / CookMeal job_type: "
+            "brewing is CustomReaction 211 "
+            "(BREW_DRINK_FROM_PLANT), cooking is PrepareMeal 115, "
+            "bed-making is CustomReaction 211 (MAKE WOODEN BED). "
+            "Order those through queue_job with the JOB_SPECS key "
+            "(brew, cook, make_bed), not through a manager order.",
         ],
         "example": {"job_type": "MakeBarrel", "amount": 1},
     },
@@ -114,13 +119,20 @@ NOTES: dict[str, dict[str, Any]] = {
             "kind": "The workshop type, e.g. Still, Carpenter, "
                     "Mason, Kitchen, FarmPlot (use build_farm_plot "
                     "for farm plots).",
-            "pos": "A 3-element (x, y, z) position on the ground.",
+            "pos": "A 3-element (x, y, z) position on the ground — "
+                   "use a VERIFIED site from the snapshot's placement "
+                   "section or GET /v1/sites?kind=workshop; never "
+                   "guess coordinates.",
         },
         "constraints": [
             "The workshop needs its material (usually 1 wood) and "
             "a dwarf with the matching labor. The build fails fast "
             "on a missing material rather than queuing a job that "
             "can never be worked.",
+            "On a site-not-free failure the error names a verified "
+            "alternative site — use it, do not retry the blocked "
+            "one, and do not gather the blocker and retry the same "
+            "site.",
         ],
         "example": {"kind": "Still", "pos": [95, 95, 175]},
     },
@@ -134,14 +146,14 @@ NOTES: dict[str, dict[str, Any]] = {
                      "PLANT_GATHERER until 2026-11-26, and the "
                      "model's attempt failed with 'unknown labor'.)",
         },
-        "example": {"unit": 1, "labor": "BREWER", "enable": True},
+        "example": {"unit": 1, "labor": "BREWER", "on": True},
     },
     "queue_job": {
         "params": {
             "building_id": "The workshop's building id.",
             "job": f"One of: {', '.join(sorted(JOB_SPECS))}.",
         },
-        "example": {"building_id": 12, "job": "MakeBarrel"},
+        "example": {"building_id": 12, "job": "make_barrel"},
     },
     "build_farm_plot": {
         "params": {
@@ -153,7 +165,8 @@ NOTES: dict[str, dict[str, Any]] = {
             "A farm plot needs soil (or mud) and a dwarf with the "
             "Farming labor. Plant plump helmets for brewing.",
         ],
-        "example": {"x": 90, "y": 90, "z": 175, "w": 3, "h": 3},
+        "example": {"x": 90, "y": 90, "z": 175, "width": 3,
+                    "height": 3},
     },
     "build_furniture": {
         "params": {
@@ -175,6 +188,55 @@ NOTES: dict[str, dict[str, Any]] = {
             "site is blocked until the game clears it.",
         ],
         "example": {"building_id": 12},
+    },
+    "create_stockpile": {
+        "params": {
+            "category": "The stockpile category: food, wood, stone, "
+                        "refuse, furniture, animals, armor, "
+                        "bars_blocks, cloth, coins, finished_goods, "
+                        "gems, leather, ore, sheet, weapons, ammo, "
+                        "corpses.",
+            "pos": "A 3-element (x, y, z) position — the stockpile's "
+                   "top-left corner. Use a VERIFIED site from the "
+                   "snapshot's placement section or GET /v1/sites; "
+                   "never guess coordinates.",
+            "width": "The stockpile's width in tiles (1..31).",
+            "height": "The stockpile's height in tiles (1..31).",
+        },
+        "constraints": [
+            "A stockpile is abstract — it exists at once, no "
+            "construction job. The site must be open floor, "
+            "reachable, and not overlap another stockpile or zone. "
+            "On a site-not-free failure the error names a verified "
+            "alternative site — use it, do not retry the blocked "
+            "one.",
+        ],
+        "example": {"category": "food", "pos": [93, 87, 176],
+                    "width": 5, "height": 5},
+    },
+    "create_zone": {
+        "params": {
+            "zone_type": "The zone kind: meeting_area, pen_pasture, "
+                         "pit_pond, hospital, animal_training, "
+                         "fishing, garbage_dump, gather, clay, sand, "
+                         "water_source.",
+            "pos": "A 3-element (x, y, z) position — the zone's "
+                   "top-left corner. Use a VERIFIED site from the "
+                   "snapshot's placement section or GET /v1/sites; "
+                   "never guess coordinates.",
+            "width": "The zone's width in tiles (1..31).",
+            "height": "The zone's height in tiles (1..31).",
+        },
+        "constraints": [
+            "A zone (civzone) is abstract — it exists at once, no "
+            "construction job. The site must be open floor, "
+            "reachable, and not overlap another zone or stockpile. "
+            "On a site-not-free failure the error names a verified "
+            "alternative site — use it, do not retry the blocked "
+            "one.",
+        ],
+        "example": {"zone_type": "meeting_area",
+                    "pos": [112, 101, 175], "width": 5, "height": 5},
     },
 }
 

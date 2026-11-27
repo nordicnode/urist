@@ -70,6 +70,21 @@ class TestDescribeArrival(unittest.TestCase):
         self.assertIn("120 tiles from the nearest dwarf", text)
         self.assertIn("It just arrived.", text)
 
+    def test_arrival_states_level_gap(self):
+        # Fix 6 (2026-11-27): the model could not tell a threat
+        # 174 levels down from one 3 levels down — the attention
+        # said "deep underground, in the caverns" with no level
+        # gap. A demon at z1 is 174 levels below the fort (z175).
+        text = at.describe_arrival(
+            _arrival(7002, "wildlife", "DEMON", (50, 50, 1),
+                     dist=10)["data"], surface_z=175)
+        self.assertIn("174 levels below the fort", text)
+        # A troll at z123 is 52 levels below.
+        text = at.describe_arrival(
+            _arrival(5490, "visitor", "TROLL", (148, 65, 123),
+                     dist=120)["data"], surface_z=175)
+        self.assertIn("52 levels below the fort", text)
+
     def test_baseline_timing(self):
         text = at.describe_arrival(
             _arrival(5490, "visitor", "TROLL", (148, 65, 123),
@@ -205,6 +220,22 @@ class TestBuildAttention(unittest.TestCase):
         items = at.build_attention(_state(tick=200000), det,
                                    surface_z=175)
         self.assertEqual(len(items), 1)
+
+    def test_far_below_wildlife_demoted(self):
+        # Fix 6 (2026-11-27): dist_nearest_citizen is a 2D
+        # Chebyshev distance (+10 when z differs), so a demon at
+        # z1 directly below a dwarf scores dist 10 and was flagged
+        # P2 — the same priority as a real near-surface threat.
+        # Far below the fort (> 40 levels) demotes a wildlife
+        # arrival to P3. Visitors are never demoted.
+        det = StubDetector([
+            _arrival(7002, "wildlife", "DEMON", (50, 50, 1),
+                     dist=10, tick=200000)])
+        items = at.build_attention(_state(), det, surface_z=175)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["priority"], 3)
+        self.assertIn("174 levels below the fort",
+                      items[0]["text"])
 
 
 if __name__ == "__main__":

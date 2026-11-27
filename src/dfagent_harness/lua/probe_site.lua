@@ -9,9 +9,19 @@
 -- (85,85) and (95,95) probe "free" here without the check yet refuse
 -- placement; occupancy.building reads 2 there, 0 elsewhere). Note the
 -- field is numeric, not boolean — test it as ~= 0, not "== true".
--- PARAMS: x,y,z,width,height. Prints one JSON object.
+-- REACHABILITY (placement system, 2026-11-26): when PARAMS.from_x /
+-- from_y / from_z are given, the rect centre must be walkable from
+-- that point (dfhack.maps.canWalkBetween — the game's own
+-- pathfinder; verified live: centre->shrub site True, centre->far
+-- corner False, centre->deep stone False). A site with no path is
+-- NOT a free site: construction suspends with "Could not find path".
+-- When no from-point is given, reachable is nil (unchecked) and the
+-- caller must say so explicitly — never silently hand the model an
+-- unverified site.
+-- PARAMS: x,y,z,width,height[,from_x,from_y,from_z]. Prints one JSON object.
 local ok, err = pcall(function()
   local problems = dfh_arr()
+  local reachable = nil
   local m = df.global.world.map
   if PARAMS.x < 0 or PARAMS.y < 0
     or PARAMS.x + PARAMS.width > m.x_count
@@ -58,9 +68,29 @@ local ok, err = pcall(function()
           .. ' #' .. bd.id .. ' overlaps site'
       end
     end
+    -- Reachability: the rect centre must be walkable from the
+    -- from-point (the fort centre, where dwarves stand). The
+    -- centre tile is the proxy for the site: if it is walkable,
+    -- the site is in the walkable region and a dwarf can reach it
+    -- to construct. A shrub on the centre does not block walking
+    -- (verified live), but a wall, a disconnected area, or solid
+    -- stone does.
+    if PARAMS.from_x ~= nil and PARAMS.from_y ~= nil
+      and PARAMS.from_z ~= nil then
+      local cx = PARAMS.x + math.floor(PARAMS.width / 2)
+      local cy = PARAMS.y + math.floor(PARAMS.height / 2)
+      reachable = dfhack.maps.canWalkBetween(
+        {x = PARAMS.from_x, y = PARAMS.from_y, z = PARAMS.from_z},
+        {x = cx, y = cy, z = PARAMS.z})
+      if not reachable then
+        problems[#problems+1] = 'no path from '
+          .. PARAMS.from_x .. ',' .. PARAMS.from_y .. ',' .. PARAMS.from_z
+          .. ' to site centre ' .. cx .. ',' .. cy .. ',' .. PARAMS.z
+      end
+    end
   end
   result = {ok = true, probe = 'site', free = #problems == 0,
-    problems = problems}
+    reachable = reachable, problems = problems}
 end)
 if not ok then
   result = {ok = false, probe = 'site', error = tostring(err)}

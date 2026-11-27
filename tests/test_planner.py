@@ -60,11 +60,26 @@ def _add_hostile(state: dict, pos, race="BIRD_EAGLE", uid=9001):
     state["units"]["hostile_count"] = 1
 
 
+def _sites():
+    """Area-derived sites (the only source since 2026-11-26: the
+    stale Athelunol WORKSHOP_SITES fallback is gone, so a build
+    decision needs explicit sites). Three workshop sites (still
+    takes [0], carpenter [1], kitchen [2]), a bed origin, a farm
+    site, and a food stockpile box."""
+    return {
+        "workshop_sites": [(97, 96, 175), (96, 96, 175),
+                           (98, 96, 175)],
+        "bed_origin": (90, 90, 175),
+        "farm_site": (90, 95, 175),
+        "food_stockpile_box": (93, 87, 176, 97, 91, 176),
+    }
+
+
 class DecideDrinkTests(unittest.TestCase):
     def test_drink_critical_no_still_builds_still_first(self):
         state = load_state()
         _set_stock(state, drink_units=2)
-        decisions = decide(state)
+        decisions = decide(state, sites=_sites())
         self.assertTrue(decisions)
         first = decisions[0]
         self.assertEqual(first.domain, "needs")
@@ -180,7 +195,7 @@ class DecideNoblesTests(unittest.TestCase):
 class DecideProductionTests(unittest.TestCase):
     def test_no_carpenter_builds_one_when_wood(self):
         state = load_state()
-        decisions = decide(state)
+        decisions = decide(state, sites=_sites())
         builds = [d for d in decisions
                   if d.goal_key == "production:carpenter"]
         self.assertEqual(len(builds), 1)
@@ -200,7 +215,7 @@ class DecideProductionTests(unittest.TestCase):
         _add_building(state, "Workshop", "Carpenters", bid=12)
         state["items"]["by_type"].append(
             {"type": "BED", "units": 2, "stacks": 2})
-        decisions = decide(state)
+        decisions = decide(state, sites=_sites())
         places = [d for d in decisions if d.goal_key == "production:bed"]
         self.assertEqual(len(places), 1)
         self.assertEqual(places[0].action, "build_furniture")
@@ -355,17 +370,26 @@ class PlannerTickTests(unittest.TestCase):
             fail_result.error_kind = "precondition"
             with mock.patch(
                     "dfagent_harness.planner.act",
-                    side_effect=[fail_result, ok_result]) as mock_act:
-                records = planner.tick(state, manager=True)
+                    side_effect=[fail_result, ok_result,
+                                 ok_result]) as mock_act:
+                records = planner.tick(state, manager=True,
+                                       sites=_sites())
                 self.assertTrue(records)
                 self.assertEqual(records[0]["status"], "failed")
                 # Second tick: the failed goal is filtered out of the
                 # decisions entirely (blocked), and the suppression it
-                # caused lifts — the carpenter runs instead.
-                records2 = planner.tick(state, manager=True)
+                # caused lifts — the carpenter runs instead. (The
+                # food stockpile is also a real act() call now — the
+                # programmatic create_stockpile replaced the old
+                # ui:create_stockpile keystroke route — so tick 1
+                # makes two act calls: the failed still and the
+                # stockpile, since a failed action does not consume
+                # the per-tick action budget.)
+                records2 = planner.tick(state, manager=True,
+                                        sites=_sites())
                 self.assertFalse(any(
                     r["goal_key"] == "drink:still" for r in records2))
-                self.assertEqual(mock_act.call_count, 2)
+                self.assertEqual(mock_act.call_count, 3)
                 self.assertEqual(
                     mock_act.call_args[0][1], "build_workshop")
             journal.close()
@@ -384,7 +408,8 @@ class PlannerTickTests(unittest.TestCase):
                 mock_act.return_value.ok = True
                 mock_act.return_value.reason = "built"
                 mock_act.return_value.error_kind = None
-                records = planner.tick(state, manager=True)
+                records = planner.tick(state, manager=True,
+                                       sites=_sites())
                 watch = [r for r in records
                          if r["goal_key"] == "threat:watch"]
                 self.assertEqual(len(watch), 1)

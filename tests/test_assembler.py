@@ -423,6 +423,67 @@ class TestSampleDaily(unittest.TestCase):
         del state["status"]["year_tick"]
         self.assertFalse(sample_daily(state, self.store))
 
+    def test_sample_daily_invalidates_trends_on_reload(self):
+        # A reload moves the clock backwards (the fort was restored
+        # from an older save). The old timeline's samples must be
+        # dropped, or they corrupt every burn rate and freeze
+        # sampling (the day number went backwards). Verified live
+        # 2026-11-27: drink samples from the drink-0 timeline gave
+        # a 0.3/day rate and "0.0 days left" while the real stock
+        # was 39, and no new sample was ever taken.
+        state = _state()
+        state["status"] = dict(state["status"])
+        state["status"]["year_tick"] = 200 * TICKS_PER_DAY
+        self.assertTrue(sample_daily(state, self.store))
+        self.assertEqual(len(self.store.trend_samples("drink")), 1)
+        # Reload to an earlier tick: the old sample is dropped and
+        # the new timeline starts fresh.
+        state2 = _state()
+        state2["status"] = dict(state2["status"])
+        state2["status"]["year_tick"] = 85 * TICKS_PER_DAY
+        self.assertTrue(sample_daily(state2, self.store))
+        pts = self.store.trend_samples("drink")
+        self.assertEqual(len(pts), 1)
+        self.assertEqual(pts[0][0], 85 * TICKS_PER_DAY)
+
+
+class TestReportsOneLine(unittest.TestCase):
+    """Fix 5 (2026-11-27): reports are one line of text, never a
+    raw DFHack dict. The prompt used to print the whole struct
+    (unk_v40_1, zoom_type, pos, ...) — token waste and noise."""
+
+    def test_announcement_is_one_line(self):
+        state = _state()
+        state["reports"] = {
+            "announcements": [{
+                "unk_v40_1": -1, "zoom_type": 0, "time": 100800,
+                "year": 125, "text": "It is now summer.",
+                "pos": [-30000, -30000, -30000],
+            }],
+            "reports": [],
+        }
+        snap = assemble(state, detector=_Detector())
+        reports = snap["sections"]["reports"]
+        self.assertIn("[y125 t100800] It is now summer.", reports)
+        self.assertNotIn("unk_v40_1", reports)
+        self.assertNotIn("zoom_type", reports)
+        self.assertNotIn("-30000", reports)
+
+    def test_combat_reports_use_the_reports_field(self):
+        # The Lua helper names combat reports "reports", not
+        # "combat" — the old key never fired, so combat was
+        # silently dropped from the snapshot.
+        state = _state()
+        state["reports"] = {
+            "announcements": [],
+            "reports": [{"year": 125, "time": 100900,
+                         "text": "The crundle bites the dwarf."}],
+        }
+        snap = assemble(state, detector=_Detector())
+        self.assertIn("combat: [y125 t100900] The crundle bites",
+                      snap["sections"]["reports"])
+
+
 
 class TestBaselineWindow(unittest.TestCase):
     def test_baseline_arrival_survives_past_one_day(self):

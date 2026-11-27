@@ -41,6 +41,13 @@ Routes:
   — resource survey (design §5; one ~25 s scan, cached, stale
   after one season; ``?refresh=1`` re-scans). Plain-words summary,
   nearest of each kind, vertical facts, hazards, cost.
+* ``GET /v1/sites?kind=workshop|stockpile|zone|farm_plot|furniture|
+  trap|room[&w=N][&h=N]`` — verified-free placement sites for a
+  kind + size (the full detail behind the snapshot's compact
+  placement section): each site verified free (terrain, occupancy,
+  plants, units, overlap) AND reachable by a dwarf from the fort
+  centre, with why each is good, plus the top blocked candidates
+  with their reasons. Never guess coordinates — use these.
 * ``GET /v1/attention`` — the attention section (design §6.1):
   threats first, then new arrivals, in plain words with position
   and class. Needs the daemon's poller (its diff record).
@@ -111,10 +118,13 @@ def _needs_still_site(state: dict) -> bool:
     """True when the snapshot's suggestion would be a still build:
     drink is low and no Still exists. Used by _snapshot to decide
     whether deriving free workshop sites is worth the ~1 s cost —
-    the snapshot never triggers a scan otherwise."""
+    the snapshot never triggers a scan otherwise. The threshold is
+    drink < 50, matching the proactive still suggestion in
+    assembler.suggest (a still takes days to build + brew, so the
+    model needs the site well before drink is critical)."""
     stocks = state.get("stocks") or {}
     drink = stocks.get("drink_units")
-    if not isinstance(drink, int) or drink > 20:
+    if not isinstance(drink, int) or drink >= 50:
         return False
     buildings = state.get("buildings") or {}
     for b in buildings.get("list") or []:
@@ -499,6 +509,8 @@ def create_server(
                 self._path(query, get_areas)
             elif path == "/v1/survey":
                 self._survey(query, get_survey)
+            elif path == "/v1/sites":
+                self._sites(query)
             elif path == "/v1/attention":
                 self._attention()
             elif path == "/v1/snapshot":
@@ -1049,6 +1061,51 @@ def create_server(
                 "derived_at_tick": out.get("derived_at_tick"),
                 "cost": out.get("cost")})
 
+        def _sites(self, query: dict[str, list[str]]) -> None:
+            # GET /v1/sites?kind=workshop&w=3&h=3 — verified-free
+            # sites for a placement kind + size (the full detail
+            # behind the snapshot's compact placement section).
+            # Each site is verified free (terrain, occupancy,
+            # plants, units, overlap) AND reachable (canWalkBetween
+            # from the fort centre). Blocked candidates carry their
+            # reasons. A site is never returned as verified when its
+            # reachability could not be checked.
+            from .placement import PLACEMENT_KINDS
+            kind = (query.get("kind") or ["workshop"])[0].lower()
+            if kind not in PLACEMENT_KINDS:
+                _error(self, 400, "BAD_REQUEST",
+                       f"kind must be one of "
+                       f"{', '.join(sorted(PLACEMENT_KINDS))}")
+                return
+            try:
+                w = int((query.get("w") or [""])[0] or
+                        PLACEMENT_KINDS[kind]["default_size"][0])
+                h = int((query.get("h") or [""])[0] or
+                        PLACEMENT_KINDS[kind]["default_size"][1])
+            except ValueError:
+                _error(self, 400, "BAD_REQUEST",
+                       "w and h must be integers")
+                return
+            if w < 1 or h < 1 or w > 31 or h > 31:
+                _error(self, 400, "BAD_REQUEST",
+                       "w and h must be 1..31")
+                return
+            if daemon is None or getattr(daemon, "get_placement",
+                                         None) is None:
+                _error(self, 503, "NO_DAEMON",
+                       "sites need the daemon's placement service")
+                return
+            t0 = time.monotonic()
+            try:
+                with rpc_lock:
+                    out = daemon.get_placement(kind, w, h)
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "placement search failed", {"error": str(exc)})
+                return
+            out["cost"] = {"ms": int((time.monotonic() - t0) * 1000)}
+            _json(self, 200, out)
+
         def _attention(self) -> None:
             # The attention section (world-model design §6.1): what is
             # wrong, what changed, what needs acting on — built live
@@ -1124,8 +1181,10 @@ def create_server(
             # the site at build time, so a stale cached site is
             # handled by the fix hint, not a bad build.
             sites = None
+            placement = None
             if daemon is not None:
                 sites = getattr(daemon, "_sites_cache", None)
+                placement = getattr(daemon, "_placement_cache", None)
                 cache_at = getattr(daemon, "_sites_cache_at", 0) or 0
                 if (sites is None
                         or time.monotonic() - cache_at > 120):
@@ -1135,6 +1194,8 @@ def create_server(
                                 sites = daemon._derive_sites(state)
                             daemon._sites_cache = sites
                             daemon._sites_cache_at = time.monotonic()
+                            placement = getattr(
+                                daemon, "_placement_cache", None)
                         except Exception:  # noqa: BLE001 - no sites
                             sites = None  # is "no build", not fatal
             try:
@@ -1147,7 +1208,7 @@ def create_server(
                     state, store=store, detector=detector,
                     areas=(spatial_cache.get("areas") or {}).get("areas"),
                     survey=spatial_cache.get("survey"),
-                    sites=sites)
+                    sites=sites, placement=placement)
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "SNAPSHOT_FAILED",
                        "assembler failed", {"error": str(exc)})
@@ -1503,6 +1564,27 @@ def create_server(
                 return
             _json(self, 200, result)
 
+        def _placement_cache(self) -> Optional[dict[str, Any]]:
+            # The daemon's verified-site cache (kind -> [site, ...]),
+            # for the placement-aware build actions' verified-
+            # alternative naming. None when the daemon has not
+            # derived sites yet — the action then searches fresh.
+            if daemon is None:
+                return None
+            return getattr(daemon, "_placement_cache", None)
+
+        def _placement_from(self) -> Optional[tuple[int, int, int]]:
+            # The walkable origin (the fort centre) the placement
+            # cache's reachability was verified from. None when the
+            # cache is missing — the action then cannot verify
+            # reachability and says so instead of naming an
+            # unverified site.
+            cache = self._placement_cache()
+            if not cache:
+                return None
+            frm = cache.get("from")
+            return tuple(frm) if frm else None
+
         def _dispatch_action(self, name: str,
                              body: dict[str, Any]) -> dict[str, Any]:
             if name == "pause":
@@ -1530,22 +1612,64 @@ def create_server(
             if name == "build":
                 return _action_envelope(act(
                     client, "build_workshop", kind=body.get("kind"),
-                    pos=tuple(body.get("pos"))))
+                    pos=tuple(body.get("pos")),
+                    placement=self._placement_cache(),
+                    from_pos=self._placement_from()))
             if name == "deconstruct":
                 return _action_envelope(act(
                     client, "deconstruct_building",
                     building_id=int(body.get("building_id"))))
             if name == "stockpile":
-                from .ui import create_stockpile
-                display = (daemon.config.display if daemon is not None
-                           else ":99")
-                out = create_stockpile(
-                    client, tuple(body.get("box")),
-                    body.get("category", "f"), display=display)
-                return {"ok": bool(out.get("ok")), "action": "stockpile",
-                        "detail": str(out.get("reason")),
-                        "evidence": {"building_id": out.get("building_id")},
-                        "took_ms": 0}
+                # Programmatic stockpile (constructBuilding
+                # abstract=true) — the ui.create_stockpile keystroke
+                # route is forbidden for game actions. The body
+                # takes pos + width/height + category (the old box
+                # + single-letter category form is still accepted).
+                box = body.get("box")
+                if box is not None:
+                    pos = (box[0], box[1], box[2])
+                    width = box[3] - box[0] + 1
+                    height = box[4] - box[1] + 1
+                else:
+                    pos = tuple(body.get("pos"))
+                    width = int(body.get("width", 5))
+                    height = int(body.get("height", 5))
+                category = body.get("category", "food")
+                if len(str(category)) == 1:
+                    # Old single-letter form (f = food, w = wood,
+                    # s = stone, r = refuse) from the ui route.
+                    category = {"f": "food", "w": "wood",
+                                "s": "stone", "r": "refuse"}.get(
+                        str(category).lower(), str(category))
+                return _action_envelope(act(
+                    client, "create_stockpile", category=category,
+                    pos=pos, width=width, height=height,
+                    placement=self._placement_cache(),
+                    from_pos=self._placement_from()))
+            if name == "zone":
+                return _action_envelope(act(
+                    client, "create_zone",
+                    zone_type=body.get("zone_type", "meeting_area"),
+                    pos=tuple(body.get("pos")),
+                    width=int(body.get("width", 5)),
+                    height=int(body.get("height", 5)),
+                    placement=self._placement_cache(),
+                    from_pos=self._placement_from()))
+            if name == "farm":
+                return _action_envelope(act(
+                    client, "build_farm_plot",
+                    x=int(body.get("x")), y=int(body.get("y")),
+                    z=int(body.get("z")),
+                    width=int(body.get("width", 3)),
+                    height=int(body.get("height", 3)),
+                    placement=self._placement_cache(),
+                    from_pos=self._placement_from()))
+            if name == "furniture":
+                return _action_envelope(act(
+                    client, "build_furniture", kind=body.get("kind"),
+                    pos=tuple(body.get("pos")),
+                    placement=self._placement_cache(),
+                    from_pos=self._placement_from()))
             if name == "order":
                 return _action_envelope(act(
                     client, "manager_order_create",
@@ -1603,6 +1727,17 @@ def create_server(
                 for key in ("box", "pos"):
                     if isinstance(kwargs.get(key), list):
                         kwargs[key] = tuple(kwargs[key])
+                # Placement-aware actions need the daemon's verified-
+                # site cache + the walkable from-point, or a failed
+                # build cannot name a verified alternative (the
+                # registry-name route is the one the model actually
+                # uses — the catalog lists registry names). act()
+                # forwards placement/from_pos only to functions that
+                # accept them, so passing them here is safe for every
+                # action.
+                kwargs.setdefault("placement",
+                                  self._placement_cache())
+                kwargs.setdefault("from_pos", self._placement_from())
                 return _action_envelope(act(client, name, **kwargs))
             raise ValueError(f"unknown action {name!r}")
 

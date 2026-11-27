@@ -1,6 +1,8 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Urist logo: a pixel-art dwarf with a pickaxe" width="220">
+  <img src="assets/logo.png" alt="Urist logo: a dwarf face from Kruggsmash's Dwarf Fortress tileset" width="220">
 </p>
+
+<p align="center"><sub>Logo glyphs from <a href="https://i.imgur.com/SVAmWwD.png">Kruggsmash's tileset</a>; built by <code>assets/build-logo.py</code>.</sub></p>
 
 <h1 align="center">Urist</h1>
 

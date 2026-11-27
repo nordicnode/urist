@@ -194,8 +194,13 @@ class TestVerifyDig(unittest.TestCase):
 
     def test_complete_when_designation_gone_and_terrain_changed(self):
         # The floor at z175 is now a stair (not a solid floor).
+        # NOTE: the class is 'passage', not 'stair' — column.lua
+        # classifies every STAIR_* / RAMP shape as 'passage', and
+        # 'stair' is a class the game never emits; the old fixture
+        # passed only because the negative check accepted anything
+        # not in the bad set (2026-11-27, C4).
         col = _col(97, 97, [
-            {"z0": 175, "z1": 175, "class": "stair"},
+            {"z0": 175, "z1": 175, "class": "passage"},
             {"z0": 174, "z1": 174, "class": "soil"},
             {"z0": 0, "z1": 173, "class": "stone"},
         ])
@@ -204,13 +209,76 @@ class TestVerifyDig(unittest.TestCase):
 
     def test_incomplete_when_designation_remains(self):
         col = _col(97, 97, [
-            {"z0": 175, "z1": 175, "class": "stair"},
+            {"z0": 175, "z1": 175, "class": "passage"},
             {"z0": 174, "z1": 174, "class": "soil"},
             {"z0": 0, "z1": 173, "class": "stone"},
         ])
         out = self._verify(1, col)
         self.assertFalse(out["complete"])
         self.assertEqual(out["designations_left"], 1)
+
+    def test_channel_air_is_dug_and_floor_is_not(self):
+        # A channelled tile reads 'air'; a tile still reading
+        # 'floor' is unchanged for channel mode.
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "air"},
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        out = self._verify(0, col, mode="channel")
+        self.assertTrue(out["complete"], out["reason"])
+        col = _surface_col()
+        out = self._verify(0, col, mode="channel")
+        self.assertFalse(out["complete"])
+        self.assertIn("still floor", out["reason"])
+        self.assertIn("want air", out["reason"])
+
+    def test_ramp_passage_is_dug(self):
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "passage"},
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        out = self._verify(0, col, mode="ramp")
+        self.assertTrue(out["complete"], out["reason"])
+
+    def test_hidden_tile_is_not_dug(self):
+        # C4: the old bad set listed the display label
+        # 'hidden (unrevealed)', which column.lua never emits —
+        # the raw class is 'hidden' (tile block nil) — so an
+        # unrevealed tile passed as dug. It must fail in every
+        # mode, as must a column with no stratum at z (None).
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "hidden"},
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        for mode in ("dig", "down-stair", "channel", "ramp"):
+            out = self._verify(0, col, mode=mode)
+            self.assertFalse(out["complete"], mode)
+            self.assertIn("still hidden", out["reason"], mode)
+        col = _col(97, 97, [
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        out = self._verify(0, col, mode="dig")
+        self.assertFalse(out["complete"])
+        self.assertIn("no column", out["reason"])
+
+    def test_water_is_not_dug(self):
+        # The old negative check accepted water and magma as dug
+        # (neither was in the bad set) — a dug tile that hit water
+        # is a flood, not a completed dig.
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "water"},
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        out = self._verify(0, col, mode="dig")
+        self.assertFalse(out["complete"])
+        self.assertIn("still water", out["reason"])
+
+    def test_unknown_mode_raises(self):
+        # A mode with no expected class must fail loudly, never
+        # silently pass. ('clear' has no job type and is rejected
+        # by dig_to_completion before verify_dig is reached.)
+        with self.assertRaises(ValueError):
+            self._verify(0, _surface_col(), mode="clear")
 
     def test_incomplete_when_terrain_unchanged(self):
         col = _surface_col()

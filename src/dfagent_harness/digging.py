@@ -29,9 +29,10 @@ Checks (all paused reads — no game time, no drink):
   in an area connected to the Surface. Returns a verdict, never a
   bare boolean: the reason names the hazard / the missing access.
 - ``verify_dig``: after the dig, the designation must be gone and
-  the terrain must have changed (the tile is a stair / open space,
-  read from the column). A designation that is still set, or a tile
-  that is still solid, is not complete.
+  every tile must read the mode's expected post-dig class (dig to
+  floor, stairs/ramp to passage, channel to air — see
+  EXPECTED_DIG_CLASS). A designation that is still set, or a tile
+  reading anything else, is not complete.
 - ``derive_dig_site``: the planner's dig site, derived from the
   areas (the Surface area + the fort centre) instead of hardcoded
   coordinates. Returns a down-stair site on the surface and a room
@@ -53,6 +54,27 @@ from .actions import _Fail, _run_helper
 
 #: How far below a down-stair / channel to look for hazards (levels).
 HAZARD_LOOKAHEAD = 3
+
+#: CLI dig mode -> the column class a tile must read AFTER the dig
+#: completes (column.lua's classifier: FLOOR shape -> 'floor',
+#: RAMP / STAIR_* shapes -> 'passage', open space -> 'air'). The
+#: expected post-dig class is mode-dependent (external review C4,
+#: 2026-11-27): a plain dig mines a wall out and leaves a FLOOR
+#: tile, a stair carves a passage, a channel opens the tile to
+#: air, a ramp carves a passage. The old code checked the negative
+#: (tile not in a bad set), which accepted anything else — water,
+#: magma, and the never-matching display label
+#: 'hidden (unrevealed)' (column.lua emits the raw class 'hidden'
+#: when the tile block is nil; the merged name only exists in
+#: column.py _merge_strata, which verify_dig never calls).
+EXPECTED_DIG_CLASS: dict[str, frozenset[str]] = {
+    "dig": frozenset({"floor"}),
+    "down-stair": frozenset({"passage"}),
+    "up-stair": frozenset({"passage"}),
+    "up-down-stair": frozenset({"passage"}),
+    "channel": frozenset({"air"}),
+    "ramp": frozenset({"passage"}),
+}
 
 #: Strata classes that are a hazard to dig into / under.
 HAZARD_CLASSES = ("magma", "aquifer", "water")
@@ -290,30 +312,36 @@ def _has_open_neighbour(client: DFHackClient, x: int, y: int,
 
 def verify_dig(client: DFHackClient, box: tuple[int, ...],
                mode: str) -> dict[str, Any]:
-    """Verify a dig completed: the designation must be gone AND the
-    terrain must have changed (the tile is a stair / open space,
-    read from the column). A designation still set, or a tile still
-    solid, is not complete. Returns {"complete", "designations_left",
-    "terrain_ok", "reason"}."""
+    """Verify a dig completed: the designation must be gone AND
+    every tile in the box must read the mode's expected post-dig
+    class (see EXPECTED_DIG_CLASS). A designation still set, or a
+    tile still solid — or reading anything other than the expected
+    class (water, magma, hidden, a floor where a stair should be)
+    — is not complete. Returns {"complete", "designations_left",
+    "terrain_ok", "reason"}. Raises ValueError on an unknown mode:
+    a mode with no expected class must fail loudly, never silently
+    pass (mode 'clear' never reaches here — it has no job type and
+    dig_to_completion rejects it first)."""
     x0, y0, z0, x1, y1, z1 = box
+    expected = EXPECTED_DIG_CLASS.get(mode)
+    if expected is None:
+        raise ValueError(
+            f"verify_dig: unknown dig mode {mode!r} "
+            f"(want one of {sorted(EXPECTED_DIG_CLASS)})")
     probe = _run_helper(
         client, "probe_dig.lua",
         {"x0": x0, "y0": y0, "z0": z0, "x1": x1, "y1": y1, "z1": z1})
     left = probe.get("dig_total", -1) if probe.get("ok") else -1
-    # Terrain: every tile in the box must no longer be solid.
-    # A dug tile is a stair, a ramp, or open space — or, for a
-    # plain dig, a FLOOR: mining a wall out leaves a FLOOR tile
-    # (column.lua classifies FLOOR shape as 'floor'). The old code
-    # listed 'floor' as undug for every mode, so a horizontal dig
-    # could never verify — the room dig on the region5 fort
-    # (2026-11-27) had its designations gone and its tiles reading
-    # 'floor' and still "failed" after 600 s. For stair/channel
-    # modes a tile still reading 'floor' IS unchanged (a down-stair
-    # must become a stair), so 'floor' stays bad there.
-    bad_classes = {"stone", "soil", "mineral", "aquifer",
-                   "hidden (unrevealed)"}
-    if mode != "dig":
-        bad_classes = bad_classes | {"floor"}
+    # Terrain: every tile in the box must read the mode's expected
+    # post-dig class. A dug wall BECOMES a floor tile (mode dig),
+    # a carved stair reads 'passage', a channelled tile reads
+    # 'air' — the old negative check ("not in a bad set") accepted
+    # water, magma and the never-matching 'hidden (unrevealed)'
+    # label, and listed 'floor' as undug for every mode, so a
+    # horizontal dig could never verify (the room dig on the
+    # region5 fort, 2026-11-27, "failed" after 600 s with its
+    # designations gone and its tiles reading 'floor').
+    want = " or ".join(sorted(expected))
     terrain_ok = True
     bad: list[str] = []
     for x in range(x0, x1 + 1):
@@ -323,12 +351,13 @@ def verify_dig(client: DFHackClient, box: tuple[int, ...],
                     col = column_mod.read_column(client, x, y)
                 except Exception as exc:  # noqa: BLE001
                     terrain_ok = False
-                    bad.append(f"(x{x}, y{y}, z{z}): column failed")
+                    bad.append(f"({x}, {y}, {z}): column failed")
                     continue
                 cls = _class_at(col, z)
-                if cls in bad_classes:
+                if cls not in expected:
                     terrain_ok = False
-                    bad.append(f"(x{x}, y{y}, z{z}) still {cls}")
+                    bad.append(f"(x{x}, y{y}, z{z}) still "
+                               f"{cls or 'no column'}, want {want}")
     complete = (left == 0 and terrain_ok)
     if complete:
         reason = f"box {list(box)} {mode}: dug (designation gone, " \

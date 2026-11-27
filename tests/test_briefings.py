@@ -22,6 +22,7 @@ from dfagent_harness import actions, attention, briefings  # noqa: E402
 from dfagent_harness.events import EventBus  # noqa: E402
 from dfagent_harness.server import create_server  # noqa: E402
 from dfhack_rpc import DFHackClient, DFHackError  # noqa: E402
+from wiki_fixture import WikiFixtureMixin  # noqa: E402
 
 HOST = os.environ.get("DFH_TEST_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DFH_TEST_PORT", "5000"))
@@ -39,8 +40,11 @@ def _game_is_up():
     return True
 
 
-class TestBriefingsOffline(unittest.TestCase):
+class TestBriefingsOffline(WikiFixtureMixin, unittest.TestCase):
+    # Runs against the repo-local fixture dfq.py (see wiki_fixture.py),
+    # not the external DF wiki export, so the offline suite is hermetic.
     def setUp(self):
+        super().setUp()
         briefings.clear_wiki_cache()
 
     def test_known_kind_has_all_four_fields(self):

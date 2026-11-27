@@ -11,8 +11,10 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from dfagent_harness import attention as at  # noqa: E402
+from wiki_fixture import WikiFixtureMixin  # noqa: E402
 
 
 class StubDetector:
@@ -175,7 +177,9 @@ class TestDescribeUnit(unittest.TestCase):
         self.assertIn("(HOSTILE)", text)
 
 
-class TestBuildAttention(unittest.TestCase):
+class TestBuildAttention(WikiFixtureMixin, unittest.TestCase):
+    # Runs against the repo-local fixture dfq.py (see wiki_fixture.py),
+    # not the external DF wiki export, so the offline suite is hermetic.
     def test_empty_when_nothing_to_say(self):
         items = at.build_attention(_state(), StubDetector([]))
         self.assertEqual(items, [])

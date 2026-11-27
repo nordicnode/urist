@@ -22,6 +22,7 @@ from dfagent_harness import actions, wiki  # noqa: E402
 from dfagent_harness.events import EventBus  # noqa: E402
 from dfagent_harness.server import create_server  # noqa: E402
 from dfhack_rpc import DFHackClient, DFHackError  # noqa: E402
+from wiki_fixture import WikiFixtureMixin  # noqa: E402
 
 HOST = os.environ.get("DFH_TEST_HOST", "127.0.0.1")
 PORT = int(os.environ.get("DFH_TEST_PORT", "5000"))
@@ -39,7 +40,9 @@ def _game_is_up():
     return True
 
 
-class TestWikiOffline(unittest.TestCase):
+class TestWikiOffline(WikiFixtureMixin, unittest.TestCase):
+    # Runs against the repo-local fixture dfq.py (see wiki_fixture.py),
+    # not the external DF wiki export, so the offline suite is hermetic.
     def test_search_returns_the_alcohol_page(self):
         # FTS search is fast and needs no model load.
         result = wiki.wiki_search("how to brew alcohol", mode="search",

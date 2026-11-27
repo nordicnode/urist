@@ -807,6 +807,13 @@ class TestBuildFurniture(unittest.TestCase):
     def setUp(self):
         self.game = FakeGame()
         self.client = _run_with_fake(self, self.game)
+        # The fort has a Carpenter's workshop (#7), like the live
+        # fort — the refusal message names it.
+        self.game.buildings += [
+            {"id": 7, "type": "Workshop", "subtype": "Carpenters",
+             "jobs": 0},
+            {"id": 8, "type": "Workshop", "subtype": "Still",
+             "jobs": 0}]
 
     def test_placed_bed_does_not_satisfy_availability(self):
         # Table 5 row 1: the items section's by_type counts placed
@@ -821,7 +828,14 @@ class TestBuildFurniture(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertEqual(r.error_kind, "precondition")
         self.assertIn("make one first", r.reason)
-        self.assertEqual(len(self.game.buildings), 1)  # nothing placed
+        # The fix names the real Carpenter's workshop (#7 in the
+        # fake): the lookup used to compare the subtype to
+        # "Carpenter" while the game spells it "Carpenters", so it
+        # always fell back to "build a Carpenter's workshop" even
+        # when one already existed (caught live 2026-11-27).
+        self.assertIn("building #7", r.reason)
+        # Wagon + Carpenters + Still; nothing placed.
+        self.assertEqual(len(self.game.buildings), 3)
 
     def test_accessible_bed_builds(self):
         self.game.material["BED"] = {"total": 1, "accessible": 1,

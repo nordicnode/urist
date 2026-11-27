@@ -1817,7 +1817,7 @@ def build_furniture(client: DFHackClient, kind: str,
             carpenter = next(
                 (b for b in bldgs.get("list") or []
                  if b.get("type") == "Workshop"
-                 and b.get("subtype") == "Carpenter"),
+                 and b.get("subtype") == "Carpenters"),
                 None)
             carpenter_id = (carpenter or {}).get("id")
         except Exception:  # noqa: BLE001 - id is best-effort

@@ -455,5 +455,91 @@ class TestRenderHtml(unittest.TestCase):
             self.assertEqual(data[0]["date"], "125-06-02")
 
 
+class TestValidateAiEntry(unittest.TestCase):
+    """_validate_ai_entry: the featured-dwarf check accepts any
+    unique part of a dwarf's name, not just the full name. The AI
+    writes \"Mestthos\" as readily as \"Mestthos Zassezuk\", and the
+    validator's job is to confirm the AI actually wrote about the
+    dwarf — not to enforce a naming convention the prompt never
+    required. (2026-11-27: a live run's entry was rejected for
+    naming none of the featured dwarves even though the feed
+    carried real per-dwarf facts.)"""
+
+    def _feed(self, dwarves):
+        return {"dwarves": dwarves}
+
+    def _body(self, text):
+        # Prose, long enough to pass the length check.
+        return (text + " " + "The fort carried on through the day, "
+                "and the dwarves worked, ate, and drank as usual. "
+                "Nothing else of note happened worth writing down.")
+
+    def test_first_name_counts(self):
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": True},
+            {"name": "Olon Medtobalod", "featured": False},
+        ])
+        body = self._body(
+            "Mestthos spent the day at the still, brewing drink "
+            "for the fort, and the barrels filled one by one.")
+        self.assertEqual(diary._validate_ai_entry(body, feed), body)
+
+    def test_surname_counts(self):
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": True},
+        ])
+        body = self._body(
+            "Zassezuk spent the day at the still, brewing drink "
+            "for the fort, and the barrels filled one by one.")
+        self.assertEqual(diary._validate_ai_entry(body, feed), body)
+
+    def test_full_name_counts(self):
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": True},
+        ])
+        body = self._body(
+            "Mestthos Zassezuk spent the day at the still, brewing "
+            "drink for the fort, and the barrels filled one by one.")
+        self.assertEqual(diary._validate_ai_entry(body, feed), body)
+
+    def test_no_featured_dwarf_named_raises(self):
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": True},
+            {"name": "Olon Medtobalod", "featured": False},
+        ])
+        body = self._body(
+            "The still stood quiet all day and nobody went near "
+            "it, while the fort drank what little it had left.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(body, feed)
+
+    def test_shared_first_name_does_not_count(self):
+        # Two dwarves share the first name: "Mestthos" alone names
+        # no one in particular, so it must not satisfy the check.
+        # The unique surname does.
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": True},
+            {"name": "Mestthos Ral", "featured": False},
+        ])
+        body = self._body(
+            "Mestthos spent the day at the still, brewing drink "
+            "for the fort, and the barrels filled one by one.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(body, feed)
+        body2 = self._body(
+            "Zassezuk spent the day at the still, brewing drink "
+            "for the fort, and the barrels filled one by one.")
+        self.assertEqual(diary._validate_ai_entry(body2, feed), body2)
+
+    def test_no_featured_dwarves_passes(self):
+        feed = self._feed([
+            {"name": "Mestthos Zassezuk", "featured": False},
+        ])
+        body = self._body(
+            "A quiet day. The still stood ready and the fort drank "
+            "what little it had left, waiting for the next morning.")
+        self.assertEqual(diary._validate_ai_entry(body, feed), body)
+
+
 if __name__ == "__main__":
     unittest.main()

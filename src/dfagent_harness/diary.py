@@ -825,7 +825,7 @@ RULES — break none of them:
 - The recent entries are from EARLIER days and may describe a different telling of this fort's story. Never carry a claim forward from a recent entry unless TODAY'S facts confirm it. If a past entry says an attempt failed, it stays failed unless today's facts say it succeeded. Name a dwarf as doing a job only if today's facts name them doing it — never because an old entry named them.
 - The entry is ABOUT THE DWARVES: their moods, stress, wounds, needs, relationships, and what happened to them today. The stocks are a ledger line at most — one short sentence, never the story.
 - Continue any open thread that is still true (a wound, a stressed dwarf, a strange mood) and note when one closes. Refer back to the recent entries when a story arcs across days.
-- Name the dwarves by name. When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need.
+- Name the dwarves by name. Use each dwarf's full name the first time you mention them, and their first name after that. When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need.
 - Plain words, no game jargon, no internal terms (no "unit_id", no "tick", no "job_type", no "stress_category"). A stranger reading this should follow it as a story.
 - If nothing happened today and no dwarf changed, say so in one or two sentences — a quiet day, plainly. Do not pad a quiet day into a saga."""
 
@@ -941,6 +941,36 @@ _AI_DEBRIS = ("PLANNER.md", "(logged)", "window error",
               "stress_category", "tick", "dfhack")
 
 
+def _name_tokens(name: str) -> list[str]:
+    """The whitespace tokens of a dwarf's name that are long enough
+    to identify them (length >= 3 — the two-letter prefixes some
+    names carry, e.g. \"äs\" in \"äs Oslanlumash\", are not names the
+    AI would write)."""
+    return [t for t in (name or "").split() if len(t) >= 3]
+
+
+def _dwarf_named(body: str, name: str,
+                 token_counts: dict[str, int]) -> bool:
+    """Is this dwarf named in the entry? The full name counts, and
+    so does any single token of their name that no other dwarf in
+    the feed shares — the AI writes \"Mestthos\" as readily as
+    \"Mestthos Zassezuk\", and the validator's job is to confirm the
+    AI actually wrote about the dwarf, not to enforce a naming
+    convention the prompt never required. A shared token does not
+    count (it names no one in particular). Matches are whole-word,
+    so \"Olon\" does not match \"Olon\" inside another word."""
+    if not name:
+        return False
+    if name in body:
+        return True
+    for tok in _name_tokens(name):
+        if token_counts.get(tok, 0) != 1:
+            continue
+        if re.search(rf"\b{re.escape(tok)}\b", body):
+            return True
+    return False
+
+
 def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
     """Validate the model's diary prose. Returns the cleaned body.
     Raises ValueError when the output is unusable — the caller logs
@@ -966,8 +996,15 @@ def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
         raise ValueError("diary AI entry reads as a list, not prose")
     featured = [r for r in feed["dwarves"] if r.get("featured")]
     if featured:
+        # A token counts only when it belongs to one dwarf in the
+        # feed (a shared first name names no one in particular).
+        token_counts: dict[str, int] = {}
+        for r in feed["dwarves"]:
+            for tok in _name_tokens(r.get("name") or ""):
+                token_counts[tok] = token_counts.get(tok, 0) + 1
         named = [r for r in featured
-                 if r["name"] and r["name"] in body]
+                 if r["name"] and _dwarf_named(body, r["name"],
+                                               token_counts)]
         if not named:
             raise ValueError(
                 "diary AI entry names none of the featured dwarves")

@@ -9,8 +9,10 @@ scripts/m1_driver.py directly.
 """
 
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 _SPEC = importlib.util.spec_from_file_location(
     "m1_driver",
@@ -205,6 +207,112 @@ class TestSnapshotCitizens(unittest.TestCase):
         self.assertEqual(m1_driver._snapshot_citizens(None), [])
         self.assertEqual(
             m1_driver._snapshot_citizens({"sections": {}}), [])
+
+
+class _StubDaemon:
+    """Stands in for DaemonClient: post() captures the diary body,
+    units_citizens() returns canned fresh records (or raises, to
+    exercise the fallback)."""
+
+    def __init__(self, fresh=None, fail_fresh=False):
+        self.fresh = fresh or []
+        self.fail_fresh = fail_fresh
+        self.posted = []
+
+    def units_citizens(self):
+        if self.fail_fresh:
+            raise RuntimeError("fresh collect failed")
+        return self.fresh
+
+    def post(self, path, body):
+        self.posted.append((path, body))
+        return {"ok": True, "date": "125-04-06", "path": "diary.md"}
+
+
+def _fresh_citizen(uid, name):
+    return {"id": uid, "name": name, "profession": "Brewer",
+            "job": {"type": "CustomReaction"},
+            "counters": {"hunger": 100, "thirst": 50,
+                         "sleepiness": 0},
+            "stress": {"level": 0, "category": 6},
+            "wound_count": 0, "wounds": [],
+            "needs": [{"name": "Drink", "strength": 10}],
+            "relations": [{"type": "deity", "name": "Rakas"}],
+            "mood": -1, "mood_name": "none"}
+
+
+def _snap(units, date="125-04-06", tick=108000):
+    return {"tick": tick, "date": date,
+            "text": f"Erushtathtat, {date} ...",
+            "sections": {
+                "stocks": "Stocks: drink 68, food 25, wood 121, stone 0",
+                "status": "7 citizens",
+                "units": units,
+            }}
+
+
+class TestWriteDiaryFreshCitizens(unittest.TestCase):
+    """_write_diary prefers fresh full citizen records for the
+    diary feed's per-dwarf samples and falls back to the
+    snapshot's citizens when the fresh fetch fails."""
+
+    def _driver(self, daemon, snap0, citizens_start_fresh):
+        drv = m1_driver.M1Driver.__new__(m1_driver.M1Driver)
+        drv.args = SimpleNamespace(mock=False)
+        drv.daemon = daemon
+        drv.start_tick = 107000
+        drv.snap0 = snap0
+        drv.diary_decisions = []
+        drv.citizens_start_fresh = citizens_start_fresh
+        drv.tick_no = 9
+        self._tmp = tempfile.TemporaryDirectory()
+        drv.out = Path(self._tmp.name) / "log.jsonl"
+        return drv
+
+    def tearDown(self):
+        if hasattr(self, "_tmp"):
+            self._tmp.cleanup()
+
+    def test_fresh_citizens_preferred(self):
+        # The final snapshot's units section is diffed to a string
+        # (the usual case) — it carries no citizens. The fresh
+        # fetch is the only source of per-dwarf samples.
+        fresh_end = [_fresh_citizen(5412, "Mestthos"),
+                     _fresh_citizen(5410, "Olon")]
+        fresh_start = [_fresh_citizen(5412, "Mestthos")]
+        daemon = _StubDaemon(fresh=fresh_end)
+        drv = self._driver(daemon, _snap("units: unchanged (7 "
+                                         "citizens)."),
+                           fresh_start)
+        drv._write_diary(_snap("units: unchanged (7 citizens)."))
+        self.assertEqual(len(daemon.posted), 1)
+        path, body = daemon.posted[0]
+        self.assertEqual(path, "/v1/control/diary")
+        self.assertEqual([c["id"] for c in body["citizens"]],
+                         [5412, 5410])
+        self.assertEqual([c["id"] for c in body["citizens_start"]],
+                         [5412])
+        # The fresh records carry the fields the feed needs.
+        self.assertEqual(body["citizens"][0]["mood"], -1)
+        self.assertEqual(body["citizens"][0]["needs"][0]["name"],
+                         "Drink")
+
+    def test_fresh_fetch_failure_falls_back_to_snapshot(self):
+        # When the fresh fetch fails, the snapshot's citizens are
+        # the fallback (a full units section, as on the first tick).
+        snap_units = {"citizens": [
+            {"id": 1, "name": "Udil Testdwarf"},
+            {"id": 2, "name": "Deduk Stakudunib"}]}
+        snap0_units = {"citizens": [
+            {"id": 1, "name": "Udil Testdwarf"}]}
+        daemon = _StubDaemon(fail_fresh=True)
+        drv = self._driver(daemon, _snap(snap0_units), None)
+        drv._write_diary(_snap(snap_units))
+        self.assertEqual(len(daemon.posted), 1)
+        _, body = daemon.posted[0]
+        self.assertEqual([c["id"] for c in body["citizens"]], [1, 2])
+        self.assertEqual([c["id"] for c in body["citizens_start"]],
+                         [1])
 
 
 if __name__ == "__main__":

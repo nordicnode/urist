@@ -135,5 +135,101 @@ class TestUnitsFilters(unittest.TestCase):
         self.assertTrue(data["reconciled"])
 
 
+class _FreshStubClient:
+    """Stands in for the DFHack client: GetPauseState says paused,
+    run_lua_json returns a canned FULL units section (mood, stress,
+    needs, wounds, relations — the fields the lite poller cache
+    does not carry)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def get_version(self):
+        return {"dfhack": "0.47.05-r8"}
+
+    def call(self, method, _msg, _cls=None, **_kw):
+        if method == "GetPauseState":
+            class _Bool:
+                Value = True
+            return _Bool(), ""
+        raise RuntimeError(f"unexpected call {method!r}")
+
+    def run_lua_json(self, _code, timeout=None):
+        self.calls += 1
+        return {
+            "ok": True, "section": "units",
+            "units": {
+                "citizens": [
+                    {"id": 2, "name": "Full", "race": "DWARF",
+                     "pos": [20, 20, 175], "profession": "Brewer",
+                     "job": {"type": "CustomReaction"},
+                     "counters": {"hunger": 100, "thirst": 50,
+                                  "sleepiness": 0},
+                     "stress": {"level": 0, "category": 6},
+                     "wound_count": 0, "wounds": [],
+                     "needs": [{"name": "Drink", "strength": 10}],
+                     "relations": [{"type": "deity", "name": "Rakas"}],
+                     "mood": -1, "mood_name": "none",
+                     "idle": False},
+                ],
+            },
+        }
+
+
+class TestUnitsFresh(unittest.TestCase):
+    """GET /v1/units?fresh=1 does a fresh full units collect; the
+    default still serves the poller's lite cache."""
+
+    def setUp(self):
+        self.state = {
+            "units": {
+                "citizens": [
+                    {"id": 1, "name": "Lite", "race": "DWARF",
+                     "pos": [10, 10, 175], "profession": "Miner"},
+                ],
+            },
+        }
+        self.client = _FreshStubClient()
+        server = create_server(EventBus(), host="127.0.0.1", port=0,
+                               poller=_StubPoller(self.state),
+                               client=self.client)
+        self.server = server
+        self.thread = threading.Thread(target=server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+        self.port = server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+    def _get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port,
+                                         timeout=10)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        return resp.status, json.loads(resp.read().decode())
+
+    def test_default_serves_lite_cache(self):
+        _, data = self._get("/v1/units?kind=citizens")
+        self.assertEqual([u["id"] for u in data["units"]], [1])
+        self.assertNotIn("needs", data["units"][0])
+        self.assertNotIn("mood", data["units"][0])
+        self.assertEqual(self.client.calls, 0)
+
+    def test_fresh_returns_full_records(self):
+        _, data = self._get("/v1/units?kind=citizens&fresh=1")
+        self.assertEqual([u["id"] for u in data["units"]], [2])
+        rec = data["units"][0]
+        self.assertEqual(rec["name"], "Full")
+        self.assertEqual(rec["mood"], -1)
+        self.assertEqual(rec["stress"]["category"], 6)
+        self.assertEqual(rec["needs"][0]["name"], "Drink")
+        self.assertEqual(rec["relations"][0]["type"], "deity")
+        self.assertEqual(rec["wounds"], [])
+        self.assertEqual(self.client.calls, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

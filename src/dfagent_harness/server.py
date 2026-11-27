@@ -486,7 +486,7 @@ def create_server(
             elif path == "/v1/status":
                 self._status(get_state)
             elif path == "/v1/units":
-                self._units(query, get_state)
+                self._units(query, get_state, collect_section)
             elif path.startswith("/v1/unit/"):
                 self._unit(path, get_state)
             elif path == "/v1/buildings":
@@ -689,9 +689,24 @@ def create_server(
             })
 
         def _units(self, query: dict[str, list[str]],
-                   get_state_fn: Callable[[], dict[str, Any]]) -> None:
+                   get_state_fn: Callable[[], dict[str, Any]],
+                   collect_fn: Callable[[str], dict[str, Any]] | None
+                   = None) -> None:
+            # fresh=1 forces a fresh FULL units collect (units.lua)
+            # instead of the poller's lite cache. The poller's units
+            # are the cheap lite records (no needs, wounds list,
+            # relations, labors, skills, sex, age, goals) — not
+            # enough for a per-dwarf sample. The diary's run-start/
+            # run-end samples come from here (the M1 driver fetches
+            # ?kind=citizens&fresh=1). A fresh collect is a paused
+            # read, so it is safe while the game is paused.
+            fresh = ((query.get("fresh") or [""])[0].lower()
+                     in ("1", "true"))
             try:
-                state = get_state_fn()
+                if fresh and collect_fn is not None:
+                    state = collect_fn("units")
+                else:
+                    state = get_state_fn()
             except ReadRefused as exc:
                 _error(self, 503, "READ_REFUSED", str(exc),
                        {"error": str(exc)})

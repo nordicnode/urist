@@ -442,6 +442,7 @@ Base: `http://127.0.0.1:8765/v1`. All bodies JSON. All responses JSON.
 | GET | `/v1/state` | Full snapshot: versions, mode/viewscreen, pause, date, population, food/drink/wood, threats, jobs, buildings summary, recent reports. The "one call to orient" endpoint. |
 | GET | `/v1/status` | Compact status (same fields as the Lua `status` probe: viewscreen, game_mode, paused, year, year_tick, population, dwarves, idlers, animals, threats, food, drink, wood, jobs, wounded, dead, citizens[], threat_list[]) |
 | GET | `/v1/units?limit=&citizens_only=` | Unit list (id, name, race, profession, pos, job, health flags, mood/stress where available) |
+| GET | `/v1/units?kind=citizens&fresh=1` | Same list, but from a fresh FULL units collect instead of the poller's lite cache. The lite records omit needs, the wounds list, relations, labors, skills, sex, age, and goals — not enough for a per-dwarf sample. The M1 driver fetches this at run start and run end for the diary feed. A fresh collect is a paused read, so it is safe while the game is paused; it costs ~1 s. |
 | GET | `/v1/unit/{id}` | One unit, full detail |
 | GET | `/v1/map` | Map size, world/save names, embark info |
 | GET | `/v1/blocks?x0=&…&z1=` | Raw block tiles for a region (tile shapes, water/magma, designations) |

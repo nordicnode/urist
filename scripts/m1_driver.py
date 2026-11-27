@@ -137,6 +137,17 @@ class DaemonClient:
     def catalog(self) -> dict:
         return self.get("/v1/catalog", timeout=30)
 
+    def units_citizens(self) -> list[dict]:
+        """Full citizen records from a fresh collect
+        (GET /v1/units?kind=citizens&fresh=1). The poller's cached
+        units are the cheap lite records (no needs, wounds list,
+        relations, labors, skills, sex, age, goals) — not enough
+        for a per-dwarf sample.
+        The diary's run-start/run-end samples come from here."""
+        res = self.get("/v1/units?kind=citizens&fresh=1", timeout=120)
+        units = res.get("units") or []
+        return [u for u in units if isinstance(u, dict)]
+
     def status(self) -> dict:
         return self.get("/v1/status", timeout=15)
 
@@ -392,6 +403,12 @@ class M1Driver:
         # say 'a quiet day' for a day the model acted on.
         self.diary_decisions: list[dict] = []
         self.snap0: dict | None = None
+        # The run-start citizens from a fresh full collect (fetched
+        # in run() once pre-flight passes, while the game is paused).
+        # The snapshot's units section is usually diffed away by run
+        # end, and snap0's can be stale — the fresh collect is the
+        # diary feed's run-start per-dwarf sample. None until fetched.
+        self.citizens_start_fresh: list[dict] | None = None
         # Outcomes of the previous tick's actions, fed back to the
         # model in the next prompt so it learns from failures (a
         # wrong action name, a missing parameter, a verification
@@ -417,6 +434,21 @@ class M1Driver:
         log_line(self.out, rec)
         print(f"[m1 tick {self.tick_no} {kind}] "
               + json.dumps(fields)[:300], flush=True)
+
+    def _fetch_fresh_citizens(self, when: str) -> list[dict]:
+        """Full citizen records from a fresh collect, for the diary
+        feed's per-dwarf samples. Best-effort: a failed fetch logs
+        and returns [] (the caller falls back to the snapshot's
+        citizens, which are usually empty when the units section is
+        diffed away). Never raises — a diary sample must not fail
+        the run."""
+        try:
+            citizens = self.daemon.units_citizens()
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self._log("diary_citizens", when=when, error=str(exc)[:200])
+            return []
+        self._log("diary_citizens", when=when, count=len(citizens))
+        return citizens
 
     def _write_diary(self, snap: dict) -> None:
         """Write the diary entry for the completed day (POST
@@ -448,15 +480,24 @@ class M1Driver:
                 (self.snap0 or {}).get("sections")),
             "stocks_end": parse_snapshot_stocks(
                 snap.get("sections")),
-            # The run-end citizens (final snapshot) and the run-start
-            # citizens (first snapshot) are the feed's per-dwarf
-            # samples: the server records them so the diary feed can
-            # diff what changed for each dwarf across the run's day.
-            # The snapshot sections carry the units section with the
-            # citizen records (id, name, mood, stress, needs,
-            # wounds, job, relations).
-            "citizens": _snapshot_citizens(snap),
-            "citizens_start": _snapshot_citizens(self.snap0),
+            # The run-end citizens and the run-start citizens are
+            # the feed's per-dwarf samples: the server records them
+            # so the diary feed can diff what changed for each dwarf
+            # across the run's day. They come from a fresh full
+            # units collect, NOT the snapshot: the final snapshot's
+            # units section is usually diffed to a one-liner string
+            # ("unchanged ..."), which carries no citizens — and
+            # snap0's can be stale from a previous daemon instance.
+            # With no samples the feed has no dwarf facts for the
+            # day and the AI fills the gap from old entries (run
+            # #17: Olon credited as the brewer; the brewer is
+            # Mestthos). The snapshot citizens are only a fallback
+            # when the fresh fetch fails.
+            "citizens": (self._fetch_fresh_citizens("end")
+                         or _snapshot_citizens(snap)),
+            "citizens_start": (self.citizens_start_fresh
+                               if self.citizens_start_fresh is not None
+                               else _snapshot_citizens(self.snap0)),
             "tick_start": self.start_tick,
         }
         try:
@@ -737,6 +778,14 @@ class M1Driver:
         print("m1: pre-flight OK — game paused, drink >= "
               f"{MIN_DRINK}, citizens > 0, daemon loop paused",
               flush=True)
+        # The diary feed's run-start per-dwarf sample: a fresh full
+        # units collect now, while the game is paused at the run's
+        # start tick. (The snapshot's units section is diffed away
+        # by run end, and snap0's can be stale — neither is a
+        # reliable sample. See _write_diary.)
+        if not self.args.mock:
+            self.citizens_start_fresh = self._fetch_fresh_citizens(
+                "start")
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
                   date=snap0.get("date"))

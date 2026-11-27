@@ -674,16 +674,45 @@ def _store_entry(state_dir: str | Path, summary: dict[str, Any],
 # ----------------------------------------------------------------------
 
 
+def _is_full_sample(sample: dict[str, Any] | None) -> bool:
+    """A sample recorded the per-dwarf detail the feed diffs on
+    (name, relations, needs). The daemon's poller records lite
+    samples — no name, no relations, no needs, wounds mostly
+    empty — for cheap frequent polling; those are valid for
+    position/job/hunger/thirst, but an empty field in a lite
+    sample is "not recorded", not "nothing there". Diffing one
+    against a full sample fabricates new-today wounds, deities,
+    and needs for every dwarf (observed 2026-11-27: the daemon's
+    day-boundary lite sample at tick 100800 made the feed claim
+    all seven dwarves gained a god and five were newly wounded,
+    when the full run-start sample at 101323 shows the deities
+    were pre-existing and only two wounds were new). A dwarf
+    with genuinely no relations or needs still has a name, so
+    the name is the primary marker; relations/needs are
+    belt-and-braces for a record that somehow lost its name."""
+    if not sample:
+        return False
+    return bool(sample.get("name")
+                or sample.get("relations")
+                or sample.get("needs"))
+
+
 def _feed_samples(store: Any, uid: int, first: int, last: int
                   ) -> tuple[dict[str, Any] | None,
                              dict[str, Any] | None]:
-    """(prev, curr) samples for one dwarf around a day. curr is the
-    last sample at or before the day end; prev is the last sample
-    before the day start, falling back to the earliest sample inside
-    the day (so the first sampled day still diffs against the
-    morning's state). (None, None) when the dwarf was never
-    sampled."""
-    samples = store.unit_history(uid)
+    """(prev, curr) samples for one dwarf around a day. curr is
+    the last FULL sample at or before the day end; prev is the
+    last FULL sample before the day start, falling back to the
+    earliest FULL sample inside the day (so the first sampled day
+    still diffs against the morning's state). Only full samples
+    are used: a lite sample (see _is_full_sample) is not a
+    baseline — its empty wounds/relations/needs would read as
+    "nothing was there" and fabricate new-today changes. When
+    no full prev exists, prev is None and the diff yields no
+    changes (the dwarf's relations are background, not new).
+    (None, None) when the dwarf was never sampled."""
+    samples = [s for s in store.unit_history(uid)
+               if _is_full_sample(s)]
     curr = None
     prev = None
     for s in samples:
@@ -866,7 +895,12 @@ def build_diary_feed(store: Any, journal: Any,
         for r in curr.get("relations") or []:
             ruid = r.get("unit_id")
             if isinstance(ruid, int) and r.get("in_fort"):
-                rsamples = store.unit_history(ruid)
+                # Only full samples: a lite latest would make the
+                # diff report every deity as "lost" and mark the
+                # dwarf changed when they did not (same bug as
+                # _feed_samples — a lite sample is not a baseline).
+                rsamples = [s for s in store.unit_history(ruid)
+                            if _is_full_sample(s)]
                 if rsamples:
                     latest = rsamples[-1]
                     prev_r = rsamples[-2] \

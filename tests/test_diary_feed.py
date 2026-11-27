@@ -317,6 +317,120 @@ class TestFeed(unittest.TestCase):
         self.assertFalse(rel["new_today"])
 
 
+class TestFeedSamples(unittest.TestCase):
+    def test_lite_prev_is_not_a_baseline(self):
+        # Run 064517: the daemon's day-boundary lite sample at
+        # tick 100800 (no name, no relations, no needs, wounds
+        # empty) was the feed's prev, and diffing it against the
+        # full run-end sample fabricated "gained a deity" for all
+        # seven dwarves and "newly wounded" for five — the entry
+        # then wrote "Every last one of them found a god today".
+        # A lite sample is not a baseline: no new-today claims.
+        store = FakeStore()
+        store.add_unit(101, 100800, name="", profession="",
+                       mood=-1, mood_name="none",
+                       stress_level=40000, stress_category=3,
+                       needs=[], wounds=[], job="Drink2",
+                       relations=[])
+        store.add_unit(101, 101999, name="Lor Mebzuthkin",
+                       profession="Miner", mood=-1,
+                       mood_name="none", stress_level=40000,
+                       stress_category=3,
+                       needs=[{"need": "Drink", "focus": -30,
+                               "level": 25}],
+                       wounds=[{"id": 4, "parts": 2}], job="",
+                       relations=[{"unit_id": 900, "type": "deity",
+                                   "name": "Katdir Rithuleser",
+                                   "in_fort": False,
+                                   "histfig_id": 900}])
+        feed = diary.build_diary_feed(store, FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        lor = feed["dwarves"][0]
+        kinds = [c["kind"] for c in lor["changes"]]
+        self.assertNotIn("wound_new", kinds)
+        self.assertNotIn("relation_new", kinds)
+        deity = next(r for r in lor["relations"]
+                     if r["type"] == "deity")
+        self.assertFalse(deity["new_today"])
+
+    def test_full_prev_full_curr_real_new_wound(self):
+        # The true 101323 -> 101999 story: Lor was clean at run
+        # start and wounded at run end, his deity pre-existing
+        # both sides. The diff must report the wound and NOT the
+        # god as new.
+        store = FakeStore()
+        deity = {"unit_id": 900, "type": "deity",
+                 "name": "Katdir Rithuleser", "in_fort": False,
+                 "histfig_id": 900}
+        for tick, wounds in ((100800, []), (101999, [{"id": 4}])):
+            store.add_unit(101, tick, name="Lor Mebzuthkin",
+                           profession="Miner", mood=-1,
+                           mood_name="none", stress_level=40000,
+                           stress_category=3, needs=[],
+                           wounds=wounds, job="",
+                           relations=[deity])
+        feed = diary.build_diary_feed(store, FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        lor = feed["dwarves"][0]
+        kinds = [c["kind"] for c in lor["changes"]]
+        self.assertIn("wound_new", kinds)
+        self.assertNotIn("relation_new", kinds)
+        deity_rec = next(r for r in lor["relations"]
+                         if r["type"] == "deity")
+        self.assertFalse(deity_rec["new_today"])
+
+    def test_lite_curr_is_skipped(self):
+        # A lite sample is the last one at or before the day end
+        # (the daemon's poller keeps recording them). curr must
+        # be the last FULL sample, not the lite one.
+        store = FakeStore()
+        for tick, name in ((100800, "Lor Mebzuthkin"),
+                           (101500, "Lor Mebzuthkin")):
+            store.add_unit(101, tick, name=name,
+                           profession="Miner", mood=-1,
+                           mood_name="none", stress_level=40000,
+                           stress_category=3, needs=[],
+                           wounds=[], job="", relations=[])
+        store.add_unit(101, 101999, name="", profession="",
+                       mood=-1, mood_name="none",
+                       stress_level=40000, stress_category=3,
+                       needs=[], wounds=[], job="Drink2",
+                       relations=[])
+        prev, curr = diary._feed_samples(store, 101, 100800,
+                                         101999)
+        self.assertEqual(prev["tick"], 100800)
+        self.assertEqual(curr["tick"], 101500)
+
+    def test_no_full_prev_means_no_new_claims(self):
+        # Only a lite sample before the day and one full sample
+        # inside it: there is no baseline, so nothing is new.
+        store = FakeStore()
+        store.add_unit(101, 100000, name="", profession="",
+                       mood=-1, mood_name="none",
+                       stress_level=40000, stress_category=3,
+                       needs=[], wounds=[], job="Drink2",
+                       relations=[])
+        store.add_unit(101, 101999, name="Lor Mebzuthkin",
+                       profession="Miner", mood=-1,
+                       mood_name="none", stress_level=40000,
+                       stress_category=3, needs=[],
+                       wounds=[{"id": 4}], job="",
+                       relations=[{"unit_id": 900, "type": "deity",
+                                   "name": "Katdir Rithuleser",
+                                   "in_fort": False,
+                                   "histfig_id": 900}])
+        prev, curr = diary._feed_samples(store, 101, 100800,
+                                         101999)
+        self.assertIsNone(prev)
+        self.assertEqual(curr["tick"], 101999)
+        feed = diary.build_diary_feed(store, FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        lor = feed["dwarves"][0]
+        kinds = [c["kind"] for c in lor["changes"]]
+        self.assertNotIn("wound_new", kinds)
+        self.assertNotIn("relation_new", kinds)
+
+
 class TestPrompt(unittest.TestCase):
     def test_prompt_names_the_featured_dwarf_and_forbids_lists(self):
         feed = diary.build_diary_feed(_olons(), FakeJournal(),

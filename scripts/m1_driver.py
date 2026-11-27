@@ -332,6 +332,34 @@ def diary_decision_text(name: str, kwargs: dict,
     return None
 
 
+def decision_phrase_from_log(rec: dict) -> str | None:
+    """A log action record's diary phrase, for the retry path.
+    Prefers the phrase the driver logged (future logs carry it);
+    a log without one rebuilds from params; a queue_job with
+    neither rebuilds from the result reason ("queued make_barrel
+    x4 on building #7 (jobs [89, 90, 91, 92])"), because the
+    bare-params rebuild loses the job, the count, and the
+    workshop and renders every queue_job as the same degenerate
+    "queue a job x1 at building #?" (run 064517: four different
+    jobs deduped to one beat, entry wrote "queued a single
+    job"). The kind name is lost in that fallback — the building
+    number is the grouping key, and the live path still names
+    the workshop."""
+    phrase = rec.get("phrase")
+    if isinstance(phrase, str) and phrase:
+        return phrase
+    name = rec.get("name", "")
+    params = rec.get("params") or {}
+    if name == "queue_job" and not params:
+        import re as _re
+        m = _re.search(r"queued (\S+) x(\d+) on building #(\d+)",
+                       str(rec.get("reason") or ""))
+        if m:
+            job, count, bid = m.groups()
+            return f"queue {job} x{count} at building #{bid}"
+    return diary_decision_text(name, params)
+
+
 def parse_snapshot_stocks(sections: dict | None) -> dict:
     """Start/end stocks from a snapshot's sections (the diary's
     opening/closing numbers). The sections carry the numbers in
@@ -352,6 +380,33 @@ def parse_snapshot_stocks(sections: dict | None) -> dict:
             out[key] = int(val)
     status = str((sections or {}).get("status", ""))
     m = _re.search(r"(\d+) citizens", status)
+    if m:
+        out["population"] = int(m.group(1))
+    return out
+
+
+def parse_snapshot_stocks_text(text: str) -> dict:
+    """Stocks from a snapshot's rendered text. The run log's
+    snapshot records carry only the text (no sections), so the
+    retry path cannot use parse_snapshot_stocks — it posted {}
+    and the feed fell back to a stale trend sample for the
+    opening number (run 064517: the retry's entry said "drink
+    down to 33 from 39" when the live run-start number was 38).
+    Same regexes as parse_snapshot_stocks, applied to the
+    'Stocks: drink 38, food 32, wood 124, stone 0, ...' line
+    and the 'N citizens' line. Missing values stay absent
+    (never guessed)."""
+    import re as _re
+    out: dict = {}
+    if not text:
+        return out
+    m = _re.search(r"drink (\d+), food (\d+), wood (\d+), "
+                   r"stone (\d+)", text)
+    if m:
+        for key, val in zip(("drink", "food", "wood", "stone"),
+                            m.groups()):
+            out[key] = int(val)
+    m = _re.search(r"(\d+) citizens", text)
     if m:
         out["population"] = int(m.group(1))
     return out
@@ -924,10 +979,6 @@ class M1Driver:
                         else:
                             res = self.daemon.do_action(
                                 a["action"], a.get("kwargs") or {})
-                        self._log("action", name=a["action"],
-                                  ok=res.get("ok"),
-                                  reason=str(res.get("reason"))[:300],
-                                  model_reason=a.get("reason", "")[:200])
                         # The run's diary record: the model's
                         # decisions in order, with reason + outcome.
                         # The daemon's Journal never sees M1 actions
@@ -936,7 +987,16 @@ class M1Driver:
                         # An action with no clean diary phrase is
                         # skipped here (logged, so the mapping gap
                         # is visible) rather than rendered as raw
-                        # name + kwargs.
+                        # name + kwargs. The phrase is computed
+                        # BEFORE the log below, so the log record
+                        # carries it: a retry rebuilds the day's
+                        # decisions from the log, and rebuilding
+                        # from bare params lost the job, the count,
+                        # and the workshop — four different queue_job
+                        # actions all rendered as "queue a job x1
+                        # at building #?", deduped to one beat, and
+                        # the entry wrote "queued a single job"
+                        # (run 064517).
                         phrase = diary_decision_text(
                             a["action"], a.get("kwargs") or {},
                             workshop_kind=(
@@ -944,6 +1004,12 @@ class M1Driver:
                                     "building_kind")
                                 if a["action"] == "queue_job"
                                 else None))
+                        self._log("action", name=a["action"],
+                                  ok=res.get("ok"),
+                                  reason=str(res.get("reason"))[:300],
+                                  model_reason=a.get("reason", "")[:200],
+                                  params=a.get("kwargs") or {},
+                                  phrase=phrase)
                         if phrase is None:
                             self._log("diary_no_phrase",
                                       name=a["action"])

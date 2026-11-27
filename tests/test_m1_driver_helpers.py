@@ -178,6 +178,65 @@ class TestParseSnapshotStocks(unittest.TestCase):
         self.assertEqual(m1_driver.parse_snapshot_stocks(None), {})
 
 
+class TestParseSnapshotStocksText(unittest.TestCase):
+    def test_full_stocks_line(self):
+        # Run 064517 snap0: the log's snapshot records carry no
+        # sections, so the retry must read the numbers out of the
+        # rendered text.
+        text = ("Erushtathtat, 125-04-01 (tick 101323) paused: True "
+                "focus: dwarfmode/Default.\n\n"
+                "Stocks: drink 38, food 32, wood 124, stone 0, "
+                "brewable plants 38, empty barrels 2, food stacks 7.\n"
+                "Population: 7 citizens (25 animals).")
+        self.assertEqual(m1_driver.parse_snapshot_stocks_text(text),
+                         {"drink": 38, "food": 32, "wood": 124,
+                          "stone": 0, "population": 7})
+
+    def test_empty_text(self):
+        self.assertEqual(m1_driver.parse_snapshot_stocks_text(""), {})
+        self.assertEqual(m1_driver.parse_snapshot_stocks_text(None),
+                         {})
+
+
+class TestDecisionPhraseFromLog(unittest.TestCase):
+    def test_logged_phrase_preferred(self):
+        rec = {"name": "queue_job",
+               "params": {"job": "make_bed", "count": 1,
+                          "building_id": 7},
+               "phrase": ("queue make_bed x1 at the Carpenters "
+                          "workshop #7"),
+               "reason": "queued make_bed x1 on building #7"}
+        self.assertEqual(
+            m1_driver.decision_phrase_from_log(rec),
+            "queue make_bed x1 at the Carpenters workshop #7")
+
+    def test_queue_job_recovered_from_reason(self):
+        # Run 064517's log has no params and no phrase — the
+        # reason is the only record of the job, the count, and
+        # the building. Without it every queue_job rendered as
+        # "queue a job x1 at building #?" and deduped to one.
+        rec = {"name": "queue_job", "params": None,
+               "reason": ("queued make_barrel x4 on building #7 "
+                          "(jobs [89, 90, 91, 92])")}
+        self.assertEqual(
+            m1_driver.decision_phrase_from_log(rec),
+            "queue make_barrel x4 at building #7")
+
+    def test_queue_job_from_params(self):
+        rec = {"name": "queue_job",
+               "params": {"job": "brew", "count": 2,
+                          "building_id": 8},
+               "reason": "queued brew x2 on building #8"}
+        self.assertEqual(
+            m1_driver.decision_phrase_from_log(rec),
+            "queue brew x2 at building #8")
+
+    def test_unmapped_action_returns_none(self):
+        rec = {"name": "unknown_action", "params": {},
+               "reason": "did something"}
+        self.assertIsNone(m1_driver.decision_phrase_from_log(rec))
+
+
 class TestParseFortName(unittest.TestCase):
     def test_full_header(self):
         snap = {"text": "Erushtathtat, 125-04-02 (tick 102033) "

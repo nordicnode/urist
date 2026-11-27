@@ -414,6 +414,29 @@ class TestThreatsFacedDistinct(unittest.TestCase):
                                           events_path=events)
             self.assertEqual(score.evidence["threats_faced"], 2)
 
+    def test_non_object_json_lines_are_skipped(self):
+        # Queued self-review finding (2026-11-27): a line that
+        # parses as valid JSON but is not an object (e.g. a bare
+        # list) used to raise AttributeError on .get and kill the
+        # whole scoring run. The journal is harness-written so
+        # this is latent only — but the loop must skip such lines.
+        # A threat event with a non-dict data payload is likewise
+        # counted individually, not crashed on.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            log = _synthetic_log(tmp)
+            events = tmp / "events.jsonl"
+            events.write_text("\n".join([
+                json.dumps({"type": "threat", "tick": 101500,
+                            "data": {"unit_id": 42}}),
+                json.dumps([1, 2, 3]),
+                json.dumps({"type": "threat", "tick": 101600,
+                            "data": "not-a-dict"}),
+            ]) + "\n")
+            score = scoring.compute_score(log, store=None,
+                                          events_path=events)
+            self.assertEqual(score.evidence["threats_faced"], 2)
+
 
 class TestLeaderboard(unittest.TestCase):
     def test_record_and_list(self):

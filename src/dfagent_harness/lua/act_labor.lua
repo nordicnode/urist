@@ -1,8 +1,11 @@
 -- act_labor.lua — enable/disable a labor on one citizen.
--- PARAMS: unit_id (0 = look up by name), name ('' = look up by id),
+-- PARAMS: unit_id (-1 = look up by name), name ('' = look up by id),
 -- labor (df.unit_labor name, e.g. 'MINE'), on (bool).
 -- Name lookup uses the translated visible name and fails when it matches
 -- zero or more than one citizen. Prints one JSON object.
+-- The sentinel is -1, not 0 (2026-11-27, external review Table 5
+-- row 4): unit ids start at 0, so 0 as the by-name sentinel meant
+-- unit id 0 could never be targeted by id.
 local ok, err = pcall(function()
   if df.unit_labor[PARAMS.labor] == nil then
     error('unknown labor: ' .. tostring(PARAMS.labor))
@@ -12,7 +15,7 @@ local ok, err = pcall(function()
   for _, u in ipairs(df.global.world.units.active) do
     if dfhack.units.isCitizen(u) then
       local hit = false
-      if PARAMS.unit_id ~= 0 then
+      if PARAMS.unit_id ~= -1 then
         hit = u.id == PARAMS.unit_id
       else
         hit = dfhack.TranslateName(dfhack.units.getVisibleName(u)) == PARAMS.name

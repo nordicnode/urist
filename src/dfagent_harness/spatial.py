@@ -398,19 +398,22 @@ def _label_region(region: set[int], bbox: dict[str, int],
 
 
 def derive_areas(state: dict[str, Any],
-                 scan: dict[str, Any]) -> dict[str, Any]:
+                 scan: dict[str, Any],
+                 embark_z: Optional[int] = None) -> dict[str, Any]:
     """Derive areas + the connectivity graph (design §3.5).
 
     ``state`` is an observe snapshot (needs the buildings, units and
     map sections; status for the tick). ``scan`` is scan_blocks().
-    Returns {"areas": [...], "graph": {...}, "derived_at_tick", ...}.
-    Areas are sorted by relevance (has buildings, then size) so the
-    per-tick snapshot can take the first 15.
+    ``embark_z`` pins the surface level (see _surface_z); without
+    it the citizen-minimum heuristic is used. Returns {"areas":
+    [...], "graph": {...}, "derived_at_tick", ...}. Areas are
+    sorted by relevance (has buildings, then size) so the per-tick
+    snapshot can take the first 15.
     """
     xb, yb = scan["x_blocks"], scan["y_blocks"]
     buildings = ((state.get("buildings") or {}).get("list")) or []
     units = ((state.get("units") or {}).get("citizens")) or []
-    surface_z = _surface_z(state, scan)
+    surface_z = _surface_z(state, scan, embark_z=embark_z)
     centre = _fort_centre(state)
     centre_block = None
     if centre is not None:
@@ -458,8 +461,13 @@ def derive_areas(state: dict[str, Any],
             # The surface region's block set drives the survey's
             # reachability proxy (water/magma on open surface ground,
             # mineral veins touching it). Sorted list: small enough
-            # (~600 ints) to ship in the response.
-            surface_blocks = sorted(region)
+            # (~600 ints) to ship in the response. UNION, not
+            # overwrite (2026-11-27, external review Table 5 row 7):
+            # with several surface regions (hilltop plus
+            # fort-centre) the old assignment let whichever was
+            # processed last win, and the survey ran its proxy
+            # against the wrong blocks.
+            surface_blocks = sorted(set(surface_blocks) | set(region))
         from collections import Counter
         contents: dict[str, Any] = {}
         if in_region:
@@ -826,16 +834,32 @@ def render_overview(scan: dict[str, Any],
 
 
 def _surface_z(state: dict[str, Any],
-               scan: dict[str, Any]) -> int:
-    """The embark ground level: the lowest z any citizen stands on.
+               scan: dict[str, Any],
+               embark_z: Optional[int] = None) -> int:
+    """The embark ground level.
 
-    Citizens stand on the ground; the lowest one is at the embark
-    level (the wagon's z). The hills rise above it, so the highest
-    open z is the hilltop, not the surface — the old heuristic
-    (highest z with >25% open) returned the hilltop and mislabelled
-    the hills as underground. Falls back to that heuristic when
-    there are no citizen positions.
+    When ``embark_z`` is given (the lowest citizen z at the fort's
+    earliest sampled tick, from the store — see
+    ``Store.earliest_unit_z``), it IS the answer: the embark level
+    is a fixed property of the world, and the citizens' minimum z
+    drifts down as soon as any miner works below the surface (the
+    old code returned that minimum, so the fort's own phase-1 plan
+    digging down degraded region labeling and the 'on the surface'
+    attention test over time; 2026-11-27, external review Table 5
+    row 8). The modal citizen z is no substitute — verified live on
+    Erushtathtat, the modal z is 180 (the hilltop three citizens
+    stand on) while the embark level is 175.
+
+    Without it, fall back to the old heuristic: the lowest z any
+    citizen stands on (citizens stand on the ground; the lowest one
+    is at the embark level, the wagon's z). The hills rise above
+    it, so the highest open z is the hilltop, not the surface —
+    the old heuristic (highest z with >25% open) returned the
+    hilltop and mislabelled the hills as underground. Falls back
+    to that heuristic when there are no citizen positions.
     """
+    if isinstance(embark_z, int):
+        return embark_z
     units = ((state.get("units") or {}).get("citizens")) or []
     zs = [u["pos"][2] for u in units
           if len(u.get("pos") or []) == 3]

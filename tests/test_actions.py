@@ -358,6 +358,29 @@ class FakeGame:
                     "center": [params["x"] + 1, params["y"] + 1,
                                params["z"]],
                     "construction_stage": 0}
+        if name == "act_furniture.lua":
+            bid = self.next_building_id
+            self.next_building_id += 1
+            self.buildings.append(
+                {"id": bid, "type": params["kind"], "type_id": 0,
+                 "x1": params["x"], "y1": params["y"],
+                 "x2": params["x"], "y2": params["y"],
+                 "z": params["z"],
+                 "center": [params["x"], params["y"], params["z"]],
+                 "construction_stage": 0, "jobs": 1,
+                 "contained_items": 0})
+            self.jobs.append({"id": self.next_job_id,
+                              "type": "ConstructBuilding",
+                              "pos": [params["x"], params["y"],
+                                      params["z"]]})
+            self.next_job_id += 1
+            self.build_polls = 0
+            return {"ok": True, "action": "build-furniture",
+                    "kind": params["kind"], "id": bid,
+                    "center": [params["x"], params["y"], params["z"]],
+                    "x1": params["x"], "y1": params["y"],
+                    "x2": params["x"], "y2": params["y"],
+                    "z": params["z"], "construction_stage": 0}
         if name == "act_job.lua":
             # The real helper (fixed 2026-11-27) calls
             # linkIntoWorld(job, true), which assigns the next id
@@ -383,11 +406,16 @@ class FakeGame:
             return {"ok": True, "action": "queue-job",
                     "job_ids": ids, "count": count}
         if name == "act_labor.lua":
+            # Mirrors the real helper: -1 is the by-name sentinel
+            # (2026-11-27, external review Table 5 row 4); unit id
+            # 0 is a real id and must be targetable.
             target = None
             for c in self.citizens:
-                if params["unit_id"] and c["id"] == params["unit_id"]:
+                if params["unit_id"] != -1 \
+                        and c["id"] == params["unit_id"]:
                     target = c
-                if not params["unit_id"] and c["name"] == params["name"]:
+                if params["unit_id"] == -1 \
+                        and c["name"] == params["name"]:
                     target = c
             if target is None:
                 return {"ok": False, "action": "labor",
@@ -432,7 +460,7 @@ class FakeClient:
                      "probe_material.lua", "probe_site.lua",
                      "probe_bldg_mat.lua",
                      "act_order.lua", "act_build.lua", "act_labor.lua",
-                     "act_job.lua"):
+                     "act_furniture.lua", "act_job.lua"):
             if f"-- {name}" in code:
                 return self.game.run_helper(name, params)
         raise AssertionError("no helper marker found in Lua code")
@@ -467,7 +495,10 @@ def _run_with_fake(testcase, game):
     def section(name):
         if name == "buildings" and game.buildings:
             for b in game.buildings:
-                if b["type"] == "Workshop" and b["jobs"] == 1:
+                # Any building with a pending construction job
+                # (workshop or furniture) completes after the first
+                # post-placement poll.
+                if b.get("jobs") == 1:
                     game.build_polls += 1
                     if game.complete_builds and game.build_polls >= 2:
                         b["jobs"] = 0
@@ -749,6 +780,72 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(r.error_kind, "timeout")
         self.assertTrue(self.game.paused)
 
+    def test_failed_material_probe_is_transport_not_mat_none(self):
+        # Table 5 row 2: when the material read-back probe itself
+        # fails, the read never happened — that is transport, not a
+        # "placed with no material" verification failure. The old
+        # code read mat_type off the failed probe, got -1, and
+        # misclassified it.
+        orig = actions._run_helper
+
+        def _wrapped(client, name, params, timeout=30.0):
+            if name == "probe_bldg_mat.lua":
+                return {"ok": False, "error": "probe boom"}
+            return orig(client, name, params, timeout=timeout)
+
+        with mock.patch.object(actions, "_run_helper",
+                               side_effect=_wrapped):
+            r = actions.act(self.client, "build_workshop",
+                            kind="carpenter", pos=(85, 85, 42))
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "transport")
+        self.assertIn("read-back failed", r.reason)
+        self.assertNotIn("mat NONE", r.reason)
+
+
+class TestBuildFurniture(unittest.TestCase):
+    def setUp(self):
+        self.game = FakeGame()
+        self.client = _run_with_fake(self, self.game)
+
+    def test_placed_bed_does_not_satisfy_availability(self):
+        # Table 5 row 1: the items section's by_type counts placed
+        # (in_building) furniture, so a placed bed used to satisfy
+        # this check with zero loose items and the Construct job
+        # suspended until the action burned its full timeout. The
+        # check now uses the probe's accessible count: total 1,
+        # accessible 0 (the one bed is placed) must refuse.
+        self.game.material["BED"] = {"total": 1, "accessible": 0}
+        r = actions.act(self.client, "build_furniture", kind="Bed",
+                        pos=(90, 80, 42), build_timeout=30.0)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("make one first", r.reason)
+        self.assertEqual(len(self.game.buildings), 1)  # nothing placed
+
+    def test_accessible_bed_builds(self):
+        self.game.material["BED"] = {"total": 1, "accessible": 1,
+                                     "mat_type": 0, "mat_index": 0}
+        r = actions.act(self.client, "build_furniture", kind="Bed",
+                        pos=(90, 80, 42), build_timeout=30.0)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.after["building"]["type"], "Bed")
+
+    def test_failed_material_probe_is_transport(self):
+        orig = actions._run_helper
+
+        def _wrapped(client, name, params, timeout=30.0):
+            if name == "probe_material.lua":
+                return {"ok": False, "error": "probe boom"}
+            return orig(client, name, params, timeout=timeout)
+
+        with mock.patch.object(actions, "_run_helper",
+                               side_effect=_wrapped):
+            r = actions.act(self.client, "build_furniture", kind="Bed",
+                            pos=(90, 80, 42), build_timeout=30.0)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "transport")
+
 
 class TestQueueJobMaterials(unittest.TestCase):
     """queue_job fails fast on a material shortage (general material
@@ -823,6 +920,19 @@ class TestQueueJobMaterials(unittest.TestCase):
                         job="make_bed")
         self.assertTrue(r.ok, r.reason)
         self.assertEqual(r.detail.get("building_kind"), "Carpenters")
+
+    def test_job_count_is_jobs_not_buildings(self):
+        # Table 5 row 3: the before/after job_count fields used to
+        # read the buildings count for before and the jobs count
+        # for after — comparing two different things under one
+        # label. Both now come from the jobs section. The fake has
+        # 3 buildings (Wagon + 2 workshops) and 0 jobs before the
+        # queue, so the old code would have reported before=3.
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=3)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.before, {"job_count": 0})
+        self.assertEqual(r.after, {"job_count": 3})
 
     def test_negative_job_id_is_rejected(self):
         # 2026-11-27: the pre-fix helper returned [-1] (linkIntoWorld
@@ -944,6 +1054,20 @@ class TestLabor(unittest.TestCase):
         self.assertTrue(r.ok, r.reason)
         self.assertNotIn("MINE", r.after["labors"])
 
+    def test_toggle_unit_id_zero(self):
+        # Table 5 row 4: unit id 0 is a real id — the old 0
+        # sentinel ("look up by name") meant it could never be
+        # targeted by id. The sentinel is now -1.
+        self.game.citizens.append(
+            {"id": 0, "name": "Zeroth Testdwarf",
+             "labors": ["MINE"]})
+        r = actions.act(self.client, "labor_toggle", unit=0,
+                        labor="MINE", on=False)
+        self.assertTrue(r.ok, r.reason)
+        self.assertNotIn("MINE", r.after["labors"])
+        self.assertEqual(r.detail["unit_id"], 0)
+        self.assertEqual(r.detail["name"], "Zeroth Testdwarf")
+
     def test_unknown_citizen_is_precondition(self):
         r = actions.act(self.client, "labor_toggle", unit="Nobody Here",
                         labor="MINE", on=True)
@@ -964,6 +1088,19 @@ class TestActEntryPoint(unittest.TestCase):
         self.client.raise_transport = True
         r = actions.act(self.client, "designate_dig",
                         box=(90, 90, 41, 91, 91, 41), mode="dig")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "transport")
+
+    def test_missing_helper_key_is_transport_not_raised(self):
+        # Table 5 row 5: a helper that returns ok without an
+        # expected key (here: act_build with no "id") raised
+        # KeyError, which escaped act()'s never-raise contract and
+        # killed the caller. It is a transport failure now.
+        with mock.patch.object(
+                actions, "_helper_or_fail",
+                return_value={"ok": True}):
+            r = actions.act(self.client, "build_workshop",
+                            kind="carpenter", pos=(85, 85, 42))
         self.assertFalse(r.ok)
         self.assertEqual(r.error_kind, "transport")
 

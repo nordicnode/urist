@@ -615,6 +615,42 @@ class TestSampleDaily(unittest.TestCase):
         self.assertEqual(len(pts), 1)
         self.assertEqual(pts[0][0], 85 * TICKS_PER_DAY)
 
+    def test_sample_daily_gate_uses_any_metric(self):
+        # Table 4 row 1: when the stocks section fails, no drink
+        # sample lands — but a food sample did. The gate must still
+        # block, or unit history rewrites every tick and the diary
+        # write fires every tick.
+        state = _state()
+        state["status"] = dict(state["status"])
+        tick = state["status"]["year_tick"]
+        self.store.sample_trend(tick, "food", 25)
+        # The stocks section failed: no drink value this tick.
+        state["stocks"] = dict(state["stocks"])
+        del state["stocks"]["drink_units"]
+        self.assertFalse(sample_daily(state, self.store))
+        self.assertEqual(self.store.unit_history(100), [])
+
+    def test_sample_daily_reload_clears_history_and_deaths(self):
+        # Table 4 row 8: a reload drops the dead timeline's unit
+        # history and deaths, not just the trends.
+        state = _state()
+        state["status"] = dict(state["status"])
+        state["status"]["year_tick"] = 200 * TICKS_PER_DAY
+        self.assertTrue(sample_daily(state, self.store))
+        self.store.record_death(200 * TICKS_PER_DAY, 100,
+                                "died of thirst")
+        self.assertEqual(len(self.store.unit_history(100)), 1)
+        self.assertEqual(len(self.store.deaths()), 1)
+        state2 = _state()
+        state2["status"] = dict(state2["status"])
+        state2["status"]["year_tick"] = 85 * TICKS_PER_DAY
+        self.assertTrue(sample_daily(state2, self.store))
+        self.assertEqual(len(self.store.unit_history(100)), 1)
+        self.assertEqual(
+            self.store.unit_history(100)[0]["tick"],
+            85 * TICKS_PER_DAY)
+        self.assertEqual(self.store.deaths(), [])
+
 
 class TestReportsOneLine(unittest.TestCase):
     """Fix 5 (2026-11-27): reports are one line of text, never a

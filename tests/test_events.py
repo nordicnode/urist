@@ -628,6 +628,72 @@ class TestWatcherDrain(unittest.TestCase):
         events, offset = ev.drain_watch_log("/nonexistent/x.jsonl", 0)
         self.assertEqual((events, offset), ([], 0))
 
+    def test_truncated_log_restarts_from_zero(self):
+        # Table 4 row 5: when the log shrank (rotation), the stored
+        # offset is past EOF and the drain restarts from byte 0.
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "w.jsonl"
+            line = ('{"kind": "REPORT", "tick": 1, "year": 306, '
+                    '"index": 1, "text": "x", "time": 1}\n')
+            path.write_text(line * 3)
+            events, offset = ev.drain_watch_log(path, 0)
+            self.assertEqual(len(events), 3)
+            self.assertGreater(offset, 0)
+            path.write_text(line)  # rotated: one fresh line only
+            events, offset2 = ev.drain_watch_log(path, offset)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(offset2, len(line))
+
+
+class TestPollerStop(unittest.TestCase):
+    def test_stop_keeps_thread_until_it_exits(self):
+        # Table 4 row 6: stop() with a timed-out join must NOT
+        # drop the thread reference while the thread is still
+        # alive — a later start() would otherwise spawn a second
+        # poller (duplicate drains and publishes).
+        import threading
+        import time
+        from unittest import mock
+        from dfagent_harness.events import EventBus, EventPoller
+        bus = EventBus()
+        poller = EventPoller(client=mock.Mock(), bus=bus,
+                             fast_interval=0.05, paused_interval=0.05)
+        release = threading.Event()
+        calls = []
+
+        def blocked_poll():
+            calls.append(1)
+            release.wait(timeout=5.0)
+            return []
+
+        poller.poll_once = blocked_poll  # type: ignore[method-assign]
+        poller.start()
+        # Wait until the poller thread is inside poll_once.
+        deadline = time.monotonic() + 2.0
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(calls)
+        first_thread = poller._thread
+        self.assertIsNotNone(first_thread)
+        poller.stop(timeout=0.1)
+        # Join timed out: the thread is still blocked, so the
+        # reference is kept — and start() refuses a second poller.
+        self.assertIs(poller._thread, first_thread)
+        self.assertTrue(first_thread.is_alive())
+        poller.start()
+        self.assertIs(poller._thread, first_thread)
+        release.set()
+        first_thread.join(timeout=2.0)
+        self.assertFalse(first_thread.is_alive())
+        # Now stop() drops the reference, and start() spawns fresh.
+        poller.stop(timeout=2.0)
+        self.assertIsNone(poller._thread)
+        poller.start()
+        self.assertIsNot(poller._thread, first_thread)
+        self.assertIsNotNone(poller._thread)
+        poller.stop(timeout=2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

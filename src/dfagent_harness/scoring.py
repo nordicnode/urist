@@ -582,11 +582,21 @@ def compute_score(run_log: str | Path,
                         ev = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    # A line that parses as valid JSON but is not an
+                    # object (e.g. [1, 2]) has no .get — guard it
+                    # (2026-11-27, self-review finding): the journal
+                    # is harness-written so this is latent, but an
+                    # AttributeError here used to kill the whole
+                    # scoring run.
+                    if not isinstance(ev, dict):
+                        continue
                     t = ev.get("tick")
                     if (t is not None and start_tick <= t <= last_tick
                             and ev.get("type") in ("threat",
                                                    "hostile_spawn")):
-                        uid = (ev.get("data") or {}).get("unit_id")
+                        data = ev.get("data")
+                        uid = (data.get("unit_id")
+                               if isinstance(data, dict) else None)
                         if uid is not None:
                             seen_units.add(uid)
                         else:

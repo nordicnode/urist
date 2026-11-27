@@ -982,10 +982,18 @@ def drain_watch_log(path: Path | str,
     path = Path(path)
     if not path.exists():
         return [], offset
-    data = path.read_bytes()
-    if len(data) < offset:
+    size = path.stat().st_size
+    if size < offset:
         offset = 0  # log rotated/truncated; re-read from the start
-    chunk = data[offset:]
+    # Seek to the stored offset and read only the tail (2026-11-27,
+    # external review Table 4 row 5): the old code read the whole
+    # file on every poll, so per-poll cost grew linearly with total
+    # events. The offset always sits on a line boundary (new_offset
+    # stops before a trailing partial line), so the tail parses
+    # exactly like the full read did.
+    with path.open("rb") as f:
+        f.seek(offset)
+        chunk = f.read()
     if not chunk:
         return [], offset
     events: list[dict[str, Any]] = []
@@ -1305,7 +1313,17 @@ class EventPoller:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
-            self._thread = None
+            # Only drop the reference when the thread is actually
+            # dead (2026-11-27, external review Table 4 row 6): if
+            # it is still blocked in a 30 s RPC after the timed-out
+            # join, clearing the reference lets a later start()
+            # spawn a second poller (duplicate drains and publishes)
+            # while the first is still running. start() already
+            # refuses to spawn while a thread is alive, so keeping
+            # the reference is safe — the next start() after it exits
+            # replaces it.
+            if not self._thread.is_alive():
+                self._thread = None
 
     def _run(self) -> None:
         while not self._stop.is_set():

@@ -171,6 +171,42 @@ class TestStoreTrends(unittest.TestCase):
         self.store.clear_trends()
         self.assertEqual(self.store.trend_samples("drink"), [])
 
+    def test_latest_sample_tick_max_across_metrics(self):
+        # Table 4 row 1: the gate must see ANY metric's sample,
+        # not drink's alone.
+        self.assertIsNone(self.store.latest_sample_tick())
+        self.store.sample_trend(1200, "food", 25)
+        self.assertEqual(self.store.latest_sample_tick(), 1200)
+        self.store.sample_trend(2400, "drink", 20)
+        self.assertEqual(self.store.latest_sample_tick(), 2400)
+        self.store.sample_trend(3600, "wood", 100)
+        self.assertEqual(self.store.latest_sample_tick(), 3600)
+
+    def test_clear_timeline_drops_history_and_deaths(self):
+        # Table 4 row 8: a reload kills the whole timeline.
+        self._sample_drink([20, 18])
+        self.store.record_unit_history(
+            1200, 42, pos=[97, 97, 175], job="Mine")
+        self.store.record_death(1200, 43, "died of thirst")
+        self.store.clear_timeline()
+        self.assertEqual(self.store.trend_samples("drink"), [])
+        self.assertEqual(self.store.unit_history(42), [])
+        self.assertEqual(self.store.deaths(), [])
+
+    def test_earliest_unit_z(self):
+        # Table 5 row 8: the embark level is the lowest citizen z
+        # at the earliest sampled tick.
+        self.assertIsNone(self.store.earliest_unit_z())
+        self.store.record_unit_history(
+            1200, 42, pos=[97, 97, 178], job="Mine")
+        self.store.record_unit_history(
+            1200, 43, pos=[51, 33, 175], job="Mine")
+        self.store.record_unit_history(
+            2400, 42, pos=[97, 97, 160], job="Mine")
+        # A miner dug down by the second day — the earliest tick
+        # still pins the embark level, not the mine.
+        self.assertEqual(self.store.earliest_unit_z(), 175)
+
 
 class TestStoreUnitHistoryDeaths(unittest.TestCase):
     def setUp(self):
@@ -195,6 +231,20 @@ class TestStoreUnitHistoryDeaths(unittest.TestCase):
         self.assertEqual(rows[0]["job"], "Drink")
         self.assertEqual(rows[1]["thirst"], 1000)
         self.assertEqual(rows[0]["pos"], [97, 97, 175])
+
+    def test_unit_history_limit_returns_most_recent(self):
+        # Table 4 row 7: a limit means the MOST RECENT N samples,
+        # still oldest-first — not the earliest N.
+        for i in range(5):
+            self.store.record_unit_history(
+                (i + 1) * 1200, 42, pos=[97, 97, 175],
+                job=f"Day{i + 1}")
+        rows = self.store.unit_history(42, limit=2)
+        self.assertEqual([r["job"] for r in rows], ["Day4", "Day5"])
+        # No limit: all five, oldest first.
+        rows = self.store.unit_history(42)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0]["job"], "Day1")
 
     def test_deaths_round_trip(self):
         self.store.record_death(2400, 42, "died of thirst",

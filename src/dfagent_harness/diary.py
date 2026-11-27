@@ -648,7 +648,12 @@ def _store_entry(state_dir: str | Path, summary: dict[str, Any],
         r"(?:\n(?!## ).*)*", re.MULTILINE)
     entry = heading + "\n\n" + body.rstrip() + "\n"
     if pattern.search(text):
-        text = pattern.sub(entry.rstrip(), text)
+        # A lambda replacement (2026-11-27, external review Table 6
+        # row 4): the entry body is the replacement string, and a
+        # backslash in it made re.sub treat it as a bad escape and
+        # raise re.error, losing the day's entry. A callable
+        # replacement is used verbatim.
+        text = pattern.sub(lambda _: entry.rstrip(), text)
     else:
         if not text.endswith("\n"):
             text += "\n"
@@ -1328,7 +1333,12 @@ def render_html(md_path: str | Path, html_path: str | Path,
     entries = parse_entries(md_path.read_text()) if md_path.exists() \
         else []
     fort = fort_name or "the fort"
-    data = json.dumps(entries)
+    # Escape "</" after json.dumps (2026-11-27, external review
+    # Table 6 row 5): the entries are embedded raw inside a script
+    # block, so an entry containing "</script>" broke out of it.
+    # "<\/" is the same string in a JS string literal but does not
+    # close the script element in HTML parsing.
+    data = json.dumps(entries).replace("</", "<\\/")
     p = DF_PALETTE
     html_doc = f"""<!DOCTYPE html>
 <html lang="en">

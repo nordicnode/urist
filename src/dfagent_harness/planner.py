@@ -153,7 +153,7 @@ def _summary(state: dict[str, Any]) -> dict[str, Any]:
         "barrels": stocks.get("empty_barrels",
                               stocks.get("barrels")) or 0,
         "buildings": buildings.get("list") or [],
-        "building_summary": {e.get("type"): e.get("count")
+        "building_summary": {e.get("type"): e.get("count") or 0
                              for e in buildings.get("summary") or []},
         "jobs": jobs.get("list") or [],
         "manager_orders": jobs.get("manager_orders") or [],
@@ -540,7 +540,11 @@ def decide(state: dict[str, Any],
             "dig_to_completion",
             {"box": [stairs[0], stairs[1], stairs[2],
                      stairs[0], stairs[1], stairs[2]],
-             "mode": "down-stair"},
+             "mode": "down-stair",
+             # The embark level rides with the site so the dig
+             # action's site check can tell surface from cavern/dug
+             # space (2026-11-27, external review Table 5 row 6).
+             "surface_z": dig_site.get("surface_z")},
             goal_key="expansion:dig"))
     if has_b and s["building_summary"].get("Stockpile", 0) == 0 \
             and food_box is not None:
@@ -860,13 +864,15 @@ class Planner:
                 executed += 1
             else:
                 self.actions_failed += 1
-                if result.error_kind in ("verification", "timeout",
-                                         "precondition"):
-                    # A failed attempt waits out the backoff; a
-                    # transport failure (unknown outcome) does not
-                    # count as a goal failure — the next tick re-reads.
-                    if result.error_kind != "transport":
-                        self._last_failure[d.goal_key] = now
+                # A failed attempt waits out the backoff; a
+                # transport failure (unknown outcome) does not count
+                # as a goal failure — the next tick re-reads. (The
+                # old code listed the three non-transport kinds and
+                # then re-checked != "transport" inside — dead, since
+                # the outer tuple already excluded it. 2026-11-27,
+                # external review Table 4 row 9.)
+                if result.error_kind != "transport":
+                    self._last_failure[d.goal_key] = now
         return records
 
     def _record(self, d: Decision, tick: Optional[int],

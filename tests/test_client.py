@@ -10,6 +10,7 @@ Everything here runs offline (mock server only); no DF install needed.
 import socket
 import struct
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -141,6 +142,48 @@ class TestClientAgainstMock(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)  # CR_FAILURE
         self.assertIn("about to fail", ctx.exception.text)
         self.assertIn("CR_FAILURE", str(ctx.exception))
+
+    def test_remote_error_keeps_connection_and_bind_cache(self):
+        # Table 4 row 3: a RemoteError (the server answered FAIL)
+        # must NOT tear down the socket or clear the bind cache —
+        # the FAIL reply is terminal, the stream is at a clean
+        # boundary, and the next call must reuse the connection
+        # without a reconnect, handshake or rebind.
+        server = MockDFHackServer(fail_commands={"failme"}).start()
+        self.addCleanup(server.stop)
+        with DFHackClient("127.0.0.1", server.port, timeout=5.0) as client:
+            client.get_version()
+            self.assertEqual(len(server.binds), 1)
+            self.assertEqual(server.connections, 1)
+            with self.assertRaises(RemoteError):
+                client.run_command("failme")
+            self.assertTrue(client.connected)
+            client.get_version()
+        self.assertEqual(len(server.binds), 1)
+        self.assertEqual(server.connections, 1)
+
+    def test_reset_waits_for_the_call_lock(self):
+        # Table 4 row 4: close/quit/reset take the call lock, so a
+        # reset from another thread cannot close the socket under
+        # a call that is mid-flight.
+        with self._client() as client:
+            client.get_version()
+            self.assertTrue(client.connected)
+            client._lock.acquire()
+            try:
+                done = threading.Event()
+                t = threading.Thread(target=lambda: (
+                    client.reset(), done.set()), daemon=True)
+                t.start()
+                # reset() must block on the lock, not return early.
+                self.assertFalse(done.wait(timeout=0.3))
+                self.assertTrue(t.is_alive())
+            finally:
+                client._lock.release()
+            t.join(timeout=2.0)
+            self.assertTrue(done.is_set())
+            # reset() ran once it got the lock: the socket is closed.
+            self.assertFalse(client.connected)
 
     def test_bind_unknown_method_fails(self):
         server = MockDFHackServer(

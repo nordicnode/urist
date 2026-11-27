@@ -142,21 +142,28 @@ class DFHackClient:
         return self
 
     def close(self) -> None:
-        """Close the socket without sending the quit header."""
-        self._close_socket()
+        """Close the socket without sending the quit header.
+
+        Takes the call lock: a close from another thread while a
+        call is mid-flight used to close the socket under it and
+        manufacture a spurious transport error (2026-11-27,
+        external review Table 4 row 4)."""
+        with self._lock:
+            self._close_socket()
 
     def quit(self) -> None:
         """Send the RPC_REQUEST_QUIT header, then close immediately.
 
         Best effort: errors while quitting are ignored — the socket is
-        being torn down either way.
+        being torn down either way. Takes the call lock (see close).
         """
-        if self._sock is not None:
-            try:
-                self._send_all(_HEADER.pack(RPC_REQUEST_QUIT, 0, 0))
-            except OSError:
-                pass
-        self._close_socket()
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    self._send_all(_HEADER.pack(RPC_REQUEST_QUIT, 0, 0))
+                except OSError:
+                    pass
+            self._close_socket()
 
     def _close_socket(self) -> None:
         if self._sock is not None:
@@ -175,9 +182,10 @@ class DFHackClient:
         the next call would read those bytes as its own reply
         (observed live 2026-11-26: empty TEXT, wrong-section JSON).
         The next call reconnects transparently (see :meth:`call_raw`).
-        Idempotent.
+        Idempotent. Takes the call lock (see close).
         """
-        self._close_socket()
+        with self._lock:
+            self._close_socket()
 
     def __enter__(self) -> "DFHackClient":
         return self.connect()
@@ -271,7 +279,17 @@ class DFHackClient:
             try:
                 self._send_all(_HEADER.pack(method_id, 0, len(payload)) + payload)
                 return self._collect_reply(method=method)
-            except BaseException:
+            except (TransportError, OSError):
+                # Transport failure only: the stream may hold a
+                # partial reply, so drop the connection. A RemoteError
+                # (the server answered FAIL — CR_NOT_FOUND, a Lua
+                # helper error) leaves the connection intact: the
+                # FAIL reply is terminal, the stream is at a clean
+                # message boundary, and tearing down would force a
+                # reconnect, handshake and rebind on the next call
+                # for a fully-consumed expected failure (2026-11-27,
+                # external review Table 4 row 3). Any other
+                # exception propagates with the connection intact.
                 self._close_socket()
                 raise
             finally:

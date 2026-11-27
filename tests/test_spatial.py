@@ -166,6 +166,35 @@ class TestDeriveAreas(unittest.TestCase):
         out = spatial.derive_areas(_state(), scan)
         self.assertEqual(out["areas"], [])
 
+    def test_surface_blocks_union_across_regions(self):
+        # Table 5 row 7: with two surface regions (hilltop plus
+        # fort-centre) the old assignment let whichever was
+        # processed last win, and the survey's reachability proxy
+        # ran against the wrong blocks. The set is the UNION.
+        scan = _scan(5, 5, 3,
+                     [(0, 0, 2), (1, 0, 2), (3, 3, 2), (4, 3, 2)])
+        citizens = [{"pos": [5, 5, 2]}]
+        out = spatial.derive_areas(_state(citizens=citizens), scan)
+        self.assertEqual(len(out["areas"]), 2)
+        self.assertTrue(all(a["kind"] == "surface"
+                            for a in out["areas"]))
+        # Block indices: (bz*yb + by)*xb + bx, xb = yb = 5.
+        self.assertEqual(out["surface_blocks"], [50, 51, 68, 69])
+
+    def test_surface_z_embark_pin_beats_miner_drift(self):
+        # Table 5 row 8: the minimum citizen z drifts down as soon
+        # as any miner works below the surface, but the embark
+        # level never moves. With embark_z given it wins; without
+        # it the old heuristic (minimum citizen z) stands.
+        scan = _scan(3, 3, 3, [(0, 0, 1), (1, 0, 1)])
+        citizens = [{"pos": [5, 5, 1]}, {"pos": [6, 6, 0]}]
+        state = _state(citizens=citizens)
+        self.assertEqual(spatial._surface_z(state, scan), 0)
+        self.assertEqual(spatial._surface_z(state, scan, embark_z=1), 1)
+        # derive_areas carries the pin through to surface_z.
+        out = spatial.derive_areas(state, scan, embark_z=1)
+        self.assertEqual(out["surface_z"], 1)
+
 
 class TestFindPath(unittest.TestCase):
     def test_path_through_the_graph(self):

@@ -317,6 +317,19 @@ class StateSummaryTests(unittest.TestCase):
         self.assertEqual(s["wood"], 3)
         self.assertEqual(s["stone"], 0)
 
+    def test_summary_countless_entry_is_zero_not_none(self):
+        # Table 4 row 2: a buildings summary entry without a count
+        # used to put None in building_summary, and .get("Bed", 0)
+        # then returned None (the default only applies to a missing
+        # key) — the comparison raised TypeError and killed every
+        # decision that tick. decide() must not raise.
+        state = load_state()
+        state["buildings"]["summary"].append({"type": "Bed"})
+        s = state_summary(state)
+        self.assertEqual(s["building_summary"]["Bed"], 0)
+        decisions = decide(state, manager=True, sites=_sites())
+        self.assertIsInstance(decisions, list)
+
 
 class JournalTests(unittest.TestCase):
     def test_log_and_read_back(self):
@@ -420,6 +433,41 @@ class PlannerTickTests(unittest.TestCase):
                 self.assertEqual(mock_act.call_count, 3)
                 self.assertEqual(
                     mock_act.call_args[0][1], "build_workshop")
+            journal.close()
+
+    def test_tick_transport_failure_does_not_back_off(self):
+        # Table 4 row 9: a transport failure (unknown outcome)
+        # does not count as a goal failure — the next tick
+        # re-reads and retries. A precondition failure does back
+        # off (see test_tick_executes_top_decisions_and_backs_off).
+        state = load_state()
+        _set_stock(state, drink_units=2)
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Journal(Path(tmp) / "j.db")
+            planner = Planner(client=object(), journal=journal,
+                              backoff_s=60.0, max_actions_per_tick=1)
+            fail_result = mock.Mock()
+            fail_result.ok = False
+            fail_result.reason = "read refused"
+            fail_result.error_kind = "transport"
+            ok_result = mock.Mock()
+            ok_result.ok = True
+            ok_result.reason = "built"
+            ok_result.error_kind = None
+            with mock.patch(
+                    "dfagent_harness.planner.act",
+                    side_effect=[fail_result, ok_result,
+                                 ok_result, ok_result]) as mock_act:
+                records = planner.tick(state, manager=True,
+                                       sites=_sites())
+                self.assertTrue(records)
+                self.assertEqual(records[0]["status"], "failed")
+                # Second tick: the transport-failed goal is NOT
+                # blocked — the still decision runs again.
+                records2 = planner.tick(state, manager=True,
+                                        sites=_sites())
+                self.assertTrue(any(
+                    r["goal_key"] == "drink:still" for r in records2))
             journal.close()
 
     def test_tick_logs_log_actions_without_calling_act(self):

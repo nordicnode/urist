@@ -386,7 +386,20 @@ def create_server(
                                   "status"))
             scan = spatial.scan_blocks(client)
             holder["scan"] = scan
-            return spatial.derive_areas(state, scan)
+            # Pin the surface level at the embark level from the
+            # store (2026-11-27, external review Table 5 row 8):
+            # the citizen-minimum heuristic drifts down as miners
+            # dig, but the embark level never moves. A store read
+            # failure here must not fail the derivation — fall back
+            # to the heuristic.
+            try:
+                store = (daemon.store if daemon is not None
+                         and getattr(daemon, "store", None) is not None
+                         else _default_store())
+                embark_z = store.earliest_unit_z()
+            except Exception:  # noqa: BLE001 - heuristic fallback
+                embark_z = None
+            return spatial.derive_areas(state, scan, embark_z=embark_z)
 
         with rpc_lock:
             # Re-check inside the lock (T3 row 7): two cold

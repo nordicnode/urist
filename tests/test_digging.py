@@ -59,11 +59,12 @@ class TestCheckDigSite(unittest.TestCase):
         self.client = mock.Mock()
 
     def _check(self, col, x=97, y=97, z=175, mode="down-stair",
-               areas=None):
+               areas=None, surface_z=None):
         with mock.patch.object(digging.column_mod, "read_column",
                                return_value=col):
             return digging.check_dig_site(self.client, x, y, z, mode,
-                                          areas=areas)
+                                          areas=areas,
+                                          surface_z=surface_z)
 
     def test_down_stair_on_surface_is_ok(self):
         out = self._check(_surface_col())
@@ -151,6 +152,43 @@ class TestCheckDigSite(unittest.TestCase):
                                          "down-stair")
         self.assertFalse(out["ok"])
         self.assertIn("column read failed", out["reason"])
+
+    def test_open_above_below_surface_z_is_not_surface(self):
+        # Table 5 row 6: the surface_z parameter was never used —
+        # open space above a tile far below the embark level (a
+        # cavern floor, a dug room) was called "surface /
+        # reachable" with no verification. With surface_z given,
+        # such a tile falls through to the areas check; with no
+        # areas it is unknown, not reachable.
+        col = _col(97, 97, [
+            {"z0": 151, "z1": 196, "class": "cavern space"},
+            {"z0": 150, "z1": 150, "class": "floor"},
+            {"z0": 149, "z1": 149, "class": "soil"},
+            {"z0": 0, "z1": 148, "class": "stone"},
+        ])
+        out = self._check(col, z=150, surface_z=175)
+        self.assertIsNone(out["reachable"])
+        self.assertIn("unknown", out["reason"])
+        # Without surface_z the old heuristic stands (open above
+        # counts as surface) — backward compatible for callers
+        # that cannot supply it.
+        out = self._check(col, z=150)
+        self.assertTrue(out["reachable"])
+
+    def test_open_above_at_or_above_surface_z_is_surface(self):
+        # A hilltop tile above the embark level is genuinely on
+        # the surface, and so is the embark-level floor itself.
+        col = _col(97, 97, [
+            {"z0": 181, "z1": 196, "class": "air"},
+            {"z0": 180, "z1": 180, "class": "floor"},
+            {"z0": 179, "z1": 179, "class": "soil"},
+            {"z0": 0, "z1": 178, "class": "stone"},
+        ])
+        out = self._check(col, z=180, surface_z=175)
+        self.assertTrue(out["ok"], out["reason"])
+        self.assertTrue(out["reachable"])
+        out = self._check(_surface_col(), z=175, surface_z=175)
+        self.assertTrue(out["reachable"])
 
 
 class TestCheckDigBox(unittest.TestCase):
@@ -334,6 +372,9 @@ class TestDeriveDigSite(unittest.TestCase):
         x0, y0, z0, x1, y1, z1 = out["room"]
         self.assertEqual((z0, z1), (174, 174))
         self.assertEqual((x1 - x0, y1 - y0), (6, 6))
+        # Table 5 row 6: the embark level rides with the site so
+        # the dig action's site check can use it.
+        self.assertEqual(out["surface_z"], 175)
 
     def test_no_surface_raises(self):
         with self.assertRaises(ValueError):

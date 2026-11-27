@@ -432,6 +432,38 @@ class TestWriteEntry(unittest.TestCase):
             self.assertEqual(entries[0]["date"], "125-06-02")
             self.assertEqual(entries[1]["date"], "125-06-03")
 
+    def test_backslash_body_rewrite_does_not_crash(self):
+        # Table 6 row 4: the same-date replace used
+        # pattern.sub(entry_body, text) with the body as the
+        # REPLACEMENT string, so a backslash in the prose
+        # (e.g. "\d") raised re.error on the rewrite. The body is
+        # now substituted through a lambda, inert to escapes.
+        with tempfile.TemporaryDirectory() as tmp:
+            s = _day_summary()
+            body = ("The miner carved \\d into the wall and laughed.")
+            diary.write_ai_body(tmp, s, body)
+            diary.write_ai_body(tmp, s, body)
+            text = diary.diary_md_path(tmp).read_text()
+            self.assertEqual(text.count("## 125-06-02"), 1)
+            self.assertIn(body, text)
+
+    def test_script_close_tag_is_escaped_in_html(self):
+        # Table 6 row 5: a "</script>" in an entry body used to be
+        # embedded verbatim in the reader's <script> block, ending
+        # it early and breaking the page. The JSON embedding now
+        # escapes it, and the parsed data round-trips unchanged.
+        with tempfile.TemporaryDirectory() as tmp:
+            s = _day_summary()
+            diary.write_ai_body(
+                tmp, s, "The dwarf shouted </script> at the goblin.")
+            html_doc = diary.diary_html_path(tmp).read_text()
+            self.assertIn("<\\/script>", html_doc)
+            data = json.loads(re.search(
+                r"var ENTRIES = (\[.*?\]);", html_doc,
+                re.DOTALL).group(1))
+            self.assertEqual(len(data), 1)
+            self.assertIn("</script>", data[0]["body"])
+
 
 class TestRenderHtml(unittest.TestCase):
     def test_html_is_self_contained_and_navigable(self):

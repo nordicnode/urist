@@ -172,7 +172,21 @@ def check_dig_site(client: DFHackClient, x: int, y: int, z: int,
         # Once on a floor, the floor must be on the surface (open
         # sky above) or inside a reachable area (a dug room).
         if _class_at(col, z) == "floor":
-            if _open_above(col, z):
+            # Open sky above means the tile is on the surface — but
+            # only at or above the embark level (2026-11-27,
+            # external review Table 5 row 6: the surface_z
+            # parameter was never used at all). Below surface_z, an
+            # open space above is a dug room or a cavern, and the
+            # tile's reachability must be proven by the areas check
+            # instead — the old code called every such tile
+            # "surface / reachable" with no verification. Hills
+            # rise above the embark level, so the test is z >=
+            # surface_z, not z == surface_z; a valley floor below
+            # it falls through to the areas check (conservative when
+            # areas are unknown, correct when they are known).
+            # With no surface_z given, the old heuristic stands.
+            if _open_above(col, z) and (surface_z is None
+                                        or z >= surface_z):
                 reachable = True
                 detail["access"] = "surface (open sky above)"
             elif areas is not None:
@@ -413,8 +427,10 @@ def derive_dig_site(areas: dict[str, Any],
     coordinates): a down-stair on the Surface inside / nearest the
     fort centre, and a room box one z-level below it. Returns
     {"stairs": (x, y, z), "room": (x0, y0, z0, x1, y1, z1),
-    "reason"}. The room is 7x7 around the stairs. Raises ValueError
-    when there is no Surface area to derive from."""
+    "surface_z": <the embark level, so the dig action's site check
+    can tell surface from cavern/dug space>, "reason"}. The room is
+    7x7 around the stairs. Raises ValueError when there is no
+    Surface area to derive from."""
     area_list = areas.get("areas") or []
     surface = None
     for a in area_list:
@@ -431,7 +447,7 @@ def derive_dig_site(areas: dict[str, Any],
     stairs = (tx, ty, surface_z)
     room = (tx - 3, ty - 3, surface_z - 1,
             tx + 3, ty + 3, surface_z - 1)
-    return {"stairs": stairs, "room": room,
+    return {"stairs": stairs, "room": room, "surface_z": surface_z,
             "reason": (f"down-stair at (x{tx}, y{ty}, z{surface_z}) "
                        f"on the Surface near the fort centre "
                        f"(x{fort_centre[0]}, y{fort_centre[1]}), "

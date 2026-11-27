@@ -370,6 +370,20 @@ class Store:
         return out
 
     @_locked
+    def latest_sample_tick(self) -> Optional[int]:
+        """Max tick across EVERY trend metric (or None when no
+        sample exists). The daily-sample gate keys on this, not on
+        drink alone (2026-11-27, external review Table 4 row 1):
+        when the stocks section fails, no drink sample lands and a
+        drink-only gate never blocks — unit history rewrites every
+        tick, trends grow unbounded, and the per-day diary write
+        fires every tick. Any metric landing is proof a sample was
+        taken that day."""
+        row = self.conn.execute(
+            "SELECT MAX(tick) AS m FROM trends").fetchone()
+        return row["m"] if row is not None else None
+
+    @_locked
     def clear_trends(self) -> None:
         """Drop every trend sample. Used when the game was reloaded
         to an earlier tick: the old timeline is dead, and its
@@ -378,6 +392,50 @@ class Store:
         number went backwards, so no new sample is ever taken)."""
         self.conn.execute("DELETE FROM trends")
         self.conn.commit()
+
+    @_locked
+    def clear_timeline(self) -> None:
+        """Drop every time-series record: trends, unit_history and
+        deaths. A clock-going-backwards reload kills the whole
+        timeline, not just the trends (2026-11-27, external review
+        Table 4 row 8): unit_history and deaths from the dead
+        timeline would otherwise survive, so post-reload death
+        diagnosis reads future samples from a timeline the fort no
+        longer has. The snapshot baselines are NOT cleared — they
+        are diff state, not history."""
+        self.conn.execute("DELETE FROM trends")
+        self.conn.execute("DELETE FROM unit_history")
+        self.conn.execute("DELETE FROM deaths")
+        self.conn.commit()
+
+    @_locked
+    def earliest_unit_z(self) -> Optional[int]:
+        """Lowest citizen z at the earliest sampled tick (or None
+        when nothing was ever sampled). The embark level: on the
+        fort's first day every citizen stands at the wagon, so the
+        earliest samples pin the ground level the fort started on.
+        Used to pin surface_z (2026-11-27, external review Table 5
+        row 8): the minimum citizen z drifts down as soon as any
+        miner works below the surface, but the embark level never
+        moves. Caveat: valid when sampling started at embark (the
+        normal case — the daemon samples from the fort's first day);
+        a fort whose daemon started mid-game pins whatever its
+        first samples saw, which is still no worse than the live
+        minimum it replaces."""
+        rows = self.conn.execute(
+            "SELECT pos_json FROM unit_history "
+            "WHERE tick = (SELECT MIN(tick) FROM unit_history)"
+            ).fetchall()
+        zs = []
+        for r in rows:
+            try:
+                pos = json.loads(r["pos_json"] or "[]")
+            except (ValueError, TypeError):
+                continue
+            if isinstance(pos, list) and len(pos) == 3 \
+                    and isinstance(pos[2], int):
+                zs.append(pos[2])
+        return min(zs) if zs else None
 
     @_locked
     def burn_rate(self, metric: str, tick: int,
@@ -498,8 +556,13 @@ class Store:
     def unit_history(self, unit_id: int,
                      limit: Optional[int] = None
                      ) -> list[dict[str, Any]]:
+        # A limit means the MOST RECENT N samples (2026-11-27,
+        # external review Table 4 row 7): ORDER BY tick with a
+        # positive LIMIT used to return the EARLIEST N, the opposite
+        # of recent history. Order descending, limit, then reverse
+        # so the returned rows are still oldest-first.
         q = ("SELECT * FROM unit_history WHERE unit_id=? "
-             "ORDER BY tick")
+             "ORDER BY tick DESC")
         args: tuple = (unit_id,)
         if limit is not None:
             q += " LIMIT ?"
@@ -514,6 +577,7 @@ class Store:
             d["relations"] = json.loads(
                 d.pop("relations_json") or "[]")
             out.append(d)
+        out.reverse()
         return out
 
     # -- deaths ---------------------------------------------------------

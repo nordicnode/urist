@@ -1141,14 +1141,24 @@ def sample_daily(state: dict[str, Any], store: Store) -> bool:
     # 2026-11-27: drink samples from the drink-0 timeline gave a
     # 0.3/day rate and "0.0 days left" while the real stock was 39)
     # and freeze sampling entirely (the day number went backwards,
-    # so the day-advance check below never fires). Drop the trends
-    # and start fresh.
-    pts = store.trend_samples("drink")
-    if pts and tick < pts[-1][0]:
-        store.clear_trends()
-        pts = []
-    # The last sampled day is the max trend tick for drink.
-    if pts and pts[-1][0] // TICKS_PER_DAY >= day:
+    # so the day-advance check below never fires). Drop the whole
+    # timeline — trends, unit history and deaths — and start fresh
+    # (2026-11-27, external review Table 4 row 8: clearing only
+    # the trends left the dead timeline's unit history and deaths
+    # behind, so post-reload death diagnosis read future samples
+    # from a timeline the fort no longer has).
+    last = store.latest_sample_tick()
+    if last is not None and tick < last:
+        store.clear_timeline()
+        last = None
+    # The last sampled day is the max trend tick across ALL
+    # metrics, not drink alone (2026-11-27, external review Table
+    # 4 row 1): if the stocks section fails, no drink sample
+    # lands and a drink-only gate never blocks — unit history
+    # rewrites every tick, trends grow unbounded, and the per-day
+    # diary write fires every tick. Any metric landing proves a
+    # sample was taken that day.
+    if last is not None and last // TICKS_PER_DAY >= day:
         return False
     stocks = state.get("stocks") or {}
     units = state.get("units") or {}

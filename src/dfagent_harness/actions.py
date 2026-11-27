@@ -609,7 +609,8 @@ def dig_to_completion(client: DFHackClient, box: tuple[int, ...],
                       mode: str = "dig",
                       job_timeout: float = DEFAULT_JOB_TIMEOUT,
                       complete_timeout: float = 180.0,
-                      timeout: float = 30.0) -> ActionResult:
+                      timeout: float = 30.0,
+                      surface_z: Optional[int] = None) -> ActionResult:
     """The end-to-end dig loop (the digging gap): check the site,
     designate, wait for a Dig job to spawn, wait for the dig to
     complete (designation gone AND terrain changed).
@@ -639,7 +640,8 @@ def dig_to_completion(client: DFHackClient, box: tuple[int, ...],
                     f"(choose from {', '.join(sorted(DIG_JOB_TYPES))}); "
                     f"use designate_dig to clear designations")
     # 1. Site check (paused read): reachable + no hazard.
-    check = digging.check_dig_box(client, box, mode)
+    check = digging.check_dig_box(client, box, mode,
+                                  surface_z=surface_z)
     if not check["ok"]:
         raise _Fail("precondition",
                     f"dig site refused: {check['reason']}")
@@ -1192,6 +1194,15 @@ def build_workshop(client: DFHackClient, kind: str,
     # helper (buildings.lua does not expose mat_type).
     placed_mat = _run_helper(client, "probe_bldg_mat.lua",
                              {"building_id": building_id}, timeout=timeout)
+    if not placed_mat.get("ok", False):
+        # The probe itself failed — the read never happened. That
+        # is a transport failure (outcome unknown), not a mat-NONE
+        # building (2026-11-27, external review Table 5 row 2):
+        # the old code read mat_type off the failed probe, got -1,
+        # and reported "placed with no material" as verification.
+        raise _Fail("transport",
+                    f"material read-back failed: "
+                    f"{placed_mat.get('error')}")
     if placed_mat.get("mat_type", -1) in (None, -1):
         return ActionResult(
             ok=False, action="build_workshop",
@@ -1273,7 +1284,7 @@ def labor_toggle(client: DFHackClient, unit: str | int, labor: str,
     started = time.monotonic()
     if isinstance(unit, str) and not unit:
         raise _Fail("precondition", "empty unit name")
-    params: dict[str, Any] = {"unit_id": 0, "name": "", "labor": labor,
+    params: dict[str, Any] = {"unit_id": -1, "name": "", "labor": labor,
                               "on": on}
     if isinstance(unit, int):
         params["unit_id"] = unit
@@ -1398,6 +1409,9 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     # queued against 2 empty barrels — each queue passed because
     # the check only ever saw the fresh stock). Read the jobs list
     # first and count them, so the fail-fast names the real limit.
+    # This read also supplies the before job count for the result:
+    # the old code took it from the buildings section, comparing
+    # buildings to jobs under one label.
     jobs_before = _read_section(client, "jobs", timeout=timeout)
     already_queued = _materials.queued_count(
         jobs_before, spec["job_type"], spec["reaction_name"])
@@ -1442,7 +1456,7 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     if bad:
         return ActionResult(
             ok=False, action="queue_job",
-            before={"job_count": before.get("count")},
+            before={"job_count": jobs_before.get("count")},
             after={"job_count": after.get("count")},
             reason=(f"queued {job} x{count} on building #{building_id} "
                     f"but the game returned invalid job ids {bad} — "
@@ -1454,7 +1468,7 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     if missing:
         return ActionResult(
             ok=False, action="queue_job",
-            before={"job_count": before.get("count")},
+            before={"job_count": jobs_before.get("count")},
             after={"job_count": after.get("count")},
             reason=(f"queued {job} x{count} on building #{building_id} "
                     f"but job ids {missing} not found in the world job "
@@ -1462,7 +1476,7 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
             error_kind="verification", took_ms=took_ms, detail=base)
     return ActionResult(
         ok=True, action="queue_job",
-        before={"job_count": before.get("count")},
+        before={"job_count": jobs_before.get("count")},
         after={"job_count": after.get("count")},
         reason=(f"queued {job} x{count} on building #{building_id} "
                 f"(jobs {out.get('job_ids')})"),
@@ -1776,10 +1790,20 @@ def build_furniture(client: DFHackClient, kind: str,
                     + _alternative_site(client, "furniture", 1, 1,
                                         tuple(pos), placement, from_pos,
                                         timeout=timeout))
-    items = _read_section(client, "items", timeout=timeout)
-    have = next((e.get("units", 0)
-                 for e in items.get("by_type") or []
-                 if e.get("type") == item_type), 0)
+    # Availability is the ACCESSIBLE count, not the items section's
+    # by_type total (2026-11-27, external review Table 5 row 1):
+    # stocks.lua counts every in-play item, including placed
+    # (in_building) furniture, so a placed bed satisfied this check
+    # with zero loose items and the Construct job suspended until
+    # the action burned its full timeout. probe_material counts
+    # only items a job can actually use (not in a building, not
+    # reserved) — the same probe build_workshop uses.
+    probe = _run_helper(client, "probe_material.lua",
+                        {"item_type": item_type}, timeout=timeout)
+    if not probe.get("ok", False):
+        raise _Fail("transport",
+                    f"material probe failed: {probe.get('error')}")
+    have = probe.get("accessible", 0)
     if have < 1:
         # Name the exact fix, not just "make one first": the model
         # retried build_furniture Bed 4 times across M1 run #10
@@ -2158,8 +2182,15 @@ def act(client: DFHackClient, name: str, **kwargs: Any) -> ActionResult:
             ok=False, action=name, reason=exc.reason,
             error_kind=exc.kind,
             took_ms=round((time.monotonic() - started) * 1000))
-    except (DFHackError, ValueError, OSError) as exc:
+    except (DFHackError, ValueError, OSError,
+            KeyError, TypeError, IndexError) as exc:
         # Transport failure or a bad read-back: outcome unknown.
+        # KeyError / TypeError / IndexError belong here too
+        # (2026-11-27, external review Table 5 row 5): a helper
+        # that returns ok without an expected key (out["id"],
+        # out["building"]) raised KeyError, which escaped act()'s
+        # never-raise contract and killed the caller instead of
+        # failing the action.
         result = ActionResult(
             ok=False, action=name,
             reason=f"transport failure: {exc}",

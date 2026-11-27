@@ -173,6 +173,41 @@ class TestRenderEntry(unittest.TestCase):
         self.assertIn("Drink: 39 -> 34", entry)
         self.assertNotIn("A quiet day", entry)
 
+    def test_merge_driver_record_replaces_journal_decisions(self):
+        # Run #17: the entry invented a manager appointment and
+        # credited the brewing to Olon because the Journal still
+        # carried earlier reloads' decisions for the same in-game
+        # ticks. The Journal is cumulative across playthroughs, so
+        # its decisions for the day are from previous playthroughs
+        # of the same date — the daemon loop was paused for this
+        # run, so the Journal holds nothing from it. The driver's
+        # decisions REPLACE the Journal's for the day; they do not
+        # append to them.
+        journal = FakeJournal()
+        journal.add_decision(169300, "appoint a manager",
+                             reason="Need a manager noble",
+                             action="appoint_manager", ok=False)
+        journal.add_decision(169400,
+                             "enable BREWER labor on Olon Medtobalod",
+                             reason="Need a brewer",
+                             action="labor_toggle", ok=True)
+        summary = _day_summary(journal=journal)
+        self.assertEqual(len(summary["decisions"]), 2)
+        diary.merge_driver_record(
+            summary,
+            decisions=[{
+                "decision": "build a Still at (95, 108, 175)",
+                "reason": "No still exists, so brewing is impossible.",
+                "action": "build_workshop", "ok": True,
+                "result": "still workshop #8 built"}])
+        self.assertEqual(len(summary["decisions"]), 1)
+        self.assertEqual(
+            summary["decisions"][0]["decision"],
+            "build a Still at (95, 108, 175)")
+        entry = diary.render_entry(summary)
+        self.assertNotIn("appoint a manager", entry)
+        self.assertNotIn("Olon Medtobalod", entry)
+
     def test_merge_driver_record_empty_changes_nothing(self):
         summary = _day_summary()
         before = dict(summary)

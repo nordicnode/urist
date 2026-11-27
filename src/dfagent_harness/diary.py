@@ -522,15 +522,24 @@ def merge_driver_record(summary: dict[str, Any],
     run's decisions are not in the Journal and no trend samples are
     taken for the run's day — without this the entry would say 'a
     quiet day' for a day the model acted on, and show no stocks.
-    Driver decisions (chronological, from the run's own jsonl) append
-    after the Journal's; driver stocks (parsed from the run's
+    Driver decisions REPLACE the Journal's for the day (they are
+    the authoritative record for this run): the Journal is
+    cumulative across playthroughs, so its decisions for the same
+    in-game ticks are from earlier reloads of the same date — run
+    #17's entry invented a manager appointment and credited the
+    brewing to Olon because the Journal still carried run #10's
+    decisions. Appending mixed playthroughs; replacing scopes the
+    feed to the current run. Driver stocks (parsed from the run's
     start/end snapshots) override the Store samples when given.
     Everything merged is still a recorded fact — the run's log and
     its snapshots — nothing is invented.
     """
     if decisions:
-        combined = (list(summary.get("decisions") or [])
-                    + list(decisions))
+        # Replace, not append: the Journal's decisions for this
+        # tick range are from previous playthroughs of the same
+        # date (the daemon loop was paused for this run, so the
+        # Journal holds nothing from it).
+        combined = list(decisions)
         # The driver's decisions are raw action records: run them
         # through the same boundary as the Journal's (dedup repeats,
         # split diagnostics) so the entry does not repeat a decision
@@ -788,9 +797,21 @@ def build_diary_feed(store: Any, journal: Any,
     if state_dir is not None:
         md = diary_md_path(state_dir)
         if md.exists():
-            for e in parse_entries(md.read_text())[-3:]:
+            # Only entries for dates strictly BEFORE today. The
+            # diary is cumulative across reloads of the same fort,
+            # so an entry for TODAY (or a later date) is from a
+            # different playthrough of the same day — run #17's
+            # entry invented a manager appointment and credited
+            # the brewing to Olon because it carried forward an
+            # old entry's claims. Earlier dates are the fort's
+            # real history; today's story comes from today's facts.
+            today = summary.get("date") or ""
+            for e in parse_entries(md.read_text()):
+                if today and e["date"] >= today:
+                    continue
                 recent.append({"date": e["date"],
                                "body": e["body"][:1500]})
+            recent = recent[-3:]
     threads = open_threads(store, day_start_tick, year)
     return {"summary": summary, "dwarves": dwarves,
             "recent_entries": recent, "threads": threads}
@@ -801,6 +822,7 @@ _DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You w
 RULES — break none of them:
 - Write narrative prose in the first person ("I"), 150-300 words, a few paragraphs. Never a bullet list, never a table, never "I decided to ... It worked."
 - Every claim must come from the facts supplied below. Never invent an event, a name, a number, or a death that is not in the facts. If the facts do not say what happened to a dwarf, do not guess — leave them out or say their fate is unclear.
+- The recent entries are from EARLIER days and may describe a different telling of this fort's story. Never carry a claim forward from a recent entry unless TODAY'S facts confirm it. If a past entry says an attempt failed, it stays failed unless today's facts say it succeeded. Name a dwarf as doing a job only if today's facts name them doing it — never because an old entry named them.
 - The entry is ABOUT THE DWARVES: their moods, stress, wounds, needs, relationships, and what happened to them today. The stocks are a ledger line at most — one short sentence, never the story.
 - Continue any open thread that is still true (a wound, a stressed dwarf, a strange mood) and note when one closes. Refer back to the recent entries when a story arcs across days.
 - Name the dwarves by name. When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need.

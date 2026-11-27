@@ -186,6 +186,12 @@ class TestFeed(unittest.TestCase):
         self.assertEqual(stressed["subject"], "Olon Medtobalod")
 
     def test_recent_entries_carried_for_continuity(self):
+        # Day 125-04-02 (tick 102000): the 125-04-01 entry is
+        # carried for continuity; the 125-04-02 entry is NOT — it
+        # is from a different playthrough of today (run #17: the
+        # entry invented a manager appointment and credited the
+        # brewing to Olon by carrying forward an old entry's
+        # claims for the same date).
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)
             (state / "diary.md").write_text(
@@ -197,9 +203,28 @@ class TestFeed(unittest.TestCase):
             feed = diary.build_diary_feed(
                 FakeStore(), FakeJournal(), 102000, "Erushtathtat",
                 125, state_dir=state)
-            self.assertEqual(len(feed["recent_entries"]), 2)
+            self.assertEqual(len(feed["recent_entries"]), 1)
             self.assertIn("Olon was thirsty",
                           feed["recent_entries"][0]["body"])
+
+    def test_recent_entries_exclude_future_dates(self):
+        # An entry for a LATER date than today is also from
+        # another playthrough (the fort was reloaded to an
+        # earlier date) and must not be carried.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            (state / "diary.md").write_text(
+                "# Diary of Erushtathtat\n\n"
+                "## 125-04-01 — 1st of Hematite, 125\n\n"
+                "Olon was thirsty all day.\n\n"
+                "## 125-04-03 — 3rd of Hematite, 125\n\n"
+                "The still is up.\n")
+            feed = diary.build_diary_feed(
+                FakeStore(), FakeJournal(), 102000, "Erushtathtat",
+                125, state_dir=state)
+            self.assertEqual(len(feed["recent_entries"]), 1)
+            self.assertEqual(
+                feed["recent_entries"][0]["date"], "125-04-01")
 
 
 class TestPrompt(unittest.TestCase):
@@ -214,6 +239,22 @@ class TestPrompt(unittest.TestCase):
         # No raw Store rows leak into the prompt.
         self.assertNotIn("unit_id", messages[1]["content"])
         self.assertNotIn("stress_category", messages[1]["content"])
+
+    def test_prompt_forbids_carrying_old_claims_forward(self):
+        # Run #17: the entry invented a manager appointment and
+        # credited the brewing to Olon by carrying forward an old
+        # entry's claims. The system prompt must forbid carrying
+        # a claim from a recent entry unless today's facts
+        # confirm it.
+        feed = diary.build_diary_feed(_olons(), FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        messages = diary.diary_prompt(feed)
+        system = messages[0]["content"]
+        self.assertIn("recent entries are from EARLIER days",
+                      system)
+        self.assertIn("unless TODAY'S facts confirm it", system)
+        self.assertIn("Name a dwarf as doing a job only if today's "
+                      "facts name them doing it", system)
 
 
 class TestAIWriter(unittest.TestCase):

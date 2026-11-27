@@ -285,6 +285,38 @@ def render_entry(summary: dict[str, Any]) -> str:
 # diary.md: the source of truth.
 # ----------------------------------------------------------------------
 
+def merge_driver_record(summary: dict[str, Any],
+                        decisions: list[dict[str, Any]] | None = None,
+                        stocks_start: dict[str, Any] | None = None,
+                        stocks_end: dict[str, Any] | None = None
+                        ) -> dict[str, Any]:
+    """Fold an M1 run's own record into a daily summary built from
+    the Store + Journal (in place, returned for convenience).
+
+    The daemon's planner loop is paused during M1 runs, so the
+    run's decisions are not in the Journal and no trend samples are
+    taken for the run's day — without this the entry would say 'a
+    quiet day' for a day the model acted on, and show no stocks.
+    Driver decisions (chronological, from the run's own jsonl) append
+    after the Journal's; driver stocks (parsed from the run's
+    start/end snapshots) override the Store samples when given.
+    Everything merged is still a recorded fact — the run's log and
+    its snapshots — nothing is invented.
+    """
+    if decisions:
+        summary["decisions"] = (list(summary.get("decisions") or [])
+                                + list(decisions))
+    for key, val in (("stocks_start", stocks_start),
+                     ("stocks_end", stocks_end)):
+        if val:
+            merged = dict(summary.get(key) or {})
+            for metric, v in val.items():
+                if v is not None:
+                    merged[metric] = v
+            summary[key] = merged
+    return summary
+
+
 def diary_md_path(state_dir: str | Path) -> Path:
     return Path(state_dir) / "diary.md"
 

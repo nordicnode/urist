@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness import assembler  # noqa: E402
-from dfagent_harness.assembler import (TokenAccountant, _buildings,  # noqa: E402
+from dfagent_harness.assembler import (TokenAccountant, _attention_items,  # noqa: E402
+                                       _buildings,
                                        _stocks, assemble,
                                        sample_daily, suggest)
 from dfagent_harness.store import Store, TICKS_PER_DAY  # noqa: E402
@@ -107,7 +108,61 @@ class TestAssemble(unittest.TestCase):
         self.assertIn("Erushtathtat", snap["text"])
         self.assertIn("125-06-02", snap["text"])
 
-    def test_areas_cache_dict_accepted(self):
+    def test_attention_states_level_gap_when_surface_z_given(self):
+        # Fix 6 wired (2026-11-27): the level-gap text exists in
+        # describe_arrival but the server's _snapshot never passed
+        # surface_z to assemble(), so live snapshots flagged demons
+        # at z1 as [P2] with no gap stated. With surface_z the
+        # attention names the gap; without it the text is just the
+        # coordinates (the old live behaviour).
+        demon = {"tick": 72000, "year": 125, "at_baseline": True,
+                 "data": {"unit_id": 7002, "name": "Demon",
+                          "race": "DEMON", "kind": "wildlife",
+                          "role": "wild", "pos": [50, 50, 1],
+                          "at_baseline": True,
+                          "dist_nearest_citizen": 10}}
+        snap = assemble(_state(), store=self.store,
+                        detector=_Detector(arrivals=[demon]),
+                        surface_z=175)
+        self.assertIn("174 levels below the fort", snap["text"])
+        tmp = tempfile.TemporaryDirectory()
+        store = Store(Path(tmp.name) / "world.db")
+        try:
+            snap2 = assemble(_state(), store=store,
+                             detector=_Detector(arrivals=[demon]))
+            self.assertNotIn("levels below the fort", snap2["text"])
+        finally:
+            store.close()
+            tmp.cleanup()
+
+    def test_attention_renders_briefing_with_wiki_refs(self):
+        # The briefing field was built by attention.build_attention
+        # and then dropped by _attention_items — the model never saw
+        # the wiki slugs for the event it was facing (2026-11-27:
+        # zero wiki uses in any M1 run). A briefed item renders its
+        # briefing + wiki slugs inline; an unbriefed item renders
+        # nothing extra.
+        briefed = {"priority": 2, "kind": "low_drink",
+                   "text": "Drink is low: 9 units left.",
+                   "briefing": {
+                       "what": "Drink is running out.",
+                       "matters": "Dwarves die of thirst.",
+                       "options": "Build a Still, then brew.",
+                       "cost": "Ignoring it kills dwarves.",
+                       "wiki": [{"slug": "still", "title": "Still"},
+                                {"slug": "alcohol",
+                                 "title": "Alcohol"}]}}
+        plain = {"priority": 3, "kind": "new_arrival",
+                 "text": "a turkey (wild animal) is on the surface."}
+        text, _short = _attention_items([briefed, plain])
+        self.assertIn("Drink is low: 9 units left.", text)
+        self.assertIn("Briefing: Drink is running out.", text)
+        self.assertIn("Why it matters: Dwarves die of thirst.", text)
+        self.assertIn("Wiki: still, alcohol", text)
+        self.assertIn("/v1/wiki/still", text)
+        # The unbriefed item carries no briefing lines.
+        tail = text.split("a turkey")[1]
+        self.assertNotIn("Briefing:", tail)
         # Regression (2026-11-26): the server's spatial cache holds
         # the full derivation dict (areas + graph + surface_blocks +
         # ...), and _snapshot passed that dict to assemble(), whose
@@ -231,12 +286,16 @@ class TestAccountant(unittest.TestCase):
         self.assertIn("status", snap["sections"])
         # History (lowest priority) is dropped first.
         self.assertNotIn("history", snap["sections"])
-        # The cuts brought the total down (from 374 uncut), but
+        # The cuts brought the total down (from 761 uncut), but
         # the never-cut floor (header + attention + status +
         # compacted sections + the suggestion, which names the
-        # still build when no still exists) cannot go below ~264
-        # for this state.
-        self.assertLess(snap["tokens"], 374)
+        # still build when no still exists) cannot go below ~558
+        # for this state. The floor grew since the test was
+        # written: the attention now carries the low-drink briefing
+        # (+wiki refs, ~200 tokens, never cut — the model needs the
+        # teaching on the item it is facing) and the materials
+        # section exists at all.
+        self.assertLess(snap["tokens"], 761)
 
     def test_fit_no_cuts_under_target(self):
         acct = TokenAccountant()
@@ -383,6 +442,19 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
         text, _short = _stocks(st, None, 0)
         # Only the DRINK material counts; STRUCTURAL does not.
         self.assertIn("brewable plants 12", text.split("\n")[0])
+
+    def test_stocks_head_line_has_empty_barrels_and_food_stacks(self):
+        # Reinforced 2026-11-27: the barrel count is the brew
+        # bottleneck and the stack count is what cooking needs —
+        # both are exact stock in the head line, not a flag.
+        st = _state()
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["empty_barrels"] = 2
+        st["stocks"]["food_stacks"] = 12
+        text, _short = _stocks(st, None, 0)
+        head = text.split("\n")[0]
+        self.assertIn("empty barrels 2", head)
+        self.assertIn("food stacks 12", head)
 
     def test_assemble_carries_calendar_date(self):
         # The M1 driver's start_tick log took "date" from the

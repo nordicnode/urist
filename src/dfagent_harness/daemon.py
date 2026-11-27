@@ -722,7 +722,22 @@ class Daemon:
             if self.server is not None else None
         areas = cache.get("areas") if cache else None
         if not areas:
-            return None
+            # Cold cache after a daemon restart (M1 run #11 tick 1):
+            # warm the areas on demand instead of returning None —
+            # the scan costs ~10-15 s once per restart and only runs
+            # when a site is actually needed. Without this the
+            # snapshot's placement section is empty and the model
+            # burns an idle tick asking for coordinates.
+            warm = getattr(self.server, "get_areas", None) \
+                if self.server is not None else None
+            if warm is None:
+                return None
+            try:
+                areas = warm()
+            except Exception:  # noqa: BLE001 - no areas, no sites
+                return None
+            if not areas:
+                return None
         # The anchor: where the fort actually is (buildings first,
         # then citizens) — NOT the Surface bbox centre (the map
         # centre) or the lowest citizen z (the hills). The old
@@ -804,9 +819,26 @@ class Daemon:
             if self.server is not None else None
         areas = spatial.get("areas") if spatial else None
         if not areas:
-            return {"kind": kind, "width": width, "height": height,
-                    "sites": [], "blocked": [],
-                    "reason": "areas not cached yet — no fort centre"}
+            # Cold cache after a daemon restart (M1 run #11 tick 1):
+            # warm the areas on demand instead of returning empty —
+            # the scan costs ~10-15 s once per restart and only runs
+            # when a site is actually needed.
+            warm = getattr(self.server, "get_areas", None) \
+                if self.server is not None else None
+            if warm is None:
+                return {"kind": kind, "width": width, "height": height,
+                        "sites": [], "blocked": [],
+                        "reason": "areas not cached yet — no fort centre"}
+            try:
+                areas = warm()
+            except Exception as exc:  # noqa: BLE001 - no areas
+                return {"kind": kind, "width": width, "height": height,
+                        "sites": [], "blocked": [],
+                        "reason": f"areas scan failed: {exc}"}
+            if not areas:
+                return {"kind": kind, "width": width, "height": height,
+                        "sites": [], "blocked": [],
+                        "reason": "areas not cached yet — no fort centre"}
         # A fresh paused collect for the anchor (buildings +
         # citizens). The poller's last_state is lite (no buildings
         # most polls) and cannot anchor the search.
@@ -1080,28 +1112,24 @@ class Daemon:
         # and the task would have reported a false success. The
         # planner checks the same conditions before deciding to
         # brew; the task re-checks them so it is self-contained.
+        # The check is the shared materials table (empty barrels,
+        # not total barrels — the fort had 15 barrels with only 3
+        # empty, 2026-11-27), so the task, the action fail-fast and
+        # the snapshot can never disagree about what brewing needs.
         if name == "brew":
-            from .planner import _brewable_plants
+            from . import materials as _materials_mod
             stocks = state.get("stocks") or {}
-            barrels = stocks.get("barrels") or 0
-            brewable = _brewable_plants(stocks)
-            if barrels == 0:
+            buildings = state.get("buildings") or {}
+            shortages = _materials_mod.check_job(
+                "brew", stocks, count=count, buildings=buildings)
+            if shortages:
+                detail = "; ".join(
+                    _materials_mod.format_shortage(s)
+                    for s in shortages)
                 return {"ok": False, "action": f"task:{name}",
-                        "detail": "no barrels in stock — cannot brew",
-                        "fix": "Fix: queue make_barrel at the "
-                               "carpenter (action queue_job, job "
-                               "make_barrel). Needs 1 wood. "
-                               f"Wood: {stocks.get('wood_units')}.",
-                        "evidence": None,
-                        "took_ms": round((time.monotonic() - started)
-                                         * 1000)}
-            if brewable == 0:
-                return {"ok": False, "action": f"task:{name}",
-                        "detail": "no brewable plants in stock — "
-                                  "cannot brew",
-                        "fix": "Fix: gather plants (action "
-                               "designate_gather) or plant a farm "
-                               "plot and grow plump helmets.",
+                        "detail": f"cannot brew: material shortage "
+                                  f"— {detail}",
+                        "fix": f"Fix: {detail}.",
                         "evidence": None,
                         "took_ms": round((time.monotonic() - started)
                                          * 1000)}

@@ -22,7 +22,7 @@ from typing import Any
 
 from .actions import ACTIONS, JOB_SPECS
 
-__all__ = ["catalog", "describe", "NOTES"]
+__all__ = ["catalog", "describe", "NOTES", "QUERY_ROUTES"]
 
 # Constraints and examples that are not in the function signature.
 # Legal values are the real ones (from the runtime enums / JOB_SPECS),
@@ -105,6 +105,11 @@ NOTES: dict[str, dict[str, Any]] = {
             "bed-making is CustomReaction 211 (MAKE WOODEN BED). "
             "Order those through queue_job with the JOB_SPECS key "
             "(brew, cook, make_bed), not through a manager order.",
+            "An order consumes the same materials as the queue_job "
+            "of the same job (1 wood per carpenter item; 1 brewable "
+            "plant + 1 empty barrel per brew; 2 distinct food "
+            "stacks per meal) — order only what the fort has, or "
+            "the job is queued and then cancelled.",
         ],
         "example": {"job_type": "MakeBarrel", "amount": 1},
     },
@@ -125,10 +130,13 @@ NOTES: dict[str, dict[str, Any]] = {
                    "guess coordinates.",
         },
         "constraints": [
-            "The workshop needs its material (usually 1 wood) and "
-            "a dwarf with the matching labor. The build fails fast "
+            "The workshop needs its material — 1 unit of one of "
+            "its materials (Carpenter: 1 wood; Mason: 1 stone; "
+            "Still: 1 stone or 1 wood; Kitchen: 1 stone) — and a "
+            "dwarf with the matching labor. The build fails fast "
             "on a missing material rather than queuing a job that "
-            "can never be worked.",
+            "can never be worked, and the error names what to "
+            "gather (chop trees for wood, dig stone for stone).",
             "On a site-not-free failure the error names a verified "
             "alternative site — use it, do not retry the blocked "
             "one, and do not gather the blocker and retry the same "
@@ -174,8 +182,11 @@ NOTES: dict[str, dict[str, Any]] = {
                     "Door, Cabinet, Chest.",
         },
         "constraints": [
-            "A bed needs a bed item (made at the carpenter) or "
-            "wood. Dwarves sleep on the floor without one.",
+            "Placing a bed needs a bed ITEM in stock — wood alone "
+            "does not place one. Make one first with queue_job "
+            "job=make_bed at the carpenter (1 wood each), then "
+            "place it. The place failure names that exact call. "
+            "Dwarves sleep on the floor without one.",
         ],
         "example": {"kind": "Bed", "pos": [95, 95, 175]},
     },
@@ -249,6 +260,58 @@ def _type_name(annotation: Any) -> str:
     return str(annotation).replace("typing.", "")
 
 
+def _job_materials_line() -> str:
+    """The queue_job materials constraint, built from the same
+    JOB_MATERIALS table the fail-fast check reads — so the catalog
+    can never disagree with the implementation about what a job
+    needs (general material awareness, 2026-11-27)."""
+    from . import materials as _materials_mod
+    parts = []
+    for job in sorted(_materials_mod.JOB_MATERIALS):
+        labels = " + ".join(
+            r["label"] for r in _materials_mod.JOB_MATERIALS[job])
+        parts.append(f"{job}: {labels}")
+    return ("Materials per copy — the job fails fast when short, "
+            "naming the gathering fix: " + "; ".join(parts) + ".")
+
+
+# Query routes: read-only detail the snapshot only indexes (the
+# model asks for them with the "query" pseudo-action, not POST
+# /v1/actions). The wiki is the one the model needs most — it is
+# how a model that knows nothing about DF learns how something
+# works — and it was missing from the catalog entirely (2026-11-27:
+# zero wiki uses in any M1 run), so the model never knew it was
+# there. A query route is a GET with a query string, not an action
+# call: {"action": "query", "kwargs": {"route": "/v1/wiki?q=..."}}.
+QUERY_ROUTES: dict[str, dict[str, Any]] = {
+    "wiki": {
+        "route": "/v1/wiki?q=<question>",
+        "about": ("Look up how Dwarf Fortress works in the local "
+                  "wiki export (4,485 pages). Use it when you do "
+                  "not know how something works or what to do "
+                  "about an event — the briefing in the observation "
+                  "already names the wiki pages for the event you "
+                  "are facing."),
+        "params": {
+            "q": "The question, in plain words, e.g. "
+                 "'how does brewing work'.",
+            "mode": "search (fast keyword, default for a named "
+                    "thing) or hybrid (best for vague questions).",
+            "limit": "Max results (default 5).",
+        },
+        "constraints": [
+            "A query does not count toward the 2-action limit, "
+            "but do not query when the observation already "
+            "answers the question.",
+            "The search returns slugs + snippets; read the full "
+            "page with GET /v1/wiki/<slug> when the snippet is "
+            "not enough.",
+        ],
+        "example": {"route": "/v1/wiki?q=how does brewing work"},
+    },
+}
+
+
 def describe(name: str) -> dict[str, Any] | None:
     """One action's description (None when the name is unknown)."""
     fn = ACTIONS.get(name)
@@ -270,12 +333,15 @@ def describe(name: str) -> dict[str, Any] | None:
     doc = inspect.getdoc(fn) or ""
     first_line = doc.splitlines()[0] if doc else ""
     notes = NOTES.get(name, {})
+    constraints = list(notes.get("constraints", []))
+    if name == "queue_job":
+        constraints.append(_job_materials_line())
     return {
         "name": name,
         "about": first_line,
         "detail": doc,
         "params": params,
-        "constraints": notes.get("constraints", []),
+        "constraints": constraints,
         **({"example": notes["example"]} if "example" in notes else {}),
     }
 
@@ -288,6 +354,8 @@ def catalog() -> dict[str, Any]:
     return {
         "actions": [a for a in actions if a is not None],
         "count": len(actions),
+        "query_routes": [QUERY_ROUTES[name]
+                         for name in sorted(QUERY_ROUTES)],
         "how_to_call": (
             "POST /v1/actions/<name> with a JSON body of the "
             "parameters (the 'client' parameter is not yours — "

@@ -121,6 +121,40 @@ BRIEFINGS: dict[str, dict[str, str]] = {
         "cost": ("An unaddressed cause kills again. Deaths also "
                  "hurt the mood of every dwarf who knew them."),
     },
+    "low_drink": {
+        "what": ("Drink is running out. Dwarves drink alcohol, not "
+                 "water — without drink they dehydrate and die in "
+                 "days. Drink is brewed at a Still from a brewable "
+                 "plant (one plant + one empty barrel makes 5 "
+                 "drink)."),
+        "matters": ("How many days of drink are left (the snapshot "
+                    "says), and whether a Still exists. No Still "
+                    "means no brewing at all, however many plants "
+                    "are in stock."),
+        "options": ("Build a Still first if there is none, then "
+                    "queue brew jobs at it. If plants or empty "
+                    "barrels are short, gather plants or make "
+                    "barrels at the Carpenter's workshop first — "
+                    "the Materials section names the shortage."),
+        "cost": ("Ignoring low drink kills dwarves of thirst. "
+                 "The fort's most common killer is running out "
+                 "of drink, not monsters."),
+    },
+    "low_food": {
+        "what": ("Food is running out. Food is cooked at a Kitchen "
+                 "from raw ingredients — an easy meal needs 2 "
+                 "distinct food stacks — or gathered and fished "
+                 "raw."),
+        "matters": ("How many days of food are left, and whether "
+                    "a Kitchen exists. Raw plants can be eaten "
+                    "uncooked, but cooking stretches them further."),
+        "options": ("Cook meals at the Kitchen (queue the cook "
+                    "job), gather plants, or fish. If the kitchen "
+                    "is missing, build one — it needs stone."),
+        "cost": ("Ignoring low food starves dwarves. Hungry "
+                 "dwarves work slowly, grow unhappy, and "
+                 "eventually die."),
+    },
 }
 
 # Cache of wiki references per event kind (the wiki is static).

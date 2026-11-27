@@ -1111,11 +1111,20 @@ def build_workshop(client: DFHackClient, kind: str,
             mat = probe
             break
     if mat is None:
+        # Name the exact fix, not a generic hint: each kind's
+        # alternatives come from materials.WORKSHOP_MATERIALS (the
+        # same table the snapshot's Materials section reads), so the
+        # error and the snapshot can never disagree about what a
+        # build needs.
+        from . import materials as _materials
+        alts = _materials.WORKSHOP_MATERIALS.get(kind) or []
+        labels = " or ".join(a["label"] for a in alts) or \
+            ", ".join(spec.get("materials") or [spec["material"]])
+        fixes = "; ".join(a["gather"] for a in alts)
         raise _Fail(
             "precondition",
-            f"no accessible material for a {kind} workshop (tried "
-            f"{', '.join(spec.get('materials') or [spec['material']])} — "
-            f"deconstruct the wagon or chop a tree first)")
+            f"no accessible material for a {kind} workshop "
+            f"(needs {labels}) — {fixes}")
     before = _read_section(client, "buildings", timeout=timeout)
     out = _helper_or_fail(client, "act_build.lua",
                           {"type": spec["type"], "subtype": spec["subtype"],
@@ -1334,6 +1343,22 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
                    if b.get("id") == building_id), None)
     if target is None:
         raise _Fail("precondition", f"no building #{building_id}")
+    # Material fail-fast (general material awareness, 2026-11-27):
+    # a job whose materials are short is never queued — it would sit
+    # unworked (or be cancelled) while the model thinks the work is
+    # underway. The failure names the exact gathering fix. A failed
+    # stocks read is a transport failure, never a false shortage.
+    from . import materials as _materials
+    stocks = _read_section(client, "stocks", timeout=timeout)
+    shortages = _materials.check_job(
+        job, stocks, count=count,
+        buildings=before)
+    if shortages:
+        detail = "; ".join(_materials.format_shortage(s)
+                           for s in shortages)
+        raise _Fail("precondition",
+                    f"cannot queue {job} x{count} on building "
+                    f"#{building_id}: material shortage — {detail}")
     out = _helper_or_fail(client, "act_job.lua",
                           {"building_id": building_id,
                            "job_type": spec["job_type"],

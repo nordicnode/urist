@@ -144,6 +144,16 @@ class FakeGame:
                                   # action layer only needs a non-(-1)
                                   # value to pass an explicit filter.
                                   "mat_type": 0, "mat_index": 0}}
+        # Stocks the queue_job material fail-fast reads (general
+        # material awareness, 2026-11-27). Tests override per case.
+        self.stocks = {"drink_units": 35, "food_units": 32,
+                       "food_stacks": 12, "wood_units": 124,
+                       "stone_units": 0, "seeds_units": 35,
+                       "barrels": 15, "empty_barrels": 3,
+                       "by_material": [
+                           {"material":
+                            "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+                            "units": 33}]}
         self.spawn_jobs = True       # tier-2: game spawns FellTree/etc.
         self.complete_builds = True  # buildings finish construction
         self.build_polls = 0
@@ -170,6 +180,8 @@ class FakeGame:
         if name == "reports":
             return {"announcements": [], "announcement_count": 0,
                     "reports": [], "report_count": 0}
+        if name == "stocks":
+            return dict(self.stocks)
         raise AssertionError(f"unexpected section {name!r}")
 
     # -- helper simulation --------------------------------------------------
@@ -340,6 +352,16 @@ class FakeGame:
                     "center": [params["x"] + 1, params["y"] + 1,
                                params["z"]],
                     "construction_stage": 0}
+        if name == "act_job.lua":
+            # The real helper returns the new job ids; the game only
+            # assigns a real id on the next tick, so a fresh job
+            # carries -1 until then (observed live 2026-11-27) — the
+            # action layer verifies it by the -1 id's presence in
+            # the jobs list, exactly like the real game.
+            self.jobs.append({"id": -1, "type": "CustomReaction",
+                              "pos": [0, 0, 0]})
+            return {"ok": True, "action": "queue-job",
+                    "job_ids": [-1], "count": params.get("count", 1)}
         if name == "act_labor.lua":
             target = None
             for c in self.citizens:
@@ -389,7 +411,8 @@ class FakeClient:
                      "act_plants.lua", "probe_jobs_at.lua",
                      "probe_material.lua", "probe_site.lua",
                      "probe_bldg_mat.lua",
-                     "act_order.lua", "act_build.lua", "act_labor.lua"):
+                     "act_order.lua", "act_build.lua", "act_labor.lua",
+                     "act_job.lua"):
             if f"-- {name}" in code:
                 return self.game.run_helper(name, params)
         raise AssertionError("no helper marker found in Lua code")
@@ -652,8 +675,21 @@ class TestBuild(unittest.TestCase):
                         pos=(85, 85, 42))
         self.assertFalse(r.ok)
         self.assertEqual(r.error_kind, "precondition")
-        self.assertIn("wagon", r.reason)
+        # The error names the fix (chop trees), not a generic hint.
+        self.assertIn("chop trees", r.reason)
         self.assertEqual(len(self.game.buildings), 1)  # nothing placed
+
+    def test_build_no_material_still_names_both_alternatives(self):
+        self.game.material["WOOD"] = {"total": 0, "accessible": 0}
+        self.game.material["BOULDER"] = {"total": 0, "accessible": 0}
+        r = actions.act(self.client, "build_workshop", kind="still",
+                        pos=(85, 85, 42))
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("1 stone (boulder)", r.reason)
+        self.assertIn("1 wood (log)", r.reason)
+        self.assertIn("dig stone", r.reason)
+        self.assertIn("chop trees", r.reason)
 
     def test_build_unknown_kind(self):
         r = actions.act(self.client, "build_workshop", kind="sauna",
@@ -668,6 +704,68 @@ class TestBuild(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertEqual(r.error_kind, "timeout")
         self.assertTrue(self.game.paused)
+
+
+class TestQueueJobMaterials(unittest.TestCase):
+    """queue_job fails fast on a material shortage (general material
+    awareness, 2026-11-27): the job is never queued, nothing is
+    written, and the error names the exact gathering fix."""
+
+    def setUp(self):
+        self.game = FakeGame()
+        self.client = _run_with_fake(self, self.game)
+        self.game.buildings += [
+            {"id": 7, "type": "Workshop", "subtype": "Carpenters",
+             "jobs": 0},
+            {"id": 8, "type": "Workshop", "subtype": "Still",
+             "jobs": 0}]
+
+    def _queued(self, name):
+        return [c for c in self.game.calls if c[0] == name]
+
+    def test_brew_short_on_plants_fails_fast(self):
+        self.game.stocks["by_material"] = []
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("designate_gather", r.reason)
+        self.assertEqual(self._queued("act_job.lua"), [])
+
+    def test_brew_short_on_barrels_names_make_barrel(self):
+        self.game.stocks["empty_barrels"] = 0
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("make_barrel", r.reason)
+        self.assertIn("#7", r.reason)
+        self.assertEqual(self._queued("act_job.lua"), [])
+
+    def test_brew_x5_with_3_empty_barrels_fails_fast(self):
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=5)
+        self.assertFalse(r.ok)
+        self.assertIn("need 5", r.reason)
+        self.assertIn("have 3", r.reason)
+        self.assertEqual(self._queued("act_job.lua"), [])
+
+    def test_make_bed_short_on_wood_fails_fast(self):
+        self.game.stocks["wood_units"] = 0
+        r = actions.act(self.client, "queue_job", building_id=7,
+                        job="make_bed")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("designate_chop", r.reason)
+        self.assertEqual(self._queued("act_job.lua"), [])
+
+    def test_queue_succeeds_when_stocked(self):
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=3)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(len(self._queued("act_job.lua")), 1)
+        self.assertTrue(any(j["type"] == "CustomReaction"
+                            for j in self.game.jobs))
 
 
 class TestSiteFixHint(unittest.TestCase):

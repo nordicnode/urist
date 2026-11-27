@@ -350,6 +350,7 @@ def build_attention(state: dict[str, Any],
                         f"The fort will run out in days.",
                 "unit_id": None, "pos": None,
                 "at_baseline": False,
+                "briefing": _briefing_for(f"low_{label.lower()}"),
             })
         elif n <= warn:
             items.append({
@@ -357,6 +358,7 @@ def build_attention(state: dict[str, Any],
                 "text": f"{label} is low: {n} units left.",
                 "unit_id": None, "pos": None,
                 "at_baseline": False,
+                "briefing": _briefing_for(f"low_{label.lower()}"),
             })
     # New arrivals (priority 2 for visitors and near wildlife, 3 for
     # the rest): from the detector's record, inside the window.

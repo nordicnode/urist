@@ -66,6 +66,10 @@ Routes:
 * ``POST /v1/control/quicksave``,
   ``GET /v1/control/daemon``,
   ``POST /v1/control/daemon/pause|resume`` — daemon control.
+* ``POST /v1/control/diary`` — write the diary entry for a
+  completed M1 day (the driver calls it at day-complete run end;
+  the daemon's own day-boundary trigger cannot fire while its loop
+  is paused for an M1 run).
 
 Errors follow PROTOCOL.md §6: HTTP status + ``{"error": {"code",
 "message", "detail": ...}, "request_id": ...}``. ``503
@@ -589,6 +593,8 @@ def create_server(
                 self._quicksave()
             elif path == "/v1/control/advance":
                 self._advance()
+            elif path == "/v1/control/diary":
+                self._diary(body)
             elif path == "/v1/control/daemon/pause":
                 self._daemon_pause(True)
             elif path == "/v1/control/daemon/resume":
@@ -1143,8 +1149,12 @@ def create_server(
             # §6): a FULL paused collect folded through the Context
             # Assembler with the Store (diffing + trends) and the
             # poller's detector (attention). Areas + survey come from
-            # the CACHE only — a snapshot never triggers a scan
-            # (~10 s areas / ~25 s survey). Needs the game client.
+            # the CACHE — except the still-site derivation below,
+            # which warms the areas on demand when the cache is cold
+            # (one ~15 s scan per daemon restart, only when the model
+            # actually needs a site; M1 run #11 tick 1 proved an
+            # empty placement section costs an idle tick). Needs the
+            # game client.
             from . import assembler, observe
             from .read_safety import ReadRefused, paused_read
             if client is None:
@@ -1171,15 +1181,18 @@ def create_server(
             # Free workshop sites for the suggestion: the model
             # stalls without a concrete build coordinate (M1 run
             # #6, "the observation gives no free ground
-            # coordinates"). The snapshot never triggers a scan, so
-            # sites come from the daemon's cache (populated by the
-            # planner tick) unless the snapshot actually needs a
-            # still site and the cache is missing or stale — then a
-            # single derivation (~1 s: 2 slices + up to 8 probes)
-            # is worth it, because without a site the model cannot
-            # build the still at all. The build probe re-verifies
-            # the site at build time, so a stale cached site is
-            # handled by the fix hint, not a bad build.
+            # coordinates"). The snapshot derives sites when it
+            # actually needs a still site and the cache is missing
+            # or stale — a single derivation (~1 s: 2 slices + up
+            # to 8 probes) is worth it, because without a site the
+            # model cannot build the still at all. The build probe
+            # re-verifies the site at build time, so a stale cached
+            # site is handled by the fix hint, not a bad build.
+            # (Both derivations warm the areas on demand when the
+            # cache is cold after a daemon restart — M1 run #11
+            # tick 1, where the placement section was empty and
+            # the model burned an idle tick asking for
+            # coordinates.)
             sites = None
             placement = None
             if daemon is not None:
@@ -1198,6 +1211,22 @@ def create_server(
                                 daemon, "_placement_cache", None)
                         except Exception:  # noqa: BLE001 - no sites
                             sites = None  # is "no build", not fatal
+                if placement is None:
+                    # General cold-cache warm: with a still already
+                    # built the still branch above does not run, so
+                    # after a restart the placement section would
+                    # still be empty and the model stalls asking
+                    # for bed/zone sites. get_placement warms the
+                    # areas on demand (once per restart) and
+                    # populates the placement cache; later ticks
+                    # read the cache, never re-derive.
+                    try:
+                        with rpc_lock:
+                            daemon.get_placement("workshop", 3, 3)
+                        placement = getattr(
+                            daemon, "_placement_cache", None)
+                    except Exception:  # noqa: BLE001 - no sites
+                        pass  # is "no build", not fatal
             try:
                 # The areas cache holds the full derivation dict
                 # (areas + graph + surface_blocks + ...); the
@@ -1208,7 +1237,15 @@ def create_server(
                     state, store=store, detector=detector,
                     areas=(spatial_cache.get("areas") or {}).get("areas"),
                     survey=spatial_cache.get("survey"),
-                    sites=sites, placement=placement)
+                    sites=sites, placement=placement,
+                    # The attention's vertical-distance text ("174
+                    # levels below the fort") needs the fort's
+                    # surface z — without it _where returns "" and
+                    # the fix-6 gap text never reaches the snapshot
+                    # (found live 2026-11-27: demons at z1 flagged
+                    # [P2] with no level gap stated).
+                    surface_z=(spatial_cache.get("areas") or {}).get(
+                        "surface_z"))
             except Exception as exc:  # noqa: BLE001
                 _error(self, 503, "SNAPSHOT_FAILED",
                        "assembler failed", {"error": str(exc)})
@@ -1866,6 +1903,49 @@ def create_server(
                         f"{res.get('reason')}")
             _json(self, 200, res)
 
+        def _diary(self, body: dict[str, Any]) -> None:
+            # POST /v1/control/diary — write the diary entry for a
+            # completed M1 day. The daemon's planner loop is paused
+            # during M1 runs, so its day-boundary trigger never
+            # fires there; the driver calls this at day-complete run
+            # end instead. The summary is built from the Store +
+            # Journal exactly like the daemon trigger; the driver's
+            # own record (its decisions + the run's start/end stocks,
+            # parsed from its snapshots) is merged in via
+            # diary.merge_driver_record — the run's decisions are not
+            # in the Journal and no trend samples are taken while
+            # the loop is paused. write_entry is idempotent per date,
+            # so a later daemon-trigger write for the same day
+            # replaces rather than duplicates.
+            if daemon is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "diary needs the daemon")
+                return
+            day_start = body.get("day_start_tick")
+            if not isinstance(day_start, int):
+                _error(self, 400, "BAD_REQUEST",
+                       "day_start_tick (int) is required")
+                return
+            year = body.get("year") or 0
+            fort = body.get("fort_name") or ""
+            from .diary import (build_daily_summary,
+                                merge_driver_record, write_entry)
+            try:
+                summary = build_daily_summary(
+                    daemon.store, daemon.journal, day_start, fort, year)
+                merge_driver_record(
+                    summary,
+                    decisions=body.get("decisions") or [],
+                    stocks_start=body.get("stocks_start") or {},
+                    stocks_end=body.get("stocks_end") or {})
+                path = write_entry(daemon.state_dir, summary)
+            except Exception as exc:  # noqa: BLE001 - best-effort
+                _error(self, 503, "DIARY_FAILED",
+                       f"diary write failed: {exc}")
+                return
+            _json(self, 200, {"ok": True, "date": summary["date"],
+                              "path": str(path)})
+
         def _quicksave(self) -> None:
             if daemon is None:
                 _error(self, 503, "GAME_NOT_RUNNING",
@@ -1891,6 +1971,14 @@ def create_server(
     # the daemon can fold the cached areas/survey into its per-tick
     # snapshot without triggering a scan.
     server.spatial_cache = spatial_cache
+    # get_areas is exposed too, so the daemon can warm the areas on
+    # demand when the cache is cold (2026-11-27, M1 run #11 tick 1:
+    # after a daemon restart nothing had hit /v1/areas yet, so the
+    # placement system returned "areas not cached", the still
+    # suggestion named no site, and the model burned an idle tick).
+    # The scan costs ~10-15 s and runs once per restart, only when
+    # a site is actually needed — far cheaper than the idle tick.
+    server.get_areas = get_areas
     return server
 
 

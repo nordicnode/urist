@@ -146,7 +146,12 @@ def _summary(state: dict[str, Any]) -> dict[str, Any]:
         "wood": stocks.get("wood_units") or 0,
         "stone": stocks.get("stone_units") or 0,
         "seeds": stocks.get("seeds_units") or 0,
-        "barrels": stocks.get("barrels") or 0,
+        # Barrels for brewing are EMPTY barrels (stocks.lua counts
+        # them since 2026-11-27): a barrel holding drink cannot take
+        # a brew. Fall back to the total when an older collect has
+        # no empty_barrels key.
+        "barrels": stocks.get("empty_barrels",
+                              stocks.get("barrels")) or 0,
         "buildings": buildings.get("list") or [],
         "building_summary": {e.get("type"): e.get("count")
                              for e in buildings.get("summary") or []},
@@ -349,7 +354,7 @@ def decide(state: dict[str, Any],
                     1, "needs", "brew drink now",
                     f"drink {drink}u (critical <= {DRINK_CRITICAL}) with "
                     f"{brewable} brewable plant units and "
-                    f"{s['barrels']} barrels; still #{still['id']} idle",
+                    f"{s['barrels']} empty barrels; still #{still['id']} idle",
                     "queue_job",
                     {"building_id": still["id"], "job": "brew",
                      "count": min(5, brewable)},
@@ -367,7 +372,7 @@ def decide(state: dict[str, Any],
                     decisions.append(Decision(
                         1, "needs", "make barrels for brewing",
                         f"drink {drink}u (critical), brewable plants "
-                        f"available, but 0 barrels",
+                        f"available, but 0 empty barrels",
                         "queue_job",
                         {"building_id": carpenter0["id"],
                          "job": "make_barrel", "count": 3},

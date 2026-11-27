@@ -58,6 +58,22 @@ class TestWikiOffline(unittest.TestCase):
         results = wiki.prefetch_for_event("strange_mood")
         self.assertGreater(len(results), 0)
         self.assertIn("strange", results[0]["title"].lower())
+        # The kinds the attention system actually emits (2026-11-27):
+        # low_drink / low_food are the fort's most common killers
+        # and "hostile" is the briefing key for threat items — all
+        # three returned [] before the mapping was added, so no wiki
+        # context was ever pre-fetched for the events the model
+        # faces every run.
+        results = wiki.prefetch_for_event("low_drink")
+        self.assertGreater(len(results), 0)
+        self.assertIn("brew", " ".join(
+            r.get("title", "") for r in results).lower())
+        results = wiki.prefetch_for_event("low_food")
+        self.assertGreater(len(results), 0)
+        results = wiki.prefetch_for_event("hostile")
+        self.assertGreater(len(results), 0)
+        results = wiki.prefetch_for_event("threat")
+        self.assertGreater(len(results), 0)
         # An unmapped kind returns nothing (no guess).
         self.assertEqual(wiki.prefetch_for_event("snapshot"), [])
 

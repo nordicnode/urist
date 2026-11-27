@@ -66,8 +66,20 @@ class TestBriefingsOffline(unittest.TestCase):
         # The kinds the harness can surface must all have a briefing.
         for kind in ("new_arrival", "citizen_new", "hostile",
                      "invasion", "strange_mood", "caravan",
-                     "unit_death"):
+                     "unit_death", "low_drink", "low_food"):
             self.assertIsNotNone(briefings.brief_for(kind), kind)
+
+    def test_low_drink_briefing_has_wiki_refs(self):
+        # The low-drink briefing is the one the model faces every
+        # run (drink is the fort's most common killer) — its wiki
+        # refs must be real brewing pages, not empty. There is no
+        # standalone "Brewing" page in the DF wiki; brewing is
+        # covered on the Still page, so that is the expected slug.
+        b = briefings.brief_for("low_drink")
+        self.assertIsNotNone(b)
+        self.assertGreater(len(b.get("wiki") or []), 0)
+        slugs = [w["slug"] for w in b["wiki"]]
+        self.assertIn("still", slugs)
 
     def test_attention_arrival_carries_briefing(self):
         # build_attention attaches the briefing to arrival items.

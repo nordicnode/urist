@@ -16,6 +16,16 @@ local ok, err = pcall(function()
   local by_type = {}
   local total_stacks, total_units = 0, 0
   local mat_breakdown = {}
+  local empty_barrels = 0
+  -- Empty barrels (for brewing): a BARREL item with no contained
+  -- items. Total barrels is NOT the brewing check — the fort had 15
+  -- barrels with only 3 empty (2026-11-27), so a brew x5 against
+  -- the total would queue 2 jobs that can never run. getContainedItems
+  -- is verified live in this DFHack (r8).
+  local function is_empty_barrel(it)
+    local ok, cont = pcall(dfhack.items.getContainedItems, it)
+    return ok and cont ~= nil and #cont == 0
+  end
   local function is_trader_held(it)
     local cont = dfhack.items.getContainer(it)
     local holder = nil
@@ -56,6 +66,9 @@ local ok, err = pcall(function()
     end
     local t = it:getType()
     local qty = it:getStackSize()
+    if t == df.item_type.BARREL and is_empty_barrel(it) then
+      empty_barrels = empty_barrels + 1
+    end
     local e = by_type[t]
     if not e then e = {stacks = 0, units = 0}; by_type[t] = e end
     e.stacks = e.stacks + 1
@@ -128,6 +141,7 @@ local ok, err = pcall(function()
       metal_bar_units = get(df.item_type.BAR).units,
       metal_bar_stacks = get(df.item_type.BAR).stacks,
       barrels = get(df.item_type.BARREL).stacks,
+      empty_barrels = empty_barrels,
       bins = get(df.item_type.BIN).stacks,
       buckets = get(df.item_type.BUCKET).stacks,
       category_stacks = cats,

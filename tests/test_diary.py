@@ -146,6 +146,41 @@ class TestBuildDailySummary(unittest.TestCase):
 
 
 class TestRenderEntry(unittest.TestCase):
+    def test_merge_driver_record(self):
+        # The daemon's planner loop is paused during M1 runs, so the
+        # run's decisions are not in the Journal and no trend samples
+        # are taken for the run's day. The driver's own record (its
+        # decisions + start/end stocks from its snapshots) merges
+        # into the summary — without it the entry would say 'a quiet
+        # day' for a day the model acted on.
+        summary = _day_summary()
+        diary.merge_driver_record(
+            summary,
+            decisions=[{
+                "decision": "build a Still at (95, 108, 175)",
+                "reason": "No still exists, so brewing is impossible.",
+                "action": "build_workshop", "ok": True,
+                "result": "still workshop #8 built"}],
+            stocks_start={"drink": 39, "food": 32, "wood": 124,
+                          "stone": 0, "population": 7},
+            stocks_end={"drink": 34, "food": 35, "wood": 124,
+                        "stone": 0, "population": 7})
+        self.assertEqual(len(summary["decisions"]), 1)
+        self.assertEqual(summary["stocks_start"]["drink"], 39)
+        self.assertEqual(summary["stocks_end"]["drink"], 34)
+        entry = diary.render_entry(summary)
+        self.assertIn("build a Still at (95, 108, 175)", entry)
+        self.assertIn("Drink: 39 -> 34", entry)
+        self.assertNotIn("A quiet day", entry)
+
+    def test_merge_driver_record_empty_changes_nothing(self):
+        summary = _day_summary()
+        before = dict(summary)
+        diary.merge_driver_record(summary)
+        self.assertEqual(summary["decisions"], before["decisions"])
+        self.assertEqual(summary["stocks_start"],
+                         before["stocks_start"])
+
     def test_entry_states_recorded_facts_only(self):
         store = FakeStore()
         store.add_trend("drink", 169200, 9.0)

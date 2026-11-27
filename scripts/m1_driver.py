@@ -85,7 +85,7 @@ HOW THIS WORKS
 - Each turn you receive an observation: the fort's state in plain words, what needs attention, and one suggested action for the single most urgent problem.
 - You reply with JSON only: {"reasoning": "<one or two sentences>", "actions": [{"action": "<name>", "kwargs": {...}, "reason": "<why, in game terms>"}]}.
 - At most 2 actions per turn. You may also reply with zero actions if nothing needs doing — but a fort always has something to do; an empty turn is suspicious.
-- You may also use a "query" action to pull detail the observation only indexes: {"action": "query", "kwargs": {"route": "/v1/column?x=97&y=97"}}. Valid query routes: /v1/slice, /v1/column, /v1/overview, /v1/areas, /v1/area/<id|name>, /v1/path, /v1/survey, /v1/sites?kind=workshop, /v1/unit/<id>, /v1/units, /v1/wiki. The result comes back in your next observation. A query does not count toward the 2-action limit, but do not query when the observation already answers the question. To find a place to build, query /v1/sites?kind=<workshop|stockpile|zone|farm_plot|furniture|trap|room>&w=N&h=N — it returns verified-free sites with their coordinates, and a failed build names a verified alternative to use instead of the blocked site.
+- You may also use a "query" action to pull detail the observation only indexes: {"action": "query", "kwargs": {"route": "/v1/column?x=97&y=97"}}. Valid query routes: /v1/slice, /v1/column, /v1/overview, /v1/areas, /v1/area/<id|name>, /v1/path, /v1/survey, /v1/sites?kind=workshop, /v1/unit/<id>, /v1/units, /v1/wiki. The result comes back in your next observation. A query does not count toward the 2-action limit, but do not query when the observation already answers the question. To find a place to build, query /v1/sites?kind=<workshop|stockpile|zone|farm_plot|furniture|trap|room>&w=N&h=N — it returns verified-free sites with their coordinates, and a failed build names a verified alternative to use instead of the blocked site. When you do not know how something works or what to do about an event, look it up in the wiki instead of guessing: {"action": "query", "kwargs": {"route": "/v1/wiki?q=how does brewing work"}}. The briefing lines in the observation already name the wiki pages for the event you are facing — read the full page with /v1/wiki/<slug> when the briefing is not enough.
 - The harness executes your actions through the real game and reports what happened (ok or failed, with the cause and the fix). A failed action is information, not a reason to stop: change approach next turn.
 - NEVER invent coordinates, ids, or values. Use only what the observation and the catalog give you. If a coordinate is not in the observation, ask for it with a query or use the suggested action's parameters.
 - NEVER decide the run is over. The run continues until the harness says so. You decide actions, not whether to keep playing.
@@ -256,6 +256,85 @@ def parse_suggestion(text: str | None) -> tuple[str, str] | None:
     return None
 
 
+def diary_decision_text(name: str, kwargs: dict) -> str:
+    """One model action as a diary decision phrase ("build a Still
+    at (95, 108, 175)"). Plain words, not the action name — the
+    diary renders "I decided to <phrase>." Unmapped actions fall
+    back to the name + key kwargs, so nothing is ever lost."""
+    kind = str(kwargs.get("kind", ""))
+    pos = kwargs.get("pos")
+    pos_txt = f" at {tuple(pos)}" if pos else ""
+    if name == "build_workshop":
+        return f"build a {kind or 'workshop'}{pos_txt}"
+    if name == "queue_job":
+        count = kwargs.get("count", 1)
+        return (f"queue {kwargs.get('job', 'a job')} "
+                f"x{count} at building #{kwargs.get('building_id', '?')}")
+    if name == "labor_toggle":
+        on = kwargs.get("on", True)
+        return (f"{'enable' if on else 'disable'} "
+                f"{kwargs.get('labor', 'a labor')} labor on "
+                f"{kwargs.get('unit_name', 'a dwarf')}")
+    if name == "create_stockpile":
+        return (f"create a {kwargs.get('category', 'food')} "
+                f"stockpile{pos_txt}")
+    if name == "create_zone":
+        return (f"create a {kwargs.get('zone_type', 'meeting_area')} "
+                f"zone{pos_txt}")
+    if name == "designate_gather":
+        return "gather plants"
+    if name == "designate_chop":
+        return "chop trees"
+    if name == "dig_to_completion":
+        return f"dig {kwargs.get('mode', '')} at {kwargs.get('box', '')}"
+    if name == "build_furniture":
+        return f"build {kind or 'furniture'}{pos_txt}"
+    if name == "build_farm_plot":
+        return f"build a farm plot{pos_txt}"
+    if name.startswith("task:"):
+        return f"run the {name[len('task:'):]} task"
+    bits = [f"{k}={v}" for k, v in kwargs.items()]
+    return f"{name} {' '.join(bits)}".strip()
+
+
+def parse_snapshot_stocks(sections: dict | None) -> dict:
+    """Start/end stocks from a snapshot's sections (the diary's
+    opening/closing numbers). The sections carry the numbers in
+    both forms — the full "Stocks: drink 35, food 32, ..." line and
+    the diffed "stocks: unchanged (drink 35, ...)" one-liner — so
+    one regex covers both. Population comes from the status section
+    the same way. Missing values stay None (never guessed)."""
+    import re as _re
+    out: dict = {}
+    if not sections:
+        return out
+    stocks = str((sections or {}).get("stocks", ""))
+    m = _re.search(r"drink (\d+), food (\d+), wood (\d+), "
+                   r"stone (\d+)", stocks)
+    if m:
+        for key, val in zip(("drink", "food", "wood", "stone"),
+                            m.groups()):
+            out[key] = int(val)
+    status = str((sections or {}).get("status", ""))
+    m = _re.search(r"(\d+) citizens", status)
+    if m:
+        out["population"] = int(m.group(1))
+    return out
+
+
+def parse_fort_name(snap: dict | None) -> str:
+    """The fort name from a snapshot ("Erushtathtat, 125-04-02 ..."
+    in the header line, or "header: unchanged (Erushtathtat,
+    125-04-02)." when diffed). Empty when it cannot be found."""
+    import re as _re
+    if not snap:
+        return ""
+    text = str(snap.get("text", "")) or str(
+        (snap.get("sections") or {}).get("header", ""))
+    m = _re.search(r"([A-Z][\w ]*?),\s*\d+-\d+-\d+", text)
+    return m.group(1).strip() if m else ""
+
+
 class M1Driver:
     def __init__(self, args):
         self.args = args
@@ -272,6 +351,16 @@ class M1Driver:
         self.catalog_text: str | None = None
         self.actions_taken = 0
         self.idle_ticks = 0
+        # The run's own record for the diary (POST /v1/control/diary
+        # at day-complete run end): the model's decisions in order,
+        # each with its reason and outcome, plus the start snapshot
+        # (for the day's opening stocks + fort name). The daemon's
+        # planner loop is paused during M1 runs, so these decisions
+        # are not in the Journal and no trend samples are taken for
+        # the run's day — without this record the diary entry would
+        # say 'a quiet day' for a day the model acted on.
+        self.diary_decisions: list[dict] = []
+        self.snap0: dict | None = None
         # Outcomes of the previous tick's actions, fed back to the
         # model in the next prompt so it learns from failures (a
         # wrong action name, a missing parameter, a verification
@@ -283,8 +372,12 @@ class M1Driver:
         # initial value (50/s) was far below the real rate
         # (~265-350/s on this fort), so the FIRST window overshot
         # ~10x and M1 run #9 ended after a single action tick
-        # (100800 -> 102392 for a 150-tick window). The cap is
-        # raised to 400 so the calibration can reach the real rate.
+        # (100800 -> 102392 for a 150-tick window). The cap was
+        # raised to 400, then to 1000: M1 run #11 advanced ~409
+        # ticks per 150-tick window, so the real rate on this fort
+        # is ~550/s and a 400 cap can never learn it. The minimum
+        # sleep is 0.25 s (was 0.5 s) — at 550/s a 0.5 s floor alone
+        # is a ~275-tick window.
         self._tick_rate = 200.0
 
     def _log(self, kind: str, **fields) -> None:
@@ -293,6 +386,44 @@ class M1Driver:
         log_line(self.out, rec)
         print(f"[m1 tick {self.tick_no} {kind}] "
               + json.dumps(fields)[:300], flush=True)
+
+    def _write_diary(self, snap: dict) -> None:
+        """Write the diary entry for the completed day (POST
+        /v1/control/diary). The daemon's planner loop is paused
+        during M1 runs, so its day-boundary trigger never fires —
+        without this call no diary.md entry is ever written for an
+        M1 day (2026-11-27: zero entries existed). Best-effort: a
+        failed diary write is logged, never fatal to the run. Mock
+        runs skip it (their decisions are the harness's, not the
+        model's)."""
+        if self.args.mock:
+            self._log("diary", skipped="mock run")
+            return
+        if self.start_tick is None:
+            self._log("diary", error="no start tick recorded")
+            return
+        date = (self.snap0 or {}).get("date") or ""
+        try:
+            year = int(str(date).split("-")[0])
+        except (ValueError, IndexError):
+            year = 0
+        body = {
+            "day_start_tick": (self.start_tick // TICKS_PER_DAY
+                               * TICKS_PER_DAY),
+            "year": year,
+            "fort_name": parse_fort_name(self.snap0),
+            "decisions": self.diary_decisions,
+            "stocks_start": parse_snapshot_stocks(
+                (self.snap0 or {}).get("sections")),
+            "stocks_end": parse_snapshot_stocks(
+                snap.get("sections")),
+        }
+        try:
+            res = self.daemon.post("/v1/control/diary", body)
+            self._log("diary", ok=res.get("ok"), date=res.get("date"),
+                      path=res.get("path"))
+        except Exception as exc:
+            self._log("diary", error=str(exc)[:300])
 
     # The catalog cap: the compact catalog (no full docstrings)
     # is ~12K chars for 14 actions. The cap is a safety net, not a
@@ -461,7 +592,7 @@ class M1Driver:
         if window <= 0:
             return current_tick
         sleep_s = window / self._tick_rate
-        sleep_s = max(0.5, min(sleep_s, 30.0))
+        sleep_s = max(0.25, min(sleep_s, 30.0))
         t_unpause = time.time()
         self.daemon.set_paused(False)
         time.sleep(sleep_s)
@@ -482,7 +613,7 @@ class M1Driver:
         advanced = reached - current_tick
         if unpause_s > 0 and advanced > 0:
             rate = advanced / unpause_s
-            self._tick_rate = max(10.0, min(400.0, rate))
+            self._tick_rate = max(10.0, min(1000.0, rate))
         if advanced <= 0:
             # The clock did not move during the window. A modal
             # dialog freezes the tick even when the pause flag is
@@ -522,6 +653,7 @@ class M1Driver:
         except Exception as exc:
             self._log("fatal", error=f"first snapshot failed: {exc}")
             return 2
+        self.snap0 = snap0
         self.start_tick = snap0.get("tick") or 0
         self.end_tick = self.start_tick + int(self.args.days * TICKS_PER_DAY)
         # snap0 itself stores a fresh baseline, so the tick-1
@@ -564,12 +696,21 @@ class M1Driver:
                 self._log("tick_error", error=f"snapshot failed: {exc}")
                 time.sleep(5)
                 continue
+            # The observation is logged in full (snapshot text +
+            # suggestion) so a run-log review can verify what the
+            # model actually saw — M1 run #11 tick 1 idled on "no
+            # verified coordinates" and the logs could not say
+            # whether the snapshot really lacked them, because only
+            # the model's reasoning was recorded.
+            self._log("snapshot", text=snap.get("text", ""),
+                      suggestion=snap.get("suggestion"))
             tick = snap.get("tick") or 0
             if tick >= self.end_tick:
                 self._log("run_end", reason="day complete",
                           tick=tick, end_tick=self.end_tick,
                           actions_taken=self.actions_taken,
                           idle_ticks=self.idle_ticks)
+                self._write_diary(snap)
                 return 0
             # Fort dead check: parse the citizen count out of the
             # status section. (A plain substring check for
@@ -618,9 +759,13 @@ class M1Driver:
                     res = self.daemon.query(route)
                     self.query_results.append(
                         f"{route} -> {json.dumps(res)[:2000]}")
+                    self._log("query", route=route,
+                              result=json.dumps(res)[:2000])
                 except Exception as exc:
                     self.query_results.append(
                         f"{route} -> ERROR {exc}"[:500])
+                    self._log("query", route=route,
+                              error=str(exc)[:300])
             if not real:
                 self.stall_ticks += 1
                 self.idle_ticks += 1
@@ -667,6 +812,19 @@ class M1Driver:
                                   ok=res.get("ok"),
                                   reason=str(res.get("reason"))[:300],
                                   model_reason=a.get("reason", "")[:200])
+                        # The run's diary record: the model's
+                        # decisions in order, with reason + outcome.
+                        # The daemon's Journal never sees M1 actions
+                        # (its loop is paused), so without this the
+                        # diary entry for the day would be empty.
+                        self.diary_decisions.append({
+                            "decision": diary_decision_text(
+                                a["action"], a.get("kwargs") or {}),
+                            "reason": a.get("reason", ""),
+                            "action": a["action"],
+                            "ok": bool(res.get("ok")),
+                            "result": str(res.get("reason") or "")[:300],
+                        })
                         self.last_action_results.append(
                             f"{a['action']} -> "
                             f"{'OK' if res.get('ok') else 'FAILED'}: "

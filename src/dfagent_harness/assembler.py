@@ -159,14 +159,50 @@ def _header(state: dict[str, Any]) -> tuple[str, str]:
 
 def _attention_items(items: list[dict[str, Any]]
                      ) -> tuple[str, str]:
-    """Render an already-built attention list (max 8 items)."""
+    """Render an already-built attention list (max 8 items).
+
+    An item with a ``briefing`` carries it inline (the situation
+    briefing + its wiki references) — before this the briefing
+    field was built by attention.build_attention and then dropped
+    here, so the model never saw the wiki slugs for the event it
+    was facing (2026-11-27: zero wiki uses in any M1 run). The
+    briefing is a few lines under its item, never a separate
+    section, so a tick with no briefed items costs nothing.
+    """
     items = items[:MAX_ATTENTION_ITEMS]
     if not items:
         return "Attention: nothing needs acting on.", "0 items"
     lines = ["Attention (most urgent first):"]
     for it in items:
         lines.append(f"  [P{it['priority']}] {it['text']}")
+        lines.extend(_briefing_lines(it.get("briefing")))
     return "\n".join(lines), f"{len(items)} items"
+
+
+def _briefing_lines(briefing: Any) -> list[str]:
+    """One briefed item's briefing as indented lines: what it is,
+    why it matters, the options, the cost of ignoring it, and the
+    wiki pages for it (slugs + the route to the full page). Empty
+    when the item has no briefing."""
+    if not isinstance(briefing, dict):
+        return []
+    out = []
+    for label, key in (("Briefing", "what"),
+                       ("Why it matters", "matters"),
+                       ("Options", "options"),
+                       ("Cost of ignoring", "cost")):
+        text = briefing.get(key)
+        if text:
+            out.append(f"    {label}: {text}")
+    refs = briefing.get("wiki") or []
+    slugs = [r.get("slug") for r in refs if r.get("slug")]
+    if slugs:
+        first = slugs[0]
+        listed = ", ".join(slugs)
+        out.append(
+            f"    Wiki: {listed} — full page: /v1/wiki/{first} "
+            f"(or search: /v1/wiki?q=<question>)")
+    return out
 
 
 def _attention(state: dict[str, Any], detector: Any,
@@ -210,6 +246,27 @@ def _status(state: dict[str, Any]) -> tuple[str, str]:
                   f"hostiles")
 
 
+def _materials(state: dict[str, Any]) -> tuple[str, str]:
+    """Exact have/need for the jobs the fort needs next (general
+    material awareness, 2026-11-27; reinforced the same day): what
+    each considered job/build needs, how much is on hand, and the
+    exact gathering fix when short — so the model sees the numbers
+    BEFORE it acts, instead of learning them from a failure. A
+    line is emitted for the action being considered whether the
+    material is covered or short; empty only when there is no
+    next job to consider or nothing is known (the section then
+    costs no tokens at all). The counts come from the same fresh
+    collect as the rest of the snapshot. The table lives in
+    materials.py; this only renders it."""
+    from . import materials as _materials_mod
+    lines = _materials_mod.requirements_for_state(state)
+    if not lines:
+        return "", ""
+    text = "Materials (have / need for the next jobs):\n" + \
+        "\n".join(f"  - {line}" for line in lines)
+    return text, f"{len(lines)} requirement(s)"
+
+
 def _stocks(state: dict[str, Any], store: Optional[Store],
             tick: Optional[int]) -> tuple[str, str]:
     stocks = state.get("stocks") or {}
@@ -231,6 +288,17 @@ def _stocks(state: dict[str, Any], store: Optional[Store],
     # query turn (M1 tick 6: three brewers enabled, no brew queued,
     # no check of whether plants existed to brew).
     head.append(f"brewable plants {_brewable_plants(stocks)}")
+    # Empty barrels and food stacks, same reason (reinforced
+    # 2026-11-27): the barrel count is the brew bottleneck and the
+    # stack count is what cooking needs (2 per easy meal) — both
+    # are exact stock the model needs before it acts, not a
+    # shortage flag. stocks.lua counts both since 2026-11-27.
+    empty_barrels = stocks.get("empty_barrels")
+    if isinstance(empty_barrels, int):
+        head.append(f"empty barrels {empty_barrels}")
+    food_stacks = stocks.get("food_stacks")
+    if isinstance(food_stacks, int):
+        head.append(f"food stacks {food_stacks}")
     lines.append("Stocks: " + (", ".join(head) if head else "none")
                  + ".")
     # Burn rates + days-remaining from the Store's trends. The
@@ -640,6 +708,43 @@ def _free_workshop_site(
     return None
 
 
+def _material_blocker_suggestion(
+        state: dict[str, Any], what: str) -> Optional[str]:
+    """The gathering fix as a suggestion, when the action ``what``
+    ("brew" or "still") is blocked by a material shortage — so the
+    suggestion never points at a job the fort cannot run. Returns
+    None when the materials are covered (or unknown).
+    General material awareness (2026-11-27): the model must know it
+    needs more materials BEFORE it acts, not after a failure."""
+    from . import materials as _materials_mod
+    stocks = state.get("stocks")
+    buildings = state.get("buildings")
+    if not isinstance(stocks, dict):
+        return None
+    if not isinstance(buildings, dict):
+        buildings = {}
+    if what == "brew":
+        shortages = _materials_mod.check_job(
+            "brew", stocks, count=1, buildings=buildings)
+        if not shortages:
+            return None
+        fixes = "; ".join(_materials_mod.format_shortage(s)
+                          for s in shortages)
+        return (f"Suggested action: gather the brewing materials "
+                f"first — {fixes}. Only then run the brew task "
+                f"(POST /v1/tasks/brew).")
+    if what == "still":
+        shortages = _materials_mod.check_workshop(
+            "still", stocks, buildings)
+        if not shortages:
+            return None
+        fixes = "; ".join(_materials_mod.format_shortage(s)
+                          for s in shortages)
+        return (f"Suggested action: gather building material first "
+                f"— {fixes}. Only then build the still.")
+    return None
+
+
 def _still_build_suggestion(
         sites: Optional[dict[str, Any]]) -> str:
     """The still-build suggestion text (shared by the low-drink
@@ -696,7 +801,13 @@ def suggest(state: dict[str, Any],
         # itself, first, and only then the brew task.
         if "drink" in text.lower() or "thirst" in text.lower():
             if not _has_workshop(state, "Still"):
+                blocked = _material_blocker_suggestion(state, "still")
+                if blocked is not None:
+                    return blocked
                 return _still_build_suggestion(sites)
+            blocked = _material_blocker_suggestion(state, "brew")
+            if blocked is not None:
+                return blocked
             return ("Suggested action: run the brew task "
                     "(POST /v1/tasks/brew) — the fort is short on "
                     "drink and brewing turns plants into drink.")
@@ -715,6 +826,9 @@ def suggest(state: dict[str, Any],
     if not _has_workshop(state, "Still"):
         drink = (state.get("stocks") or {}).get("drink_units")
         if isinstance(drink, int) and drink < 50:
+            blocked = _material_blocker_suggestion(state, "still")
+            if blocked is not None:
+                return blocked
             return _still_build_suggestion(sites)
     return None
 
@@ -757,6 +871,7 @@ def assemble(state: dict[str, Any],
     goals_text, goals_short = _goals(goals)
     status_text, status_short = _status(state)
     stocks_text, stocks_short = _stocks(state, store, tick)
+    materials_text, materials_short = _materials(state)
     units_text, units_short = _units(state)
     entities_text, entities_short = _entities(state)
     buildings_text, buildings_short = _buildings(state)
@@ -788,6 +903,8 @@ def assemble(state: dict[str, Any],
         _section("stocks", stocks_text, stocks_short, 70,
                  cut=lambda: _stocks(state, None, tick)[0].split(
                      "\n")[0]),
+        _section("materials", materials_text, materials_short, 65,
+                 cut=lambda: ""),
         _section("units", units_text, units_short, 60,
                  cut=lambda: _units_compact(state)),
         _section("entities", entities_text, entities_short, 65,

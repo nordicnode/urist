@@ -117,6 +117,16 @@ def prefetch_for_event(event_kind: str, detail: str = "") -> list[dict[str, Any]
         "strange_mood": "strange mood",
         "invasion": "siege goblin invasion defense",
         "hostile_spawn": "hostile creature combat",
+        # The kinds the attention system actually emits (2026-11-27):
+        # "hostile" is the briefing key for threat items, and
+        # low_drink/low_food are the fort's most common killers.
+        # Before this mapping all three returned [] — no wiki
+        # context was ever pre-fetched for the events the model
+        # faces every run.
+        "hostile": "hostile creature combat defense",
+        "threat": "hostile creature combat defense",
+        "low_drink": "brewing drink still alcohol",
+        "low_food": "cooking food kitchen meal",
         "citizen_new": "migrant wave",
         "unit_death": "dwarf death cause",
         "new_arrival": "migrant visitor",

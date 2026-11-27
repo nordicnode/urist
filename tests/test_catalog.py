@@ -51,6 +51,18 @@ class TestCatalogOffline(unittest.TestCase):
             # The 'client' parameter is the harness's, not the agent's.
             self.assertNotIn("client", action["params"])
 
+    def test_catalog_has_wiki_query_route(self):
+        # The wiki was missing from the catalog entirely (2026-11-27:
+        # zero wiki uses in any M1 run) — the model never knew the
+        # lookup existed. It is a query route, not an action, with an
+        # example call.
+        cat = catalog.catalog()
+        routes = {r["route"]: r for r in cat.get("query_routes", [])}
+        self.assertIn("/v1/wiki?q=<question>", routes)
+        wiki_route = routes["/v1/wiki?q=<question>"]
+        self.assertIn("brewing", wiki_route["example"]["route"])
+        self.assertIn("q", wiki_route["params"])
+
     def test_required_params_have_no_default(self):
         desc = catalog.describe("designate_dig")
         self.assertTrue(desc["params"]["box"]["required"])

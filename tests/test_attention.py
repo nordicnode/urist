@@ -180,6 +180,25 @@ class TestBuildAttention(unittest.TestCase):
         items = at.build_attention(_state(), StubDetector([]))
         self.assertEqual(items, [])
 
+    def test_low_drink_item_carries_briefing_with_wiki(self):
+        # The low-drink item is the one the model faces every run —
+        # it must carry the briefing (with wiki refs) so the
+        # snapshot can teach the model how brewing works. Before
+        # 2026-11-27 the low items had no briefing at all, and the
+        # assembler dropped the field anyway.
+        state = _state()
+        state["stocks"] = {"drink_units": 9, "food_units": 30}
+        items = at.build_attention(state, StubDetector([]))
+        kinds = [it["kind"] for it in items]
+        self.assertIn("low_drink", kinds)
+        item = items[kinds.index("low_drink")]
+        briefing = item.get("briefing")
+        self.assertIsNotNone(briefing)
+        self.assertIn("Still", briefing.get("what", ""))
+        self.assertGreater(len(briefing.get("wiki") or []), 0)
+        slugs = [w["slug"] for w in briefing["wiki"]]
+        self.assertIn("still", slugs)
+
     def test_threat_before_arrival(self):
         det = StubDetector([
             _arrival(5490, "visitor", "TROLL", (148, 65, 123),

@@ -390,6 +390,60 @@ class TestSuggest(unittest.TestCase):
         self.assertIn("NO STILL EXISTS", out)
         self.assertIn("build_workshop kind=still", out)
 
+    def test_proactive_brew_suggestion_with_still(self):
+        # M1 runs #15 and #16b: the model built the still, queued
+        # barrels and beds, and never brewed — drink fell 38 -> 34
+        # with no suggestion, because no low-drink attention item
+        # fired (drink above the warn threshold of 20) and the
+        # proactive fallback only fires when no still exists. With
+        # a still present, drink finite (< 50), and a brew
+        # possible, suggest the brew task. (The plant count is a
+        # by_material DRINK entry — brewable_plants() reads that,
+        # not a "brewable_plants" key.)
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 2}],
+            "list": [{"id": 1, "type": "Workshop",
+                      "subtype": "Carpenters"},
+                     {"id": 2, "type": "Workshop",
+                      "subtype": "Still"}]})
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["drink_units"] = 34
+        st["stocks"]["empty_barrels"] = 2
+        st["stocks"]["by_material"] = list(st["stocks"]["by_material"])
+        st["stocks"]["by_material"].append(
+            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+             "units": 35})
+        out = suggest(st, [])
+        self.assertTrue(
+            out.startswith("Suggested action: run the brew task"),
+            out)
+        self.assertNotIn("NO STILL EXISTS", out)
+
+    def test_proactive_brew_blocked_suggests_gather(self):
+        # Same setup, but no empty barrel: the suggestion must
+        # name the gathering fix as the immediate action, not a
+        # brew the fort cannot run. ("Only then run the brew
+        # task" is the deferred follow-up, so the check is on
+        # what the suggestion starts with.)
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 2}],
+            "list": [{"id": 1, "type": "Workshop",
+                      "subtype": "Carpenters"},
+                     {"id": 2, "type": "Workshop",
+                      "subtype": "Still"}]})
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["drink_units"] = 34
+        st["stocks"]["empty_barrels"] = 0
+        st["stocks"]["by_material"] = list(st["stocks"]["by_material"])
+        st["stocks"]["by_material"].append(
+            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+             "units": 35})
+        out = suggest(st, [])
+        self.assertTrue(
+            out.startswith(
+                "Suggested action: gather the brewing materials"),
+            out)
+
 
 class TestBuildingsAndStocksVisibility(unittest.TestCase):
     # Mikey, 2026-11-26: M1 ticks 1 and 4 burned idle ticks asking

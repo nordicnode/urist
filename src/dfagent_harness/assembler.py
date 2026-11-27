@@ -886,6 +886,27 @@ def suggest(state: dict[str, Any],
             if blocked is not None:
                 return blocked
             return _still_build_suggestion(sites)
+    # Proactive brew: a still exists, but drink is finite and
+    # falling, and no low-drink attention item fired (drink is
+    # above the attention warn threshold of 20). Without this the
+    # model builds the still and then drifts — M1 runs #15 and
+    # #16b both built the still, queued barrels and beds, and
+    # never brewed, while drink fell 38 -> 34. The same 50 bound
+    # as the still fallback: ~10 days at ~5/day burn. Only fires
+    # when another brew is actually possible (the blocker check
+    # accounts for brews already queued, so it never points at a
+    # brew the fort cannot run). Once drink is >= 50 the
+    # suggestion stops and the model is free for other work.
+    if _has_workshop(state, "Still"):
+        drink = (state.get("stocks") or {}).get("drink_units")
+        if isinstance(drink, int) and drink < 50:
+            blocked = _material_blocker_suggestion(state, "brew")
+            if blocked is not None:
+                return blocked
+            return ("Suggested action: run the brew task "
+                    "(POST /v1/tasks/brew) — the still is built "
+                    "and drink is finite; brewing turns plants "
+                    "into drink before the stock runs out.")
     return None
 
 

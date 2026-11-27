@@ -4,8 +4,6 @@
 
 <p align="center"><sub>Logo glyphs from <a href="https://i.imgur.com/SVAmWwD.png">Kruggsmash's tileset</a>; built by <code>assets/build-logo.py</code>.</sub></p>
 
-<h1 align="center">Urist</h1>
-
 <p align="center"><strong>An AI overseer that plays Dwarf Fortress on its own.</strong></p>
 
 <p align="center">

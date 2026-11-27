@@ -9,10 +9,12 @@ scripts/m1_driver.py directly.
 """
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location(
     "m1_driver",
@@ -634,6 +636,232 @@ class TestBuildRetryBody(unittest.TestCase):
         with self.assertRaises(ValueError):
             retry_diary.build_retry_body(
                 [{"kind": "run_start", "start_tick": 1}])
+
+
+class TestParseModelReply(unittest.TestCase):
+    """parse_model_reply is the single riskiest pure function in the
+    repo (external review section 8, 2026-11-27): it had zero tests,
+    and the C5 bug — a list kwargs reaching the query route
+    extraction outside its try and killing the run — lived exactly
+    in the data it fails to validate. Malformed-input table."""
+
+    def test_valid_reply(self):
+        reasoning, actions = m1_driver.parse_model_reply(
+            '{"reasoning": "brew", "actions": [{"action": "query", '
+            '"kwargs": {"route": "/v1/stocks"}, "reason": "check"}]}')
+        self.assertEqual(reasoning, "brew")
+        self.assertEqual(actions, [{"action": "query",
+                                    "kwargs": {"route": "/v1/stocks"},
+                                    "reason": "check"}])
+
+    def test_fenced_block(self):
+        text = ("```json\n{\"reasoning\": \"\", "
+                "\"actions\": []}\n```")
+        reasoning, actions = m1_driver.parse_model_reply(text)
+        self.assertEqual((reasoning, actions), ("", []))
+
+    def test_prose_wrapped_json(self):
+        text = ('Here is my plan: {"reasoning": "dig", "actions": '
+                '[{"action": "dig_to_completion", "kwargs": {}}]} '
+                'Hope that helps.')
+        reasoning, actions = m1_driver.parse_model_reply(text)
+        self.assertEqual(reasoning, "dig")
+        self.assertEqual(len(actions), 1)
+
+    def test_non_dict_kwargs_raises(self):
+        # C5: a list kwargs once sailed through to the query route
+        # extraction and killed the run with AttributeError.
+        text = '{"actions": [{"action": "query", '
+        '"kwargs": ["/v1/stocks"]}]}'
+        with self.assertRaises(ValueError):
+            m1_driver.parse_model_reply(text)
+
+    def test_non_string_action_raises(self):
+        text = '{"actions": [{"action": ["query"], "kwargs": {}}]}'
+        with self.assertRaises(ValueError):
+            m1_driver.parse_model_reply(text)
+
+    def test_non_list_actions_raises(self):
+        with self.assertRaises(ValueError):
+            m1_driver.parse_model_reply(
+                '{"actions": {"action": "query"}}')
+
+    def test_non_object_reply_raises(self):
+        with self.assertRaises(ValueError):
+            m1_driver.parse_model_reply('[{"action": "query"}]')
+
+    def test_reply_not_json_raises(self):
+        with self.assertRaises(ValueError):
+            m1_driver.parse_model_reply("no json here at all")
+
+    def test_malformed_action_skipped(self):
+        # A non-dict action, or one without an "action" key, is
+        # skipped — only a well-formed action with a bad TYPE
+        # raises (a confused model is visible; a junk entry is not).
+        text = ('{"actions": [42, {"nope": true}, '
+                '{"action": "query", "kwargs": {}}]}')
+        _reasoning, actions = m1_driver.parse_model_reply(text)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["action"], "query")
+
+    def test_missing_kwargs_defaults_to_empty_dict(self):
+        _reasoning, actions = m1_driver.parse_model_reply(
+            '{"actions": [{"action": "query"}]}')
+        self.assertEqual(actions[0]["kwargs"], {})
+
+
+class _ScriptDaemon(_StubDaemon):
+    """_StubDaemon plus a scripted snapshot() sequence: each entry
+    is a dict to return or an Exception to raise (the last entry
+    repeats). pause_daemon_loop and run_task are stubbed."""
+
+    def __init__(self, script, **kw):
+        super().__init__(**kw)
+        self._script = list(script)
+        self._calls = 0
+        self.tasks_run = []
+
+    def snapshot(self):
+        entry = self._script[min(self._calls, len(self._script) - 1)]
+        self._calls += 1
+        if isinstance(entry, Exception):
+            raise entry
+        return entry
+
+    def pause_daemon_loop(self):
+        return {"ok": True}
+
+    def run_task(self, name):
+        self.tasks_run.append(name)
+        return {"ok": True, "reason": f"task {name} ok"}
+
+
+def _good_snap(tick=100000, suggestion=None):
+    """A snapshot the tick loop accepts: tick below end_tick, 7
+    citizens alive, optional suggestion text."""
+    snap = {"tick": tick, "date": "125-04-01", "text": "",
+            "sections": {
+                "status": "Population: 7 citizens (0 idle, "
+                          "0 wounded), 25 animals, 0 hostiles",
+                "stocks": "Stocks: drink 38, food 32, wood 124, "
+                          "stone 0, brewable plants 1, empty "
+                          "barrels 7, food stacks 7."}}
+    if suggestion is not None:
+        snap["suggestion"] = suggestion
+    return snap
+
+
+class TestTickLoopFailureAccounting(unittest.TestCase):
+    """The M1 tick loop's failure accounting (external review
+    section 8, 2026-11-27): the snapshot-retry cap (H1), the
+    five-failure model cap, and the stall fallback. These were
+    validated only by live runs; the loop is driven here with a
+    scripted daemon. The Store clear inside run() is stubbed so
+    the test never touches the real world.db."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _driver(self, daemon, max_ticks=100):
+        drv = m1_driver.M1Driver.__new__(m1_driver.M1Driver)
+        drv.args = SimpleNamespace(mock=True, days=1, window=150,
+                                   max_ticks=max_ticks, model="x",
+                                   out=str(Path(self._tmp.name)
+                                           / "log.jsonl"))
+        drv.out = Path(drv.args.out)
+        drv.daemon = daemon
+        drv.tick_no = 0
+        drv.stall_ticks = 0
+        drv.consecutive_model_failures = 0
+        drv.consecutive_snapshot_failures = 0
+        drv.query_results = []
+        drv.last_action_results = []
+        drv.actions_taken = 0
+        drv.idle_ticks = 0
+        drv.diary_decisions = []
+        drv.snap0 = None
+        drv.citizens_start_fresh = None
+        return drv
+
+    def _run(self, drv):
+        # run() clears snapshot baselines via the real Store and
+        # sleeps 5 s per snapshot failure — both stubbed out.
+        store = mock.Mock()
+        store.return_value.clear_snapshots.return_value = 0
+        with mock.patch("dfagent_harness.store.Store", store), \
+                mock.patch("dfagent_harness.store."
+                           "default_world_db_path",
+                           return_value="/tmp/nope.db"), \
+                mock.patch.object(m1_driver.time, "sleep"):
+            return drv.run()
+
+    def _log_kinds(self, drv):
+        out = Path(drv.args.out)
+        if not out.exists():
+            return []
+        return [json.loads(line)["kind"]
+                for line in out.read_text().splitlines() if line]
+
+    def test_snapshot_cap_ends_run_after_five(self):
+        # H1: DF dead + daemon up = every snapshot fails. The old
+        # code retried forever; five consecutive failures end the
+        # run non-zero, mirroring the model-failure rule.
+        import json as _json
+        daemon = _ScriptDaemon(
+            [_good_snap()] + [RuntimeError("daemon down")] * 10,
+            fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])
+        drv = self._driver(daemon)
+        self.assertEqual(self._run(drv), 2)
+        kinds = self._log_kinds(drv)
+        self.assertIn("run_end", kinds)
+        out = Path(drv.args.out).read_text()
+        self.assertIn("snapshot failed 5 ticks in a row", out)
+
+    def test_snapshot_failures_reset_on_success(self):
+        # Four failures, one good tick, four more failures: the
+        # counter resets on success, so the run does NOT end — it
+        # runs to max_ticks instead.
+        daemon = _ScriptDaemon(
+            [_good_snap(),
+             RuntimeError("down"), RuntimeError("down"),
+             RuntimeError("down"), RuntimeError("down"),
+             _good_snap(),
+             RuntimeError("down"), RuntimeError("down"),
+             RuntimeError("down"), RuntimeError("down"),
+             _good_snap()],
+            fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])
+        drv = self._driver(daemon, max_ticks=10)
+        drv._model_decide = lambda snap: ("mock", [])
+        drv._advance_clock = lambda target, current: target
+        self.assertEqual(self._run(drv), 0)
+
+    def test_model_failure_cap_ends_run_after_five(self):
+        # Five consecutive model failures end the run (exit 2),
+        # mirroring the snapshot cap.
+        daemon = _ScriptDaemon(
+            [_good_snap()],
+            fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])
+        drv = self._driver(daemon, max_ticks=100)
+        drv._model_decide = mock.Mock(
+            side_effect=RuntimeError("model down"))
+        drv._advance_clock = lambda target, current: target
+        self.assertEqual(self._run(drv), 2)
+        out = Path(drv.args.out).read_text()
+        self.assertIn("model failed 5 ticks in a row", out)
+
+    def test_stall_fallback_runs_suggestion(self):
+        # Six idle ticks with no model actions: the fallback runs
+        # the snapshot's suggestion (task:brew) via the daemon.
+        daemon = _ScriptDaemon(
+            [_good_snap(
+                suggestion="Suggested action: run the brew task")],
+            fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])
+        drv = self._driver(daemon, max_ticks=7)
+        drv._model_decide = lambda snap: ("mock", [])
+        drv._advance_clock = lambda target, current: target
+        self.assertEqual(self._run(drv), 0)
+        self.assertEqual(daemon.tasks_run, ["brew"])
 
 
 if __name__ == "__main__":

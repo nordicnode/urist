@@ -229,8 +229,23 @@ def parse_model_reply(text: str) -> tuple[str, list[dict]]:
     for a in actions:
         if not isinstance(a, dict) or "action" not in a:
             continue
-        clean.append({"action": str(a["action"]),
-                      "kwargs": a.get("kwargs") or {},
+        # Validate the whole action: a non-string name or a
+        # non-dict kwargs must fail the parse (and end the TICK
+        # via the model-failure path), never reach the run loop —
+        # a list kwargs once reached the query route extraction
+        # outside its try and killed the whole run with an
+        # AttributeError (2026-11-27, external review C5).
+        if not isinstance(a["action"], str):
+            raise ValueError(
+                "model reply action name is not a string: "
+                f"{str(a['action'])[:200]}")
+        kwargs = a.get("kwargs") or {}
+        if not isinstance(kwargs, dict):
+            raise ValueError(
+                "model reply action kwargs is not an object: "
+                f"{str(kwargs)[:200]}")
+        clean.append({"action": a["action"],
+                      "kwargs": kwargs,
                       "reason": str(a.get("reason", ""))[:300]})
     return reasoning, clean
 
@@ -505,6 +520,7 @@ class M1Driver:
         self.tick_no = 0
         self.stall_ticks = 0
         self.consecutive_model_failures = 0
+        self.consecutive_snapshot_failures = 0
         self.query_results: list[str] = []
         self.catalog_text: str | None = None
         self.actions_taken = 0
@@ -951,8 +967,21 @@ class M1Driver:
                 return 0
             try:
                 snap = self.daemon.snapshot()
+                self.consecutive_snapshot_failures = 0
             except Exception as exc:
-                self._log("tick_error", error=f"snapshot failed: {exc}")
+                # Mirror the model-failure rule (H1, 2026-11-27):
+                # if DF dies while the daemon stays up, every
+                # snapshot fails and the old code retried forever
+                # (max-ticks is disabled by default). Five
+                # consecutive failures end the run non-zero.
+                self.consecutive_snapshot_failures += 1
+                self._log("tick_error",
+                          error=f"snapshot failed: {exc}",
+                          consecutive=self.consecutive_snapshot_failures)
+                if self.consecutive_snapshot_failures >= 5:
+                    self._log("run_end",
+                              reason="snapshot failed 5 ticks in a row")
+                    return 2
                 time.sleep(5)
                 continue
             # The observation is logged in full (snapshot text +
@@ -1019,8 +1048,16 @@ class M1Driver:
             for a in actions:
                 (queries if a["action"] == "query" else real).append(a)
             for q in queries[:3]:
-                route = (q.get("kwargs") or {}).get("route", "")
+                route = ""
                 try:
+                    # Inside the try: the route extraction itself
+                    # can raise (a non-dict kwargs once called
+                    # .get on a list here, outside the try, and
+                    # the AttributeError escaped run() and killed
+                    # the run — 2026-11-27, external review C5).
+                    # parse_model_reply now validates kwargs, so
+                    # this is defence in depth.
+                    route = (q.get("kwargs") or {}).get("route", "")
                     res = self.daemon.query(route)
                     self.query_results.append(
                         f"{route} -> {json.dumps(res)[:2000]}")
@@ -1041,7 +1078,7 @@ class M1Driver:
                     parsed = parse_suggestion(snap.get("suggestion"))
                     if parsed is not None:
                         kind, name = parsed
-                        self._log("fallback", kind=kind, name=name)
+                        self._log("fallback", task_kind=kind, name=name)
                         try:
                             if kind == "task":
                                 res = self.daemon.run_task(name)

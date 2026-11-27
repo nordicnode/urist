@@ -605,11 +605,13 @@ class M1Driver:
             self._log("diary", error=str(exc)[:300])
 
     # The catalog cap: the compact catalog (no full docstrings)
-    # is ~12K chars for 14 actions. The cap is a safety net, not a
-    # target — the catalog is a fixed cost and the prompt budget is
-    # enforced by the assembler. If the catalog ever outgrows the
-    # cap, whole actions are dropped (never a mid-string cut), and
-    # the omitted actions are named so the model can query for them.
+    # is ~12K chars for 14 actions plus the composed tasks. The cap
+    # is a safety net, not a target — the catalog is a fixed cost
+    # and the prompt budget is enforced by the assembler. If the
+    # catalog ever outgrows the cap, whole actions are dropped
+    # (never a mid-string cut), and the omitted actions are named
+    # so the model can query for them. The tasks section is never
+    # dropped: it is small, and a task is the preferred way to act.
     CATALOG_MAX_CHARS = 20000
 
     def _catalog(self) -> str:

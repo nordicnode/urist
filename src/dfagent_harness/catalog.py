@@ -313,7 +313,10 @@ QUERY_ROUTES: dict[str, dict[str, Any]] = {
 
 
 def describe(name: str) -> dict[str, Any] | None:
-    """One action's description (None when the name is unknown)."""
+    """One action's description (None when the name is unknown).
+    A 'task:<name>' name describes the composed task."""
+    if name.startswith("task:"):
+        return describe_task(name[len("task:"):])
     fn = ACTIONS.get(name)
     if fn is None:
         return None
@@ -354,6 +357,7 @@ def catalog() -> dict[str, Any]:
     return {
         "actions": [a for a in actions if a is not None],
         "count": len(actions),
+        "tasks": describe_tasks(),
         "query_routes": [QUERY_ROUTES[name]
                          for name in sorted(QUERY_ROUTES)],
         "how_to_call": (
@@ -362,10 +366,91 @@ def catalog() -> dict[str, Any]:
             "the harness supplies it). Every action returns "
             "{ok, reason, error_kind, fix, before, after, "
             "took_ms}. A failed action carries 'fix': the "
-            "corrective action + what it needs."),
+            "corrective action + what it needs. A composed task "
+            "is called the same way, with the action name "
+            "'task:<name>' and no parameters: the harness runs "
+            "the whole chain (find the workshop, queue the job, "
+            "wait for it) and reports the outcome."),
         "note": (
             "This catalog is built from the harness code itself "
             "(parameter names, types and defaults are the real "
             "ones). If a parameter's legal values are listed in "
-            "'constraints', use exactly those."),
+            "'constraints', use exactly those. Prefer a composed "
+            "task over the raw action when one exists for the "
+            "goal: 'task:brew' does the whole brew (find the "
+            "still, queue the job, wait) where 'queue_job brew' "
+            "only queues it."),
     }
+
+
+# The composed tasks (daemon.TASK_DEFS), as the model sees them.
+# A task is one action name, 'task:<name>', with no parameters:
+# the harness picks the workshop or plot and runs the whole chain.
+# The 'about' line and the precondition come from the task's own
+# implementation (daemon.run_task), not from the game's wiki — a
+# task whose precondition is unmet fails fast and names it.
+# The import is lazy (as in server.py): daemon.py is heavy and
+# imports server.py at module level.
+_TASK_NOTES: dict[str, dict[str, str]] = {
+    "brew": {
+        "about": ("Brew drink at a Still: find the still, queue "
+                  "the brew job, wait for it to finish."),
+        "needs": ("a Still workshop; 1 brewable plant + 1 empty "
+                  "barrel or pot per brew (5 drink + 1 seed back)"),
+    },
+    "cook": {
+        "about": ("Cook a meal at a Kitchen: find the kitchen, "
+                  "queue the cooking job, wait for it to finish."),
+        "needs": ("a Kitchen workshop; 2 distinct food stacks "
+                  "for an easy meal (3 fine, 4 lavish)"),
+    },
+    "make_bed": {
+        "about": ("Make a bed at a Carpenter's workshop: find "
+                  "the workshop, queue the job, wait for it."),
+        "needs": ("a Carpenter's workshop; 1 wood"),
+    },
+    "make_barrel": {
+        "about": ("Make a barrel at a Carpenter's workshop: "
+                  "find the workshop, queue the job, wait."),
+        "needs": ("a Carpenter's workshop; 1 wood"),
+    },
+    "gather": {
+        "about": ("Gather plants on the surface: find shrubs, "
+                  "designate the gathering box, wait for the "
+                  "gathering jobs to finish."),
+        "needs": "shrubs on the surface (the harness finds them)",
+    },
+    "farm": {
+        "about": ("Plant a farm plot: pick a crop for the plot's "
+                  "light, biome and season, set it, wait for "
+                  "PlantSeeds jobs to appear and finish."),
+        "needs": ("a built farm plot; seeds on hand for a crop "
+                  "that grows there"),
+    },
+}
+
+
+def describe_task(name: str) -> dict[str, Any] | None:
+    """One composed task's description (None when unknown). The
+    name is the task name WITHOUT the 'task:' prefix."""
+    from .daemon import TASK_DEFS
+
+    if name not in TASK_DEFS:
+        return None
+    notes = _TASK_NOTES.get(name, {})
+    return {
+        "name": f"task:{name}",
+        "about": notes.get("about", f"Run the {name} task."),
+        "params": {},
+        "constraints": ([f"needs {notes['needs']}"]
+                        if "needs" in notes else []),
+    }
+
+
+def describe_tasks() -> list[dict[str, Any]]:
+    """Every composed task, in name order. Built from TASK_DEFS
+    so the catalog cannot list a task the daemon cannot run."""
+    from .daemon import TASK_DEFS
+
+    return [d for d in (describe_task(n) for n in sorted(TASK_DEFS))
+            if d is not None]

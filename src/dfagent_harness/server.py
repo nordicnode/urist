@@ -1488,9 +1488,11 @@ def create_server(
             desc = catalog_mod.describe(name)
             if desc is None:
                 from .actions import ACTIONS
+                from .daemon import TASK_DEFS
                 _error(self, 404, "UNKNOWN_ACTION",
                        f"no action named {name!r} — choose from: "
-                       f"{', '.join(sorted(ACTIONS))}")
+                       f"{', '.join(sorted(ACTIONS))} or a task: "
+                       f"{', '.join('task:' + t for t in sorted(TASK_DEFS))}")
                 return
             _json(self, 200, desc)
 
@@ -1606,7 +1608,15 @@ def create_server(
                 return
             wait = float(body.get("wait", 120))
             count = int(body.get("count", 1))
-            out = daemon.run_task(name, wait=wait, count=count)
+            kwargs: dict[str, Any] = {}
+            if body.get("building_id") is not None:
+                kwargs["building_id"] = int(body["building_id"])
+            if body.get("plant") is not None:
+                kwargs["plant"] = str(body["plant"])
+            if body.get("season") is not None:
+                kwargs["season"] = int(body["season"])
+            out = daemon.run_task(name, wait=wait, count=count,
+                                  **kwargs)
             _json(self, 200, out)
 
         # -- actions ----------------------------------------------------

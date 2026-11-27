@@ -148,6 +148,52 @@ class TestCatalogOffline(unittest.TestCase):
         self.assertIsNone(catalog.describe("bogus_action"))
 
 
+class TestCatalogTasks(unittest.TestCase):
+    """The catalog lists the composed tasks (GOAL.md step 5, layer
+    2): runs #15/#16 used raw 'queue_job brew' instead of the
+    suggested brew task because the catalog — the model's only map
+    of what it can do — never named 'task:brew' as a valid action.
+    The task list is built from daemon.TASK_DEFS, so it cannot
+    list a task the daemon cannot run."""
+
+    def test_catalog_lists_every_task(self):
+        from dfagent_harness.daemon import TASK_DEFS
+
+        cat = catalog.catalog()
+        names = [t["name"] for t in cat["tasks"]]
+        self.assertEqual(
+            names, [f"task:{n}" for n in sorted(TASK_DEFS)])
+
+    def test_every_task_has_about_and_precondition(self):
+        for task in catalog.catalog()["tasks"]:
+            self.assertGreater(len(task["about"]), 10, task["name"])
+            self.assertIn("params", task)
+            self.assertEqual(task["params"], {},
+                             task["name"])
+            # The precondition names what the task needs, so the
+            # model can check it before acting (material awareness).
+            self.assertTrue(task["constraints"], task["name"])
+            self.assertTrue(
+                any("needs" in c for c in task["constraints"]),
+                task["name"])
+
+    def test_task_names_match_driver_parsing(self):
+        # The driver routes an action to run_task exactly when its
+        # name starts with 'task:' (scripts/m1_driver.py) — the
+        # catalog's task names must carry that prefix.
+        for task in catalog.catalog()["tasks"]:
+            self.assertTrue(task["name"].startswith("task:"),
+                            task["name"])
+
+    def test_describe_task(self):
+        desc = catalog.describe("task:brew")
+        self.assertIsNotNone(desc)
+        self.assertEqual(desc["name"], "task:brew")
+        self.assertIn("Still", desc["about"])
+        self.assertIsNone(catalog.describe("task:no_such_task"))
+        self.assertIsNone(catalog.describe_task("no_such_task"))
+
+
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestCatalogLive(unittest.TestCase):
     """The catalog served live (no game read — it works even with

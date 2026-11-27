@@ -193,6 +193,14 @@ def parse_distress(reason: Any) -> str | None:
             f"({', '.join(needs)}).")
 
 
+# A queue_job decision phrase, as diary_decision_text builds it:
+# "queue make_bed x1 at building #7" or "queue make_bed x1 at
+# the Carpenters workshop #7". The feed aggregates queued jobs by
+# (workshop, job) instead of deduping them, so two x1 queues are
+# two jobs, not one story beat.
+_QUEUE_PHRASE = re.compile(r"^queue (\S+) x(\d+) at (.+)$")
+
+
 def _finalize_decisions(decisions: list[dict[str, Any]]
                         ) -> tuple[list[dict[str, Any]],
                                    list[str]]:
@@ -216,13 +224,23 @@ def _finalize_decisions(decisions: list[dict[str, Any]]
       True/False/None, so the renderer sees the outcomes. An
       outcome-less repeat never creates a beat — it adds nothing
       to a decision already told.
+    * queue_job decisions AGGREGATE instead of deduping: two
+      "queue make_bed x1 at building #7" actions are two beds
+      queued, not one. They group by (workshop, job, outcome),
+      summing the counts, so the feed can say "make_bed x2" and
+      the diary cannot compress two different jobs into "set one
+      job running". A group whose outcome changed is kept a
+      second time, flagged as a retry, like any other decision.
 
     Idempotent: re-finalizing an already-finalized list changes
     nothing (the log records are already gone, the dedup is
-    stable)."""
+    stable, and an aggregated phrase re-parses to the same
+    group)."""
     kept: list[dict[str, Any]] = []
     kept_ok: dict[str, set] = {}
     observations: list[str] = []
+    queue_groups: dict[tuple, dict[str, Any]] = {}
+    queue_counts: dict[tuple, int] = {}
     for dec in decisions or []:
         action = dec.get("action") or ""
         if action in LOG_ACTIONS:
@@ -236,6 +254,28 @@ def _finalize_decisions(decisions: list[dict[str, Any]]
             continue
         ok = dec.get("ok")
         ok = None if ok is None else bool(ok)
+        if action == "queue_job":
+            m = _QUEUE_PHRASE.match(phrase)
+            if m:
+                job, count, loc = (m.group(1), int(m.group(2)),
+                                   m.group(3))
+                key = (loc, job, ok)
+                if key in queue_groups:
+                    queue_counts[key] += count
+                    queue_groups[key]["decision"] = (
+                        f"queue {job} x{queue_counts[key]} "
+                        f"at {loc}")
+                    continue
+                entry = dict(dec)
+                entry["decision"] = phrase
+                entry["ok"] = ok
+                if any(k[0] == loc and k[1] == job
+                       for k in queue_groups):
+                    entry["retry"] = True
+                queue_groups[key] = entry
+                queue_counts[key] = count
+                kept.append(entry)
+                continue
         oks = kept_ok.setdefault(phrase, set())
         if ok in oks:
             continue  # same decision, same outcome — already told
@@ -743,6 +783,59 @@ def open_threads(store: Any, day_start_tick: int,
     return threads
 
 
+def _group_counts(dwarves: list[dict[str, Any]]
+                  ) -> list[dict[str, Any]]:
+    """Pre-computed counts for every condition the feed lists, so
+    the diary AI reads the number instead of inferring it from a
+    list of names (run 060346: the feed listed six wounded dwarves
+    and the AI wrote "every dwarf ... carrying an injury" — six of
+    seven is six, not all). Each group carries the count, the
+    total, the names in the group, and the names NOT in it — the
+    complement is what stops the overgeneralization (Ral is the
+    one dwarf not wounded). Groups with count 0 are still listed
+    (the validator needs them: "none wounded" is true only when
+    the count really is 0); the prompt renders only count > 0."""
+    total = len(dwarves)
+
+    def _stressed(rec: dict[str, Any]) -> bool:
+        cat = (rec.get("stress") or {}).get("category")
+        return (isinstance(cat, int) and cat != -1 and cat <= 1)
+
+    def _thirsty(rec: dict[str, Any]) -> bool:
+        return any("drink" in (n.get("need") or "")
+                   for n in rec["needs"])
+
+    def _hungry(rec: dict[str, Any]) -> bool:
+        return any(any(w in (n.get("need") or "")
+                       for w in ("eat", "food", "meal"))
+                   for n in rec["needs"])
+
+    groups = [
+        ("wounded", "Wounded", "Not wounded",
+         lambda r: r["wounds"] > 0),
+        ("idle", "Idle", "Working",
+         lambda r: not r["job"]),
+        ("stressed", "Stressed", "Not stressed", _stressed),
+        ("mood", "In a mood", "Not in a mood",
+         lambda r: r["mood"] != "none"),
+        ("unmet_needs", "Going without something", "Needs met",
+         lambda r: bool(r["needs"])),
+        ("thirsty", "Thirsty", "Not thirsty", _thirsty),
+        ("hungry", "Hungry", "Not hungry", _hungry),
+    ]
+    out = []
+    for key, label, complement, pred in groups:
+        names = [r["name"] for r in dwarves if pred(r)]
+        out.append({
+            "key": key, "label": label, "complement": complement,
+            "count": len(names), "total": total,
+            "names": names,
+            "not_names": [r["name"] for r in dwarves
+                          if not pred(r)],
+        })
+    return out
+
+
 def build_diary_feed(store: Any, journal: Any,
                      day_start_tick: int,
                      fort_name: str = "",
@@ -785,7 +878,10 @@ def build_diary_feed(store: Any, journal: Any,
                         "changed": bool(diff_unit_samples(
                             prev_r, latest)),
                     }
-        rec = dwarf_record(curr, changes, related)
+        rec = dwarf_record(curr, changes, related,
+                           prev_relations=(
+                               prev.get("relations")
+                               if prev else None))
         rec["featured"] = (
             rec["significance"] >= FEATURE_THRESHOLD
             or uid in featured_ids)
@@ -793,6 +889,7 @@ def build_diary_feed(store: Any, journal: Any,
     dwarves.sort(key=lambda r: (not r["featured"],
                                 -r["significance"],
                                 r["name"]))
+    counts = _group_counts(dwarves)
     recent: list[dict[str, str]] = []
     if state_dir is not None:
         md = diary_md_path(state_dir)
@@ -814,7 +911,8 @@ def build_diary_feed(store: Any, journal: Any,
             recent = recent[-3:]
     threads = open_threads(store, day_start_tick, year)
     return {"summary": summary, "dwarves": dwarves,
-            "recent_entries": recent, "threads": threads}
+            "recent_entries": recent, "threads": threads,
+            "group_counts": counts}
 
 
 _DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You write one diary entry per in-game day, in the voice of a tired, dry-witted overseer chronicling their dwarves — Boatmurdered-style: a story about the dwarves as people, not a ledger and not a list.
@@ -822,6 +920,9 @@ _DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You w
 RULES — break none of them:
 - Write narrative prose in the first person ("I"), 150-300 words, a few paragraphs. Never a bullet list, never a table, never "I decided to ... It worked."
 - Every claim must come from the facts supplied below. Never invent an event, a name, a number, or a death that is not in the facts. If the facts do not say what happened to a dwarf, do not guess — leave them out or say their fate is unclear.
+- Count carefully. When you say how many dwarves share a condition — wounded, stressed, thirsty, in a mood — name exactly which ones, and claim ALL of them only if the facts say all of them. Six wounded out of seven is six, not every dwarf. A dwarf the facts do not list as wounded is not wounded.
+- Time is in the facts. A fact the feed marks pre-existing, long-standing, ongoing, or "since" a date did NOT happen today — never write that it happened today, was found today, or is new. Only a fact the feed marks "new today", or a change the feed lists for today, happened today. A dwarf's god, a long-standing bond, and a wound from an earlier day are background, not today's events.
+- Do not compress distinct actions into one. If the feed lists two different actions — two job types, two workshops, a build and a queue — name both, with their counts. "Set one job running" for two queued jobs is wrong; say which jobs, how many of each, and at which workshop.
 - The recent entries are from EARLIER days and may describe a different telling of this fort's story. Never carry a claim forward from a recent entry unless TODAY'S facts confirm it. If a past entry says an attempt failed, it stays failed unless today's facts say it succeeded. Name a dwarf as doing a job only if today's facts name them doing it — never because an old entry named them.
 - The entry is ABOUT THE DWARVES: their moods, stress, wounds, needs, relationships, and what happened to them today. The stocks are a ledger line at most — one short sentence, never the story.
 - Continue any open thread that is still true (a wound, a stressed dwarf, a strange mood) and note when one closes. Refer back to the recent entries when a story arcs across days.
@@ -866,7 +967,14 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         parts.append("Something hostile came too close today.")
     for obs in summary.get("observations") or []:
         parts.append("Noted: " + obs)
+    # Queued jobs group by workshop, with counts per job type:
+    # "Queued at the Carpenters workshop #7: make_bed x1,
+    # make_barrel x2 (3 jobs total)". Two different jobs are two
+    # facts, never compressed into "set one job running". A job
+    # that did not work keeps its outcome on its own item.
     dec_phrases = []
+    queue_groups: dict[str, list[tuple[str, int, str]]] = {}
+    queue_order: list[str] = []
     for dec in summary["decisions"]:
         phrase = clean_diary_text(
             dec.get("decision") or dec.get("action") or "")
@@ -875,11 +983,55 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         outcome = ("worked" if dec.get("ok") is True
                    else "did not work" if dec.get("ok") is False
                    else "outcome unknown")
+        if dec.get("action") == "queue_job":
+            m = _QUEUE_PHRASE.match(phrase)
+            if m:
+                loc = m.group(3)
+                if loc not in queue_groups:
+                    queue_groups[loc] = []
+                    queue_order.append(loc)
+                queue_groups[loc].append(
+                    (m.group(1), int(m.group(2)), outcome))
+                continue
         dec_phrases.append(f"{phrase} ({outcome})")
+    for loc in queue_order:
+        jobs = queue_groups[loc]
+        total = sum(n for _, n, _ in jobs)
+        job_bits = ", ".join(
+            f"{j} x{n}" if o == "worked" else f"{j} x{n} ({o})"
+            for j, n, o in jobs)
+        dec_phrases.append(
+            f"Queued at {loc}: {job_bits} ({total} job"
+            f"{'s' if total > 1 else ''} total)")
     if dec_phrases:
         parts.append("What I did today: " + "; ".join(dec_phrases) + ".")
+    # Pre-computed counts: the AI reads the number instead of
+    # inferring it from a list of names. The complement (who is
+    # NOT in the group) is the point — it is what stops "every
+    # dwarf is wounded" when six of seven are.
+    count_lines = []
+    for g in feed.get("group_counts") or []:
+        if not g["count"]:
+            continue
+        line = (f"{g['label']}: {g['count']} of {g['total']} — "
+                f"{', '.join(g['names'])}")
+        if g["count"] < g["total"]:
+            line += f". {g['complement']}: {', '.join(g['not_names'])}"
+        count_lines.append(line)
+    if count_lines:
+        parts.append(
+            "Counts (read these — do not recount from the lists "
+            "below):\n" + "\n".join(count_lines))
     # The dwarves: featured first, each with their changes and
     # their personal life. A stable dwarf gets one line.
+    # Wound threads carry "since" (how long the wound has been
+    # true) — a pre-existing wound is background, not today's
+    # event. A wound that appeared today is already named by the
+    # change text ("was wounded"), so the line only needs the
+    # since-date for the pre-existing case.
+    wound_since = {t["subject"]: t["since"]
+                   for t in feed["threads"]
+                   if t["kind"] == "wounded" and t.get("since")}
     dwarf_lines = []
     for rec in feed["dwarves"]:
         bits = [f"{rec['name']} ({rec['profession'] or 'dwarf'})"]
@@ -889,16 +1041,31 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         if stress_w and stress_w not in ("content",):
             bits.append(f"{stress_w}")
         if rec["wounds"]:
-            bits.append(
-                f"{rec['wounds']} wound{'s' if rec['wounds'] > 1 else ''}")
+            w = (f"{rec['wounds']} wound"
+                 f"{'s' if rec['wounds'] > 1 else ''}")
+            wound_new = any(c["kind"] == "wound_new"
+                            for c in rec["changes"])
+            if not wound_new:
+                since = wound_since.get(rec["name"])
+                w += (f" (since {since})" if since
+                      else " (since before today)")
+            bits.append(w)
         for n in rec["needs"]:
-            bits.append(f"going without {n['need']}")
+            need_new = any(
+                c["kind"] == "need_unmet"
+                and n["need"] in c["text"]
+                for c in rec["changes"])
+            bits.append(f"going without {n['need']}"
+                        + ("" if need_new
+                           else " (ongoing, not new today)"))
         if rec["job"]:
             bits.append(f"working as {rec['job']}")
         for ch in rec["changes"]:
             bits.append(ch["text"])
         for rel in rec["relations"]:
             rbits = f"{rel['type']} {rel['name']}"
+            word = ("devotion" if rel["type"] == "deity"
+                    else "bond")
             if rel.get("in_fort"):
                 if rel.get("mood") and rel["mood"] != "none":
                     rbits += f" (in a {rel['mood']} mood)"
@@ -906,8 +1073,14 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
                     rbits += f" ({rel['stress']})"
                 if rel.get("changed"):
                     rbits += " — changed today"
+                rbits += (" (new today)" if rel.get("new_today")
+                          else f" (a long-standing {word}, "
+                          "not new today)")
             else:
-                rbits += " (not in the fort)"
+                rbits += (" (not in the fort; new today)"
+                          if rel.get("new_today")
+                          else " (not in the fort; a long-standing "
+                          f"{word}, not new today)")
             bits.append("close to " + rbits)
         marker = "FEATURED" if rec.get("featured") else "stable"
         dwarf_lines.append(f"[{marker}] " + "; ".join(bits) + ".")
@@ -971,6 +1144,67 @@ def _dwarf_named(body: str, name: str,
     return False
 
 
+# The feed's pre-computed group counts, with the words an entry
+# would use to claim the condition. The validator checks "all /
+# every / none" claims against these counts — the backstop for the
+# run-060346 overgeneralization (six of seven wounded, entry said
+# "every dwarf ... carrying an injury"). The patterns are narrow
+# on purpose: the quantifier and the condition must be in the same
+# short clause (no comma, no sentence break between them) and the
+# condition must follow a linking verb ("are wounded", "was
+# stressed", "is carrying an injury") — so "all seven dwarves
+# gathered around the wounded one" (no linking verb) and "all
+# seven are here, and six are wounded" (comma) do not fire. An
+# exception in the gap ("every dwarf but Ral is wounded") is a
+# TRUE claim when six of seven are wounded, so the gap refuses
+# to cross but/except/save. A fired check rejects the entry,
+# like every other validator rule.
+_GROUP_KEYWORDS = {
+    "wounded": r"(?:wound(?:s|ed)?|injur(?:y|ies|ed)?)",
+    "idle": r"idle",
+    "stressed": r"stress(?:ed|ful)?",
+    "mood": r"mood",
+    "thirsty": r"thirst(?:y|ier)?",
+    "hungry": r"hungr(?:y|ier)?",
+}
+
+
+def _check_group_claims(body: str, feed: dict[str, Any]) -> None:
+    """Raise ValueError when the entry claims all (or none) of the
+    dwarves share a condition the feed's counts contradict."""
+    counts = {g["key"]: g for g in feed.get("group_counts") or []}
+    if not counts:
+        return
+    lowered = body.lower()
+    # The gap between the quantifier and the verb must not contain
+    # an exception ("but Ral", "except Ral", "all but one") —
+    # "every dwarf but Ral is wounded" is TRUE when six of seven
+    # are wounded, and the corrected 04-01 entry says exactly
+    # that. The tempered token refuses to cross but/except/save.
+    gap = r"(?:(?!\b(?:but|except|save)\b)[^.!?,\n]){0,45}"
+    for key, keyword in _GROUP_KEYWORDS.items():
+        g = counts.get(key)
+        if g is None:
+            continue
+        verb = (r"(?:are|were|is|was|carrying|have|has|had)\s+"
+                r"(?:all\s+)?(?:carrying\s+|an?\s+)?")
+        if g["count"] < g["total"]:
+            pat = (rf"\b(all|every)\b{gap}\b{verb}"
+                   rf"(?:{keyword})\b")
+            if re.search(pat, lowered):
+                raise ValueError(
+                    f"diary AI entry claims all dwarves are "
+                    f"{key} but only {g['count']} of {g['total']} "
+                    f"are")
+        if g["count"] > 0:
+            pat = (r"\b(none|no dwarf|not a single dwarf|"
+                   rf"not one dwarf)\b{gap}\b(?:{keyword})\b")
+            if re.search(pat, lowered):
+                raise ValueError(
+                    f"diary AI entry claims no dwarf is {key} "
+                    f"but {g['count']} of {g['total']} are")
+
+
 def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
     """Validate the model's diary prose. Returns the cleaned body.
     Raises ValueError when the output is unusable — the caller logs
@@ -1008,6 +1242,7 @@ def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
         if not named:
             raise ValueError(
                 "diary AI entry names none of the featured dwarves")
+    _check_group_claims(body, feed)
     return body
 
 

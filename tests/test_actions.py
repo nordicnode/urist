@@ -781,6 +781,19 @@ class TestQueueJobMaterials(unittest.TestCase):
         self.assertTrue(any(j["type"] == "CustomReaction"
                             for j in self.game.jobs))
 
+    def test_queue_success_carries_building_kind(self):
+        # The diary feed groups queued jobs by workshop; the kind
+        # (the buildings list subtype) rides in the result detail
+        # where the driver can read it for the decision phrase.
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=3)
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.detail.get("building_kind"), "Still")
+        r = actions.act(self.client, "queue_job", building_id=7,
+                        job="make_bed")
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.detail.get("building_kind"), "Carpenters")
+
     def test_negative_job_id_is_rejected(self):
         # 2026-11-27: the pre-fix helper returned [-1] (linkIntoWorld
         # with one arg is a no-op, so no id was ever assigned) and

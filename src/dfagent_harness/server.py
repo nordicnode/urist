@@ -2063,6 +2063,35 @@ def create_server(
                 if citizens_start and isinstance(tick_start, int):
                     record_citizens(daemon.store, tick_start,
                                     citizens_start)
+                # Fresh stocks at the same moment as the run-end
+                # citizens: the entry's closing numbers must come
+                # from the same fresh run-end collect as the
+                # per-dwarf samples, not a stale trend sample (run
+                # 060346: the trend sample said drink 39, the live
+                # game said 38 — two moments, two numbers). The
+                # game is paused at run end, so this collect and
+                # the citizens' values describe the same moment.
+                # Best-effort: a failed collect falls back to the
+                # driver's posted stocks, never fails the write.
+                stocks_end = body.get("stocks_end") or {}
+                try:
+                    fresh = collect_section("stocks")
+                    stocks = (fresh or {}).get("stocks") or {}
+                    fresh_end: dict[str, Any] = {}
+                    for key, field in (
+                            ("drink", "drink_units"),
+                            ("food", "food_units"),
+                            ("wood", "wood_units"),
+                            ("stone", "stone_units")):
+                        val = stocks.get(field)
+                        if isinstance(val, int):
+                            fresh_end[key] = val
+                    if citizens:
+                        fresh_end["population"] = len(citizens)
+                    if fresh_end:
+                        stocks_end = fresh_end
+                except Exception:  # noqa: BLE001 - best-effort
+                    pass
                 feed = build_diary_feed(
                     daemon.store, daemon.journal, day_start, fort,
                     year, state_dir=daemon.state_dir)
@@ -2070,7 +2099,7 @@ def create_server(
                     feed["summary"],
                     decisions=body.get("decisions") or [],
                     stocks_start=body.get("stocks_start") or {},
-                    stocks_end=body.get("stocks_end") or {})
+                    stocks_end=stocks_end)
                 path = write_ai_entry(FreePiClient(),
                                       feed, daemon.state_dir)
             except Exception as exc:  # noqa: BLE001 - best-effort

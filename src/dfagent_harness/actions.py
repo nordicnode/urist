@@ -1375,9 +1375,16 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     after = _read_section(client, "jobs", timeout=timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     listed = {j.get("id") for j in after.get("list") or []}
+    # The workshop kind (subtype, e.g. "Carpenters"/"Still" — the
+    # buildings list carries it; "Workshop" alone says nothing).
+    # The diary feed groups queued jobs by workshop, so the kind
+    # rides in the result detail where the driver can read it.
+    kind = (target.get("subtype") or target.get("type")
+            or "workshop")
     base = {"building_id": building_id, "job": job, "count": count,
             "job_ids": out.get("job_ids"),
-            "reaction_name": spec["reaction_name"]}
+            "reaction_name": spec["reaction_name"],
+            "building_kind": kind}
     # A job id < 0 is corrupt, not a real job: it means the job was
     # never linked into the world job list (2026-11-27: linkIntoWorld
     # with one arg is a no-op, so every queued job came back -1 and

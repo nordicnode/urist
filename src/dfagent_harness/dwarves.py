@@ -283,7 +283,8 @@ def most_unmet_needs(sample: dict[str, Any] | None,
 
 def dwarf_record(sample: dict[str, Any],
                  changes: list[dict[str, Any]] | None = None,
-                 related_states: dict[int, dict[str, Any]] | None = None
+                 related_states: dict[int, dict[str, Any]] | None = None,
+                 prev_relations: list[dict[str, Any]] | None = None
                  ) -> dict[str, Any]:
     """The structured per-dwarf record the diary feed and the
     snapshot's citizen section both use. ``sample`` is the latest
@@ -295,10 +296,22 @@ def dwarf_record(sample: dict[str, Any],
     featured dwarf's relations are doing — the diary needs it to
     write the human consequence, and the snapshot's model needs it
     to decide. Relations not in the fort carry no state (their
-    mood is not observable)."""
+    mood is not observable). ``prev_relations`` is the dwarf's
+    relations at the previous sample: a relation in ``sample``
+    but not in ``prev_relations`` is marked ``new_today``; one in
+    both is pre-existing background. When ``prev_relations`` is
+    None (first sighting) every relation is background — the
+    dwarf is new to the record, the relations are not new today.
+    Without this the diary cannot tell a devotion from before
+    today (a god worshipped since embark) from a bond formed
+    today, and it presents background as today's event."""
     changes = changes or []
     related_states = related_states or {}
     cat = sample.get("stress_category")
+    prev_keys = set()
+    if prev_relations is not None:
+        prev_keys = set(_relations_by_key(
+            {"relations": prev_relations}))
     rels = []
     for r in sample.get("relations") or []:
         if not isinstance(r, dict):
@@ -308,6 +321,12 @@ def dwarf_record(sample: dict[str, Any],
             "name": r.get("name") or "",
             "in_fort": bool(r.get("in_fort")),
         }
+        if prev_relations is not None:
+            key = (str(r.get("type")),
+                   r.get("histfig_id"))
+            entry["new_today"] = key not in prev_keys
+        else:
+            entry["new_today"] = False
         if r.get("strength") is not None:
             entry["strength"] = r.get("strength")
         uid = r.get("unit_id")

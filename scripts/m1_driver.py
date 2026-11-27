@@ -256,7 +256,9 @@ def parse_suggestion(text: str | None) -> tuple[str, str] | None:
     return None
 
 
-def diary_decision_text(name: str, kwargs: dict) -> str | None:
+def diary_decision_text(name: str, kwargs: dict,
+                        workshop_kind: str | None = None
+                        ) -> str | None:
     """One model action as a diary decision phrase ("build a Still
     at (95, 108, 175)"). Plain words, not the action name — the
     diary renders "I decided to <phrase>." Every current action is
@@ -264,7 +266,11 @@ def diary_decision_text(name: str, kwargs: dict) -> str | None:
     skips it (a diary phrase must be a clean action phrase — the
     old fallback of "name k=v" leaked raw kwargs into the diary).
     A None return is a signal to add the mapping, not to patch
-    around it."""
+    around it. ``workshop_kind`` (from the queue_job result
+    detail, e.g. "Carpenters") names the workshop the job was
+    queued at — the feed groups queued jobs by workshop, and a
+    bare "building #7" is not a workshop the diary can name.
+    Without it the phrase falls back to "building #N"."""
     kind = str(kwargs.get("kind", ""))
     pos = kwargs.get("pos")
     pos_txt = f" at {tuple(pos)}" if pos else ""
@@ -272,8 +278,13 @@ def diary_decision_text(name: str, kwargs: dict) -> str | None:
         return f"build a {kind or 'workshop'}{pos_txt}"
     if name == "queue_job":
         count = kwargs.get("count", 1)
+        if workshop_kind:
+            at = (f"the {workshop_kind} workshop "
+                  f"#{kwargs.get('building_id', '?')}")
+        else:
+            at = f"building #{kwargs.get('building_id', '?')}"
         return (f"queue {kwargs.get('job', 'a job')} "
-                f"x{count} at building #{kwargs.get('building_id', '?')}")
+                f"x{count} at {at}")
     if name == "labor_toggle":
         on = kwargs.get("on", True)
         return (f"{'enable' if on else 'disable'} "
@@ -927,7 +938,12 @@ class M1Driver:
                         # is visible) rather than rendered as raw
                         # name + kwargs.
                         phrase = diary_decision_text(
-                            a["action"], a.get("kwargs") or {})
+                            a["action"], a.get("kwargs") or {},
+                            workshop_kind=(
+                                (res.get("detail") or {}).get(
+                                    "building_kind")
+                                if a["action"] == "queue_job"
+                                else None))
                         if phrase is None:
                             self._log("diary_no_phrase",
                                       name=a["action"])

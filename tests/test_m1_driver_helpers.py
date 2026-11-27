@@ -36,6 +36,17 @@ class TestDiaryDecisionText(unittest.TestCase):
                 {"job": "brew", "count": 5, "building_id": 8}),
             "queue brew x5 at building #8")
 
+    def test_queue_job_names_workshop_when_kind_known(self):
+        # The queue_job result detail carries the workshop kind
+        # (actions.py); the phrase names it so the feed can group
+        # queued jobs by workshop instead of a bare building #.
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "queue_job",
+                {"job": "make_bed", "count": 1, "building_id": 7},
+                workshop_kind="Carpenters"),
+            "queue make_bed x1 at the Carpenters workshop #7")
+
     def test_labor_toggle(self):
         self.assertEqual(
             m1_driver.diary_decision_text(

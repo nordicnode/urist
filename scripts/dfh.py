@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Allow running from the repo root without installing the package.
@@ -195,10 +196,50 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0 if pid is not None and health is not None else 1
 
 
+class _TimestampedWriter:
+    """Wrap a text stream so every line gets a UTC timestamp prefix.
+
+    The daemon log had no timestamps (plain print), so a DF death
+    could never be correlated with the daemon's last RPC call
+    (run #12: the daemon log showed pause-guard failures with no
+    time attached). Line-buffered: a partial line is held until
+    its newline arrives. Installed at daemon startup, before any
+    print below.
+    """
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+        self._buf = ""
+
+    def write(self, s):
+        if not isinstance(s, str):
+            s = str(s)
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            ts = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S")
+            self._wrapped.write(f"{ts} {line}\n")
+        return len(s)
+
+    def flush(self):
+        if self._buf:
+            ts = datetime.now(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S")
+            self._wrapped.write(f"{ts} {self._buf}")
+            self._buf = ""
+        self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
 def _cmd_daemon(args: argparse.Namespace) -> int:
     state_dir = _state_dir()
     config = _apply_flags(args, load_config(state_dir))
     save_config(state_dir, config)
+    sys.stdout = _TimestampedWriter(sys.stdout)
+    sys.stderr = _TimestampedWriter(sys.stderr)
     daemon = Daemon(config=config, state_dir=state_dir)
 
     def _handle(signum, frame):

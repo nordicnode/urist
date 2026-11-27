@@ -89,6 +89,25 @@ CREATE TABLE IF NOT EXISTS unit_history (
     sleepiness INTEGER NOT NULL DEFAULT 0,
     stress INTEGER NOT NULL DEFAULT 0,
     wounds_json TEXT NOT NULL DEFAULT '[]',
+    -- Per-dwarf columns (2026-11-27, diary per-dwarf feed): the
+    -- observation already collects these (units.lua) but the
+    -- recorder dropped them, so the diary could never see the
+    -- dwarves. name: the dwarf's name (so a dead dwarf is still
+    -- nameable from their last sample). profession: the dwarf's
+    -- profession (so the feed can say "Olon, a brewer" — a person,
+    -- not just a name). mood: raw df.mood_type (-1 = none).
+    -- mood_name: the enum name ('none' when -1).
+    -- stress_category: raw getStressCategory int (0 = most
+    -- stressed, 6 = least; -1 = unknown). needs_json: [{need,
+    -- level, focus}]. relations_json: [{type, name, histfig_id,
+    -- unit_id, in_fort, strength}].
+    name TEXT NOT NULL DEFAULT '',
+    profession TEXT NOT NULL DEFAULT '',
+    mood INTEGER NOT NULL DEFAULT -1,
+    mood_name TEXT NOT NULL DEFAULT 'none',
+    stress_category INTEGER NOT NULL DEFAULT -1,
+    needs_json TEXT NOT NULL DEFAULT '[]',
+    relations_json TEXT NOT NULL DEFAULT '[]',
     PRIMARY KEY (unit_id, tick)
 );
 CREATE TABLE IF NOT EXISTS deaths (
@@ -195,6 +214,25 @@ class Store:
                                     check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self.conn.commit()
+        # unit_history gained per-dwarf columns (2026-11-27, diary
+        # per-dwarf feed). CREATE TABLE IF NOT EXISTS does not add
+        # columns to an existing table, so an existing DB gets them
+        # here. Idempotent — a column already present is skipped;
+        # old rows keep the column defaults (unknown/empty).
+        cols = {r[1] for r in self.conn.execute(
+            "PRAGMA table_info(unit_history)")}
+        for col, ddl in (
+                ("name", "TEXT NOT NULL DEFAULT ''"),
+                ("profession", "TEXT NOT NULL DEFAULT ''"),
+                ("mood", "INTEGER NOT NULL DEFAULT -1"),
+                ("mood_name", "TEXT NOT NULL DEFAULT 'none'"),
+                ("stress_category", "INTEGER NOT NULL DEFAULT -1"),
+                ("needs_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("relations_json", "TEXT NOT NULL DEFAULT '[]'")):
+            if col not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE unit_history ADD COLUMN {col} {ddl}")
         self.conn.commit()
 
     def close(self) -> None:
@@ -408,21 +446,53 @@ class Store:
                             job: str = "",
                             hunger: int = 0, thirst: int = 0,
                             sleepiness: int = 0, stress: int = 0,
-                            wounds: Optional[list] = None) -> None:
+                            wounds: Optional[list] = None,
+                            name: str = "",
+                            profession: str = "",
+                            mood: int = -1,
+                            mood_name: str = "none",
+                            stress_category: int = -1,
+                            needs: Optional[list] = None,
+                            relations: Optional[list] = None) -> None:
         self.conn.execute(
             "INSERT INTO unit_history (unit_id, tick, pos_json, job,"
-            " hunger, thirst, sleepiness, stress, wounds_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " hunger, thirst, sleepiness, stress, wounds_json,"
+            " name, profession, mood, mood_name, stress_category,"
+            " needs_json, relations_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(unit_id, tick) DO UPDATE SET "
             "pos_json=excluded.pos_json, job=excluded.job,"
             " hunger=excluded.hunger, thirst=excluded.thirst,"
             " sleepiness=excluded.sleepiness,"
             " stress=excluded.stress,"
-            " wounds_json=excluded.wounds_json",
+            " wounds_json=excluded.wounds_json,"
+            " name=excluded.name, profession=excluded.profession,"
+            " mood=excluded.mood, mood_name=excluded.mood_name,"
+            " stress_category=excluded.stress_category,"
+            " needs_json=excluded.needs_json,"
+            " relations_json=excluded.relations_json",
             (unit_id, tick, json.dumps(pos or []), job,
              hunger, thirst, sleepiness, stress,
-             json.dumps(wounds or [])))
+             json.dumps(wounds or []), name, profession, mood,
+             mood_name, stress_category, json.dumps(needs or []),
+             json.dumps(relations or [])))
         self.conn.commit()
+
+    @_locked
+    def unit_ids(self) -> list[int]:
+        """Distinct unit ids with any unit_history sample."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT unit_id FROM unit_history").fetchall()
+        return [r[0] for r in rows]
+
+    @_locked
+    def earliest_unit_tick(self) -> int | None:
+        """The earliest unit_history sample tick, None when the
+        Store has never sampled a unit (the fort has not lived a
+        sampled day yet)."""
+        row = self.conn.execute(
+            "SELECT MIN(tick) FROM unit_history").fetchone()
+        return row[0] if row and row[0] is not None else None
 
     @_locked
     def unit_history(self, unit_id: int,
@@ -440,6 +510,9 @@ class Store:
             d = dict(r)
             d["pos"] = json.loads(d.pop("pos_json") or "[]")
             d["wounds"] = json.loads(d.pop("wounds_json") or "[]")
+            d["needs"] = json.loads(d.pop("needs_json") or "[]")
+            d["relations"] = json.loads(
+                d.pop("relations_json") or "[]")
             out.append(d)
         return out
 

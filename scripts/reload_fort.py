@@ -30,6 +30,7 @@ Usage:
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -121,6 +122,38 @@ def resolve_save(region: str, exact: bool = False) -> str:
     return region
 
 
+def preserve_crash_evidence() -> None:
+    """Copy DF's log streams aside BEFORE killing/relaunching DF.
+
+    The DF-dir stderr.log is DFHack's console stream (it carries a
+    glibc abort message such as the double free) and is TRUNCATED
+    on every launch; logs/dfhack.log is the process's inherited
+    stderr (DF's own output + the shell's Killed/Aborted notice)
+    and is append-mode. A relaunch destroys the first and buries
+    the second — runs #12 attempts 4/5 lost their crash evidence
+    exactly this way. Copy both (when non-empty) into
+    logs/df-crashes/ with a UTC timestamp so the next crash can be
+    diagnosed after the fact. Never fatal to the reload.
+    """
+    try:
+        crash_dir = HARNESS / "logs" / "df-crashes"
+        crash_dir.mkdir(parents=True, exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        for name in ("stderr.log", "stdout.log"):
+            src = DF_DIR / name
+            if src.is_file() and src.stat().st_size > 0:
+                shutil.copy2(src, crash_dir / f"{name[:-4]}-{ts}.log")
+        dfhack_log = HARNESS / "logs" / "dfhack.log"
+        if dfhack_log.is_file() and dfhack_log.stat().st_size > 0:
+            shutil.copy2(dfhack_log,
+                         crash_dir / f"dfhack-{ts}.log")
+        print(f"reload: crash evidence preserved to "
+              f"logs/df-crashes/ (*-{ts}.log)", flush=True)
+    except Exception as exc:  # noqa: BLE001 - never block a reload
+        print(f"reload: evidence preservation failed (continuing): "
+              f"{exc}", flush=True)
+
+
 def send_space(client: DFHackClient) -> None:
     for ev_type, state in ((2, 1), (3, 0)):
         client.call("PassKeyboardEvent",
@@ -185,6 +218,10 @@ def main() -> int:
         return 0
 
     region = resolve_save(args.region, exact=args.exact)
+
+    # Preserve the current launch's crash evidence BEFORE the
+    # pkill — the DF-dir stderr.log is truncated on relaunch.
+    preserve_crash_evidence()
 
     print("killing DF ...", flush=True)
     # -x matches the exact process name; pkill's own name is "pkill",

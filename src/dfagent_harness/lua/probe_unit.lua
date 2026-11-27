@@ -78,6 +78,16 @@ local ok, err = pcall(function()
     owner = owner,
   }
   if is_cit then
+    -- Relations (same reader as units.lua): spouse, family,
+    -- friends, deity — with each relation's fort status, so the
+    -- diary/snapshot can follow a dwarf's personal life on demand.
+    local hf_to_unit = {}
+    for _, other in ipairs(df.global.world.units.active) do
+      if other.hist_figure_id and other.hist_figure_id >= 0 then
+        hf_to_unit[other.hist_figure_id] = other
+      end
+    end
+    rec.relations = dfh_relations(u, hf_to_unit)
     rec.profession = dfhack.units.getProfessionName(u)
     rec.profession_id = u.profession
     rec.sex = u.sex

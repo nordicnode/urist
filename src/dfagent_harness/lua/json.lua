@@ -209,6 +209,78 @@ local function dfh_try(fn, default)
   return default
 end
 
+-- Relations for one unit (citizens): family from relationship_ids
+-- (indexed by unit_relationship_type — verified live: the named
+-- slots resolve, and probe_unit.lua already reads .Pet) + the
+-- histfig social web (histfig_links, type from the link's _type
+-- subtype, e.g. histfig_hf_link_deityst -> "deity").
+-- hf_to_unit maps histfig id -> the fort unit with that histfig
+-- (built once per collect by the caller). Each relation:
+-- {type, name, histfig_id, unit_id (nil when not in the fort),
+--  in_fort, strength (histfig link strength, nil for family)}.
+-- Family slots read: Pet, Spouse, Mother, Father, Lover — the
+-- single-valued person relations in relationship_ids. The other
+-- slots are transient/mechanical (LastAttacker, GroupLeader,
+-- Draggee, Dragger, RiderMount) and are not relations in the
+-- diary's sense. Verified live 2026-11-27: the fort's 7 dwarves
+-- each carry one deity link (Rakas) and no family links yet
+-- (all relationship_ids slots -1); person-link subtype names are
+-- derived generically from _type, so a spouse/friend link reads
+-- the same way when one appears.
+local function dfh_relations(u, hf_to_unit)
+  local rels = dfh_arr()
+  local seen = {}
+  local function add(reltype, hfid, strength)
+    if hfid == nil or hfid == -1 then return end
+    local key = reltype .. ":" .. tostring(hfid)
+    if seen[key] then return end
+    seen[key] = true
+    local target = hf_to_unit and hf_to_unit[hfid] or nil
+    local name = nil
+    if target then
+      name = dfhack.TranslateName(dfhack.units.getVisibleName(target))
+    else
+      local hf = dfh_try(function()
+        return df.historical_figure.find(hfid) end, nil)
+      if hf then name = dfhack.TranslateName(hf.name) end
+    end
+    rels[#rels+1] = {
+      type = reltype,
+      name = name,
+      histfig_id = hfid,
+      unit_id = target and target.id or nil,
+      in_fort = target ~= nil,
+      strength = strength,
+    }
+  end
+  for _, slot in ipairs({"Pet", "Spouse", "Mother", "Father",
+                         "Lover"}) do
+    local hfid = dfh_try(function()
+      return u.relationship_ids[slot] end, nil)
+    add(string.lower(slot), hfid, nil)
+  end
+  local hf = dfh_try(function()
+    return df.historical_figure.find(u.hist_figure_id) end, nil)
+  if hf then
+    for _, link in ipairs(hf.histfig_links) do
+      local subtype = dfh_try(function()
+        return tostring(link._type) end, "")
+      -- "<type: histfig_hf_link_deityst>" -> "deity". The subtype
+      -- name ends in "st" (df-structures struct-subtype suffix);
+      -- anything that does not match keeps its raw subtype string
+      -- rather than being dropped.
+      local rtype = subtype:match("histfig_hf_link_(.+)st>$")
+        or subtype
+      local target = dfh_try(function()
+        return link.target_hf end, nil)
+      local strength = dfh_try(function()
+        return link.link_strength end, nil)
+      add(rtype, target, strength)
+    end
+  end
+  return rels
+end
+
 -- Generic scalar dump of a DF struct: all number/string/boolean fields.
 -- Used for structs with no live instance to probe (manager orders,
 -- announcements, reports are empty on a fresh fort).

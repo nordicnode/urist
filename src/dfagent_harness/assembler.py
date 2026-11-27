@@ -231,7 +231,16 @@ def _status(state: dict[str, Any]) -> tuple[str, str]:
     hostiles = units.get("hostiles") or []
     pop = status.get("population") or {}
     idle = sum(1 for c in citizens if c.get("idle"))
-    wounded = sum(1 for c in citizens if c.get("wounds"))
+    # The count uses wound_count — the same field describe_unit
+    # renders ("wounded (N wound(s))") — so the Population count and
+    # the Units exception list can never disagree even if a record
+    # carries a stale wounds list. (Run #12's review flagged a
+    # count/list mismatch; the jsonl snapshots agree everywhere, so
+    # the hardening is the fix: one predicate, one field.)
+    wounded = sum(
+        1 for c in citizens
+        if (c.get("wound_count") if isinstance(c.get("wound_count"), int)
+            else len(c.get("wounds") or [])) > 0)
     total = (units.get("total_active_units")
              or len(citizens) + len(hostiles)
              + len(units.get("wildlife") or [])
@@ -593,6 +602,35 @@ def _report_line(entry: Any) -> str:
     return str(text)
 
 
+def _report_key(entry: Any) -> tuple:
+    """Identity of one report entry for dedupe: (year, time, text).
+    A plain string keys on its text alone."""
+    if isinstance(entry, str):
+        return (None, None, entry)
+    if isinstance(entry, dict):
+        return (entry.get("year"), entry.get("time"),
+                entry.get("text") or "")
+    return (None, None, str(entry))
+
+
+# Weather / season announcements are not combat. They already print
+# as plain announcement lines; world.status.reports carries them too,
+# so without this filter the same rain prints twice — once plain,
+# once as "combat:" (run #12: "combat: [y125 t68350] It has started
+# raining."). Matched on the announcement's opening words.
+_WEATHER_PREFIXES = (
+    "It has started raining", "It has stopped raining",
+    "The weather has cleared",
+    "It is now spring", "It is now summer",
+    "It is now autumn", "It is now winter",
+    "It has started snowing", "It has stopped snowing",
+)
+
+
+def _is_weather(text: str) -> bool:
+    return any(text.startswith(p) for p in _WEATHER_PREFIXES)
+
+
 def _reports(state: dict[str, Any]) -> tuple[str, str]:
     if "reports" not in state:
         return ("Reports: unavailable (section failed to collect).",
@@ -605,9 +643,18 @@ def _reports(state: dict[str, Any]) -> tuple[str, str]:
     if not anns and not combat:
         return "Reports: nothing new.", "0 reports"
     lines = ["Reports:"]
+    shown = {_report_key(a) for a in anns[-MAX_REPORTS:]}
     for a in anns[-MAX_REPORTS:]:
         lines.append(f"  - {_report_line(a)}")
     for c in combat[-2:]:
+        # A combat line that duplicates an announcement line, or
+        # that IS a weather/season announcement, is not combat —
+        # skip it instead of printing the rain twice.
+        if _report_key(c) in shown:
+            continue
+        if _is_weather((c.get("text") or "")
+                        if isinstance(c, dict) else str(c)):
+            continue
         lines.append(f"  - combat: {_report_line(c)}")
     return "\n".join(lines), f"{len(anns)} announcements"
 
@@ -724,8 +771,17 @@ def _material_blocker_suggestion(
     if not isinstance(buildings, dict):
         buildings = {}
     if what == "brew":
+        # Brews already queued hold a barrel + plant each (run #12:
+        # 4 brews against 2 empty barrels) — the suggestion must
+        # not point at a brew the fort cannot run.
+        already_queued = (
+            _materials_mod.queued_count(
+                state.get("jobs"), 211, "BREW_DRINK_FROM_PLANT")
+            + _materials_mod.queued_count(
+                state.get("jobs"), 211, "BREW_DRINK_FROM_PLANT_GROWTH"))
         shortages = _materials_mod.check_job(
-            "brew", stocks, count=1, buildings=buildings)
+            "brew", stocks, count=1, buildings=buildings,
+            already_queued=already_queued)
         if not shortages:
             return None
         fixes = "; ".join(_materials_mod.format_shortage(s)
@@ -1055,22 +1111,10 @@ def sample_daily(state: dict[str, Any], store: Store) -> bool:
     for metric, val in metrics.items():
         if isinstance(val, (int, float)):
             store.sample_trend(tick, metric, float(val))
-    for c in citizens:
-        counters = c.get("counters") or {}
-        stress = (c.get("stress") or {}).get("level", 0)
-        # The live collect emits job as a dict {id, type, pos} (or
-        # None when idle); the history stores the job type string.
-        job = c.get("job")
-        if isinstance(job, dict):
-            job = job.get("type") or ""
-        elif not isinstance(job, str):
-            job = ""
-        store.record_unit_history(
-            tick, c.get("id", 0), pos=c.get("pos"),
-            job=job,
-            hunger=counters.get("hunger", 0) or 0,
-            thirst=counters.get("thirst", 0) or 0,
-            sleepiness=counters.get("sleepiness", 0) or 0,
-            stress=stress or 0,
-            wounds=c.get("wounds") or [])
+    # One sample per citizen (dwarves.record_citizens is the single
+    # mapping from a live citizen record to a Store sample — the
+    # diary write uses the same function to capture the run-end
+    # state, since no samples are taken while the loop is paused).
+    from .dwarves import record_citizens
+    record_citizens(store, tick, citizens)
     return True

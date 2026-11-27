@@ -30,6 +30,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .dwarves import FEATURE_THRESHOLD, diff_unit_samples, dwarf_record
+
 # DF calendar: 12 months of 28 days, 1,200 ticks/day, 33,600
 # ticks/month, 403,200 ticks/year. Year 1 starts at tick 0.
 TICKS_PER_DAY = 1200
@@ -563,10 +565,26 @@ def write_entry(state_dir: str | Path,
     with a header when missing) and regenerate diary.html. Returns
     the diary.md path. An entry for a date already present is
     replaced, not duplicated (re-running a day is idempotent)."""
+    return _store_entry(state_dir, summary, render_entry(summary))
+
+
+def write_ai_body(state_dir: str | Path, summary: dict[str, Any],
+                  body: str) -> Path:
+    """Append an AI-written entry body for summary['date'] to
+    diary.md (same idempotence and HTML regeneration as
+    write_entry). The body is the model's prose, already validated
+    by write_ai_entry — this stores it, nothing more."""
+    return _store_entry(state_dir, summary, body)
+
+
+def _store_entry(state_dir: str | Path, summary: dict[str, Any],
+                 body: str) -> Path:
+    """Store one entry body for summary['date'] in diary.md and
+    regenerate diary.html. An entry for a date already present is
+    replaced, not duplicated."""
     md_path = diary_md_path(state_dir)
     fort = summary.get("fort_name") or "the fort"
     heading = f"## {summary['date']} — {summary['date_words']}"
-    body = render_entry(summary)
     if md_path.exists():
         text = md_path.read_text()
     else:
@@ -579,7 +597,7 @@ def write_entry(state_dir: str | Path,
     pattern = re.compile(
         r"^## " + re.escape(summary["date"]) + r" — .*$"
         r"(?:\n(?!## ).*)*", re.MULTILINE)
-    entry = heading + "\n\n" + body
+    entry = heading + "\n\n" + body.rstrip() + "\n"
     if pattern.search(text):
         text = pattern.sub(entry.rstrip(), text)
     else:
@@ -589,6 +607,361 @@ def write_entry(state_dir: str | Path,
     md_path.write_text(text)
     render_html(md_path, diary_html_path(state_dir), fort)
     return md_path
+
+
+# ----------------------------------------------------------------------
+# The AI-written diary: per-dwarf feed + prompt + writer.
+#
+# The template renderer (render_entry) writes a ledger with short
+# sentences — it reads as a list, not a diary entry (Mikey,
+# 2026-11-26). The diary must be narrative prose ABOUT THE
+# DWARVES. So the entry is written by the model, not by code
+# templates: the harness supplies the facts (the feed below) and
+# the model writes the story. The feed is curated, not dumped —
+# only dwarves with real changes, plus their personal lives — and
+# every fact in it traces to a recorded Store/Journal row.
+# On model failure the caller logs and skips the day; a template
+# list is never silently written instead.
+# ----------------------------------------------------------------------
+
+
+def _feed_samples(store: Any, uid: int, first: int, last: int
+                  ) -> tuple[dict[str, Any] | None,
+                             dict[str, Any] | None]:
+    """(prev, curr) samples for one dwarf around a day. curr is the
+    last sample at or before the day end; prev is the last sample
+    before the day start, falling back to the earliest sample inside
+    the day (so the first sampled day still diffs against the
+    morning's state). (None, None) when the dwarf was never
+    sampled."""
+    samples = store.unit_history(uid)
+    curr = None
+    prev = None
+    for s in samples:
+        t = s.get("tick")
+        if not isinstance(t, int):
+            continue
+        if t <= last and (curr is None or t > curr["tick"]):
+            curr = s
+        if t < first and (prev is None or t > prev["tick"]):
+            prev = s
+    if curr is None:
+        return None, None
+    if prev is None:
+        for s in samples:
+            t = s.get("tick")
+            if isinstance(t, int) and first <= t <= last \
+                    and s is not curr:
+                if prev is None or t < prev["tick"]:
+                    prev = s
+    return prev, curr
+
+
+def open_threads(store: Any, day_start_tick: int,
+                 year: int = 0) -> list[dict[str, Any]]:
+    """The fort's open threads, derived from the current samples:
+    a wounded dwarf, a stressed dwarf, a dwarf in a strange mood,
+    a dwarf with an unmet need, a survival stock at zero. Each
+    thread carries how long it has been true (walked back through
+    the samples), so the diary can arc a story across days — a
+    wound on its third day reads differently from a fresh one. A
+    thread closes when its condition clears; nothing is stored, so
+    a closed thread simply stops appearing."""
+    first, last = day_range(day_start_tick)
+    threads: list[dict[str, Any]] = []
+    for uid in store.unit_ids():
+        samples = store.unit_history(uid)
+        if not samples:
+            continue
+        curr = samples[-1]
+        name = curr.get("name") or f"dwarf {uid}"
+        # A condition's start: the earliest sample in the current
+        # unbroken run of samples where the condition holds.
+        def _since(pred: Any) -> int | None:
+            since = None
+            for s in reversed(samples):
+                if pred(s):
+                    since = s.get("tick")
+                else:
+                    break
+            return since if isinstance(since, int) else None
+
+        wounds = curr.get("wounds") or []
+        if wounds:
+            since = _since(lambda s: bool(s.get("wounds")))
+            threads.append({
+                "kind": "wounded", "subject": name,
+                "unit_id": uid,
+                "detail": f"{len(wounds)} wound"
+                          f"{'s' if len(wounds) > 1 else ''}",
+                "since": date_str(since, year) if since else None})
+        cat = curr.get("stress_category")
+        if isinstance(cat, int) and cat != -1 and cat <= 1:
+            since = _since(lambda s: isinstance(
+                s.get("stress_category"), int)
+                and s.get("stress_category") != -1
+                and s.get("stress_category") <= 1)
+            threads.append({
+                "kind": "stressed", "subject": name,
+                "unit_id": uid,
+                "detail": ("at breaking point" if cat == 0
+                           else "highly stressed"),
+                "since": date_str(since, year) if since else None})
+        mood = curr.get("mood")
+        if isinstance(mood, int) and mood != -1:
+            since = _since(lambda s: isinstance(s.get("mood"), int)
+                           and s.get("mood") != -1)
+            threads.append({
+                "kind": "strange_mood", "subject": name,
+                "unit_id": uid,
+                "detail": curr.get("mood_name") or "a strange mood",
+                "since": date_str(since, year) if since else None})
+        for n in curr.get("needs") or []:
+            if not isinstance(n, dict):
+                continue
+            focus = n.get("focus")
+            level = n.get("level")
+            if not isinstance(focus, int) or focus >= 0:
+                continue
+            if isinstance(level, int) and level <= 0:
+                continue
+            threads.append({
+                "kind": "unmet_need", "subject": name,
+                "unit_id": uid,
+                "detail": f"going without {n.get('need')}",
+                "since": None})
+            break
+    return threads
+
+
+def build_diary_feed(store: Any, journal: Any,
+                     day_start_tick: int,
+                     fort_name: str = "",
+                     year: int = 0,
+                     state_dir: str | Path | None = None
+                     ) -> dict[str, Any]:
+    """The feed for the AI diary writer: the day's ledger
+    (build_daily_summary) + one structured record per dwarf who
+    changed (diffed against their previous sample, with their
+    relations' current state) + the last few entries for
+    continuity + the open threads. Curated, not dumped: stable
+    dwarves get a line or nothing; the featured dwarves (a real
+    change, or named in a death) lead."""
+    summary = build_daily_summary(store, journal, day_start_tick,
+                                  fort_name, year)
+    first, last = day_range(day_start_tick)
+    featured_ids: set[int] = set()
+    for d in summary["deaths"]:
+        if isinstance(d.get("unit_id"), int):
+            featured_ids.add(d["unit_id"])
+    dwarves: list[dict[str, Any]] = []
+    for uid in store.unit_ids():
+        prev, curr = _feed_samples(store, uid, first, last)
+        if curr is None:
+            continue
+        changes = diff_unit_samples(prev, curr)
+        related: dict[int, dict[str, Any]] = {}
+        for r in curr.get("relations") or []:
+            ruid = r.get("unit_id")
+            if isinstance(ruid, int) and r.get("in_fort"):
+                rsamples = store.unit_history(ruid)
+                if rsamples:
+                    latest = rsamples[-1]
+                    prev_r = rsamples[-2] \
+                        if len(rsamples) > 1 else None
+                    related[ruid] = {
+                        "mood_name": latest.get("mood_name"),
+                        "stress_category":
+                            latest.get("stress_category"),
+                        "changed": bool(diff_unit_samples(
+                            prev_r, latest)),
+                    }
+        rec = dwarf_record(curr, changes, related)
+        rec["featured"] = (
+            rec["significance"] >= FEATURE_THRESHOLD
+            or uid in featured_ids)
+        dwarves.append(rec)
+    dwarves.sort(key=lambda r: (not r["featured"],
+                                -r["significance"],
+                                r["name"]))
+    recent: list[dict[str, str]] = []
+    if state_dir is not None:
+        md = diary_md_path(state_dir)
+        if md.exists():
+            for e in parse_entries(md.read_text())[-3:]:
+                recent.append({"date": e["date"],
+                               "body": e["body"][:1500]})
+    threads = open_threads(store, day_start_tick, year)
+    return {"summary": summary, "dwarves": dwarves,
+            "recent_entries": recent, "threads": threads}
+
+
+_DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You write one diary entry per in-game day, in the voice of a tired, dry-witted overseer chronicling their dwarves — Boatmurdered-style: a story about the dwarves as people, not a ledger and not a list.
+
+RULES — break none of them:
+- Write narrative prose in the first person ("I"), 150-300 words, a few paragraphs. Never a bullet list, never a table, never "I decided to ... It worked."
+- Every claim must come from the facts supplied below. Never invent an event, a name, a number, or a death that is not in the facts. If the facts do not say what happened to a dwarf, do not guess — leave them out or say their fate is unclear.
+- The entry is ABOUT THE DWARVES: their moods, stress, wounds, needs, relationships, and what happened to them today. The stocks are a ledger line at most — one short sentence, never the story.
+- Continue any open thread that is still true (a wound, a stressed dwarf, a strange mood) and note when one closes. Refer back to the recent entries when a story arcs across days.
+- Name the dwarves by name. When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need.
+- Plain words, no game jargon, no internal terms (no "unit_id", no "tick", no "job_type", no "stress_category"). A stranger reading this should follow it as a story.
+- If nothing happened today and no dwarf changed, say so in one or two sentences — a quiet day, plainly. Do not pad a quiet day into a saga."""
+
+
+def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
+    """(system, user) messages for the AI diary writer, from the
+    feed. The user message renders the day's facts as plain text —
+    ledger, featured dwarves with their changes and personal lives,
+    open threads, recent entries — and nothing else. The model gets
+    facts, never raw Store rows."""
+    summary = feed["summary"]
+    fort = summary.get("fort_name") or "the fort"
+    system = _DIARY_SYSTEM.format(fort=fort)
+    parts: list[str] = []
+    parts.append(
+        f"Day: {summary['date_words']} ({summary['date']}), "
+        f"{summary['season']}.")
+    stock_bits = []
+    for metric, label in (("drink", "drink"), ("food", "food"),
+                          ("wood", "wood"), ("stone", "stone"),
+                          ("population", "citizens")):
+        line = _stock_line(summary["stocks_start"],
+                           summary["stocks_end"], metric, label)
+        if line:
+            stock_bits.append(line)
+    if stock_bits:
+        parts.append("Ledger: " + "; ".join(stock_bits) + ".")
+    for crisis in _stock_crisis_lines(summary):
+        parts.append("CRISIS: " + crisis)
+    for death in summary["deaths"]:
+        parts.append(
+            f"A dwarf died today: {death.get('cause') or 'an unknown cause'}.")
+    if summary["arrivals"]:
+        n = summary["arrivals"]
+        parts.append(
+            f"{n} new {'dwarf' if n == 1 else 'dwarves'} joined the fort today.")
+    if summary["threats"]:
+        parts.append("Something hostile came too close today.")
+    for obs in summary.get("observations") or []:
+        parts.append("Noted: " + obs)
+    dec_phrases = []
+    for dec in summary["decisions"]:
+        phrase = clean_diary_text(
+            dec.get("decision") or dec.get("action") or "")
+        if not phrase:
+            continue
+        outcome = ("worked" if dec.get("ok") is True
+                   else "did not work" if dec.get("ok") is False
+                   else "outcome unknown")
+        dec_phrases.append(f"{phrase} ({outcome})")
+    if dec_phrases:
+        parts.append("What I did today: " + "; ".join(dec_phrases) + ".")
+    # The dwarves: featured first, each with their changes and
+    # their personal life. A stable dwarf gets one line.
+    dwarf_lines = []
+    for rec in feed["dwarves"]:
+        bits = [f"{rec['name']} ({rec['profession'] or 'dwarf'})"]
+        if rec["mood"] != "none":
+            bits.append(f"in a {rec['mood']} mood")
+        stress_w = (rec["stress"] or {}).get("words") or ""
+        if stress_w and stress_w not in ("content",):
+            bits.append(f"{stress_w}")
+        if rec["wounds"]:
+            bits.append(
+                f"{rec['wounds']} wound{'s' if rec['wounds'] > 1 else ''}")
+        for n in rec["needs"]:
+            bits.append(f"going without {n['need']}")
+        if rec["job"]:
+            bits.append(f"working as {rec['job']}")
+        for ch in rec["changes"]:
+            bits.append(ch["text"])
+        for rel in rec["relations"]:
+            rbits = f"{rel['type']} {rel['name']}"
+            if rel.get("in_fort"):
+                if rel.get("mood") and rel["mood"] != "none":
+                    rbits += f" (in a {rel['mood']} mood)"
+                if rel.get("stress"):
+                    rbits += f" ({rel['stress']})"
+                if rel.get("changed"):
+                    rbits += " — changed today"
+            else:
+                rbits += " (not in the fort)"
+            bits.append("close to " + rbits)
+        marker = "FEATURED" if rec.get("featured") else "stable"
+        dwarf_lines.append(f"[{marker}] " + "; ".join(bits) + ".")
+    if dwarf_lines:
+        parts.append("The dwarves:\n" + "\n".join(dwarf_lines))
+    if feed["threads"]:
+        tlines = []
+        for t in feed["threads"]:
+            since = f" since {t['since']}" if t.get("since") else ""
+            tlines.append(
+                f"{t['subject']}: {t['kind']} — {t['detail']}{since}")
+        parts.append("Open threads:\n" + "\n".join(tlines))
+    if feed["recent_entries"]:
+        rlines = []
+        for e in feed["recent_entries"]:
+            rlines.append(f"--- {e['date']} ---\n{e['body']}")
+        parts.append("Recent entries (for continuity):\n"
+                     + "\n".join(rlines))
+    parts.append(
+        "Write today's diary entry now. Prose, not a list.")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": "\n\n".join(parts)}]
+
+
+# Debris the AI must never emit (the same boundary as
+# clean_diary_text): internal references, log noise, raw game
+# internals. An entry containing any of these is rejected, not
+# cleaned — the model misbehaving is a signal, not a typo.
+_AI_DEBRIS = ("PLANNER.md", "(logged)", "window error",
+              "keystroke", "unit_id", "job_type",
+              "stress_category", "tick", "dfhack")
+
+
+def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
+    """Validate the model's diary prose. Returns the cleaned body.
+    Raises ValueError when the output is unusable — the caller logs
+    and skips the day rather than writing a bad entry."""
+    body = (text or "").strip()
+    if len(body) < 120:
+        raise ValueError(
+            f"diary AI entry too short ({len(body)} chars)")
+    if len(body) > 4000:
+        raise ValueError(
+            f"diary AI entry too long ({len(body)} chars)")
+    lowered = body.lower()
+    for pat in _AI_DEBRIS:
+        if pat.lower() in lowered:
+            raise ValueError(
+                f"diary AI entry contains debris: {pat!r}")
+    lines = [ln for ln in body.splitlines() if ln.strip()]
+    list_lines = sum(
+        1 for ln in lines
+        if ln.lstrip().startswith(("- ", "* ", "• "))
+        or re.match(r"^\d+[.)] ", ln.lstrip()))
+    if lines and list_lines / len(lines) > 0.5:
+        raise ValueError("diary AI entry reads as a list, not prose")
+    featured = [r for r in feed["dwarves"] if r.get("featured")]
+    if featured:
+        named = [r for r in featured
+                 if r["name"] and r["name"] in body]
+        if not named:
+            raise ValueError(
+                "diary AI entry names none of the featured dwarves")
+    return body
+
+
+def write_ai_entry(client: Any, feed: dict[str, Any],
+                   state_dir: str | Path) -> Path:
+    """Write today's diary entry with the model. Builds the prompt
+    from the feed, calls the model, validates the prose, stores it.
+    Raises on model failure or bad output — the caller logs and
+    skips the day; a template list is never written instead."""
+    messages = diary_prompt(feed)
+    text = client.chat(messages)
+    body = _validate_ai_entry(text, feed)
+    return write_ai_body(state_dir, feed["summary"], body)
 
 
 def parse_entries(md_text: str) -> list[dict[str, str]]:

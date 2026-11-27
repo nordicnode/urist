@@ -161,48 +161,22 @@ class DaemonClient:
     def query(self, route: str) -> dict:
         if not route.startswith("/v1/"):
             raise ValueError(f"query route must start with /v1/: {route!r}")
+        # The model writes the route as plain text ("...?q=how does
+        # brewing work"), spaces and all. urllib rejects a URL with
+        # control characters, so the query string is percent-encoded
+        # before the request (run #14: the model's first wiki query
+        # died on "URL can't contain control characters"). The path
+        # itself is left alone — only the ?query part is encoded.
+        if "?" in route:
+            from urllib.parse import quote
+            path, _, qs = route.partition("?")
+            route = path + "?" + quote(qs, safe="=&%")
         return self.get(route, timeout=120)
 
 
-class FreePiClient:
-    """OpenAI-compatible chat completions via Free Pi."""
-
-    def __init__(self, model: str = DEFAULT_MODEL):
-        self.model = model
-        self.base = FREEPI_BASE
-        self.token = JWT_PATH.read_text().strip()
-
-    def chat(self, messages: list[dict], timeout: int = 180) -> str:
-        body = {"model": self.model, "messages": messages,
-                "temperature": 0.2}
-        req = urllib.request.Request(
-            self.base + "/v1/chat/completions",
-            data=json.dumps(body).encode(),
-            headers={"content-type": "application/json",
-                     "authorization": f"Bearer {self.token}"},
-            method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:500]
-            raise RuntimeError(
-                f"Free Pi chat -> HTTP {e.code}: {detail}")
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError(f"Free Pi chat: no choices in {data}")
-        return choices[0]["message"]["content"]
-
-    def list_models(self) -> list[str]:
-        # Free Pi exposes no /models endpoint (404 on /models,
-        # /v1/models, /api/models — verified 2026-11-26). The known
-        # model ids, verified live via chat completions (the response
-        # 'model' field is authoritative; the model's self-reported
-        # identity is not — DeepSeek models claim to be GPT-4.1 /
-        # Claude, a known training-data artifact):
-        #   deepseek-v4.1-flash -> deepseek-v4.1-flash-1017
-        #   particle            -> deepseek-v4-flash-0731 (+ LoRA)
-        return ["deepseek-v4.1-flash", "deepseek-v4-flash", "particle"]
+# FreePiClient lives in the package now (dfagent_harness.freepi)
+# so the daemon's diary writer can use the same model.
+from dfagent_harness.freepi import FreePiClient  # noqa: E402
 
 
 def parse_model_reply(text: str) -> tuple[str, list[dict]]:
@@ -374,6 +348,18 @@ def parse_fort_name(snap: dict | None) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _snapshot_citizens(snap: dict | None) -> list[dict]:
+    """The citizen records from a snapshot's units section
+    (sections['units']['citizens']), for the diary feed's
+    per-dwarf samples. [] when the snapshot carries none (the
+    units section may be diffed away on a later tick)."""
+    if not snap:
+        return []
+    units = (snap.get("sections") or {}).get("units") or {}
+    citizens = units.get("citizens") or []
+    return [c for c in citizens if isinstance(c, dict)]
+
+
 class M1Driver:
     def __init__(self, args):
         self.args = args
@@ -417,7 +403,7 @@ class M1Driver:
         # is ~550/s and a 400 cap can never learn it. The minimum
         # sleep is 0.25 s (was 0.5 s) — at 550/s a 0.5 s floor alone
         # is a ~275-tick window.
-        self._tick_rate = 200.0
+        self._tick_rate = 400.0
 
     def _log(self, kind: str, **fields) -> None:
         rec = {"ts": datetime.now(timezone.utc).isoformat(),
@@ -456,6 +442,16 @@ class M1Driver:
                 (self.snap0 or {}).get("sections")),
             "stocks_end": parse_snapshot_stocks(
                 snap.get("sections")),
+            # The run-end citizens (final snapshot) and the run-start
+            # citizens (first snapshot) are the feed's per-dwarf
+            # samples: the server records them so the diary feed can
+            # diff what changed for each dwarf across the run's day.
+            # The snapshot sections carry the units section with the
+            # citizen records (id, name, mood, stress, needs,
+            # wounds, job, relations).
+            "citizens": _snapshot_citizens(snap),
+            "citizens_start": _snapshot_citizens(self.snap0),
+            "tick_start": self.start_tick,
         }
         try:
             res = self.daemon.post("/v1/control/diary", body)
@@ -614,6 +610,15 @@ class M1Driver:
         """Unpause for a wall-clock estimate of the window, re-pause,
         and read the tick reached. Returns the tick reached.
 
+        The advance is ONE server-side call (POST
+        /v1/control/advance-clock) that holds the daemon's RPC lock
+        across the whole unpause — no other thread can make an RPC
+        call while the game is running. The old three-call advance
+        (unpause, sleep client-side, re-pause) left the unpause
+        window open, and the poller/guard's RFR reads landing in
+        it crashed DF twice (runs #12/#13, double-free abort in
+        the DFHack RPC server).
+
         Windows are measured in game ticks, but the tick CANNOT be
         read while the game is running: /v1/status returns the
         poller's cached last_state, and the poller only collects
@@ -622,38 +627,44 @@ class M1Driver:
         returns the stale pre-unpause tick forever and the loop
         waits the whole deadline — that is what ran the fort 19
         in-game days and hit drink 0 on 2026-11-26. So: estimate
-        the wall time from a calibrated tick rate, sleep, re-pause,
-        then read the tick from /v1/status (which refreshes within
-        ~6 s once paused) and re-calibrate the rate from the
-        observed advance.
+        the wall time from a calibrated tick rate, advance, and
+        read the tick from the endpoint's response.
         """
         window = target_tick - current_tick
         if window <= 0:
             return current_tick
         sleep_s = window / self._tick_rate
         sleep_s = max(0.25, min(sleep_s, 30.0))
-        t_unpause = time.time()
-        self.daemon.set_paused(False)
-        time.sleep(sleep_s)
-        self.daemon.set_paused(True)
-        unpause_s = time.time() - t_unpause
-        reached = current_tick
-        deadline = time.time() + 10.0
-        while time.time() < deadline:
-            st = self.daemon.status()
-            tick = st.get("tick")
-            if isinstance(tick, int) and tick != current_tick:
-                reached = tick
-                break
-            time.sleep(0.5)
-        # Calibrate the tick rate from the UNPAUSE duration only:
-        # the status-poll wait after re-pausing runs while the game
-        # is paused, so counting it would understate the rate.
-        advanced = reached - current_tick
-        if unpause_s > 0 and advanced > 0:
-            rate = advanced / unpause_s
+        res = self.daemon.post("/v1/control/advance-clock",
+                               {"sleep_s": sleep_s})
+        advanced = res.get("advanced", 0)
+        reached = res.get("tick_after", current_tick)
+        if not isinstance(reached, int):
+            reached = current_tick
+        # Calibrate the tick rate on the UNPAUSED span, not the
+        # sleep: the set_paused round trips run while the game
+        # ticks, so advanced / sleep_s overstates the rate (run
+        # #12's first window: 803 ticks for a 150 target, rate
+        # read as 2141/s and capped at 1000). The server returns
+        # unpaused_s; older servers lack it — fall back to sleep_s.
+        # Every advance is logged (sleep, unpaused span, ticks,
+        # rate) so a run-log review can verify the accounting
+        # instead of inferring it from snapshot ticks.
+        unpaused_s = res.get("unpaused_s")
+        if not isinstance(unpaused_s, (int, float)) \
+                or unpaused_s <= 0:
+            unpaused_s = sleep_s
+        if isinstance(advanced, int) and advanced > 0 \
+                and unpaused_s > 0:
+            rate = advanced / unpaused_s
             self._tick_rate = max(10.0, min(1000.0, rate))
-        if advanced <= 0:
+        self._log("clock_advance", sleep_s=round(sleep_s, 3),
+                  unpaused_s=round(unpaused_s, 3),
+                  tick_before=current_tick, tick_after=reached,
+                  advanced=advanced if isinstance(advanced, int)
+                  else None,
+                  rate=round(self._tick_rate, 1))
+        if not isinstance(advanced, int) or advanced <= 0:
             # The clock did not move during the window. A modal
             # dialog freezes the tick even when the pause flag is
             # clear — run the advance check (POST /v1/control/

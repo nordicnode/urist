@@ -44,6 +44,16 @@ local ok, err = pcall(function()
     if prof == 'Mercenary' then return 'mercenary', 'mercenary work' end
     return 'visitor', 'visiting'
   end
+  -- Histfig -> fort unit, built once per collect: the relations
+  -- reader (dfh_relations) resolves a relation's histfig id to the
+  -- fort unit carrying it, so a relation is marked in_fort with
+  -- its unit id instead of just a name.
+  local hf_to_unit = {}
+  for _, v in ipairs(df.global.world.units.active) do
+    if v.hist_figure_id and v.hist_figure_id >= 0 then
+      hf_to_unit[v.hist_figure_id] = v
+    end
+  end
   for _, u in ipairs(df.global.world.units.active) do
     if dfhack.units.isOpposedToLife(u)
       or dfh_try(function() return u.flags1.active_invader end, false) then
@@ -132,6 +142,7 @@ local ok, err = pcall(function()
         needs = needs,
         skills = skills,
         labors = labors,
+        relations = dfh_relations(u, hf_to_unit),
         wounds = wounds,
         wound_count = #wounds,
         goal = goal,

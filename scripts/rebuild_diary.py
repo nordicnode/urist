@@ -176,7 +176,7 @@ def _split_entries(text: str) -> list[tuple[str, str]]:
 
 
 def rebuild(state_dir: Path, log_dir: Path,
-            dry_run: bool = False) -> None:
+            dry_run: bool = False, ai: bool = False) -> None:
     state_dir = Path(state_dir).expanduser()
     diary_path = diary.diary_md_path(state_dir)
     text = diary_path.read_text()
@@ -184,13 +184,20 @@ def rebuild(state_dir: Path, log_dir: Path,
     runs = _run_decisions_by_date(Path(log_dir).expanduser())
     store = Store(state_dir / "world.db")
     journal = Journal(state_dir / "journal.db")
+    client = None
+    if ai:
+        # One shared model client for the whole rebuild (a fresh
+        # FreePiClient per entry would re-read the JWT each time).
+        from dfagent_harness.freepi import FreePiClient
+        client = FreePiClient()
     try:
         if not dry_run:
             shutil.copy2(diary_path, diary_path.with_suffix(".md.bak"))
         for date, body in sorted(entries):
             year, month, day = (int(v) for v in date.split("-"))
+            day_start = _day_start(year, month, day)
             summary = diary.build_daily_summary(
-                store, journal, _day_start(year, month, day),
+                store, journal, day_start,
                 "Erushtathtat", year)
             # The ledger is the record for that day's stocks — the
             # Store's samples for old days were cleared.
@@ -208,6 +215,26 @@ def rebuild(state_dir: Path, log_dir: Path,
             if phrases or run_decs:
                 diary.merge_driver_record(
                     summary, decisions=phrases + run_decs)
+            if ai:
+                # AI rewrite: the feed is built from the same
+                # summary + the Store's per-dwarf samples (the feed
+                # builder re-derives the ledger from the summary, so
+                # the merged decisions/stocks above carry over), and
+                # the model writes the entry. A failed write leaves
+                # the old entry in place (logged, never fatal to the
+                # rebuild); the template render is never written
+                # instead.
+                feed = diary.build_diary_feed(
+                    store, journal, day_start, "Erushtathtat", year,
+                    state_dir=state_dir)
+                feed["summary"] = summary
+                try:
+                    diary.write_ai_entry(client, feed, state_dir)
+                    print(f"{date}: AI entry written")
+                except Exception as exc:  # noqa: BLE001 - keep going
+                    print(f"{date}: AI write failed, kept old entry: "
+                          f"{exc}")
+                continue
             rendered = diary.render_entry(summary)
             n_dec = len(summary["decisions"])
             n_obs = len(summary.get("observations") or [])
@@ -232,9 +259,13 @@ def main() -> None:
                     default=str(Path(__file__).resolve().parent.parent
                                 / "logs"))
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--ai", action="store_true",
+                    help="rewrite each entry with the AI writer "
+                         "(per-dwarf feed + model prose) instead of "
+                         "the template renderer")
     args = ap.parse_args()
     rebuild(Path(args.state_dir), Path(args.logs_dir),
-            dry_run=args.dry_run)
+            dry_run=args.dry_run, ai=args.ai)
 
 
 if __name__ == "__main__":

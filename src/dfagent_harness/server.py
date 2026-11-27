@@ -593,6 +593,8 @@ def create_server(
                 self._quicksave()
             elif path == "/v1/control/advance":
                 self._advance()
+            elif path == "/v1/control/advance-clock":
+                self._advance_clock(body)
             elif path == "/v1/control/diary":
                 self._diary(body)
             elif path == "/v1/control/daemon/pause":
@@ -1903,6 +1905,97 @@ def create_server(
                         f"{res.get('reason')}")
             _json(self, 200, res)
 
+        def _advance_clock(self, body: dict[str, Any]) -> None:
+            """POST /v1/control/advance-clock — advance the game clock
+            by running unpaused for ``sleep_s`` wall seconds, as ONE
+            atomic operation under rpc_lock.
+
+            Root cause (2026-11-27, runs #12/#13): the M1 driver
+            advanced the clock with three separate HTTP calls
+            (unpause, sleep client-side, re-pause), leaving the
+            unpause window unprotected. During that window the
+            poller's focus probe + pause-flag read and the pause
+            guard's pause-flag read (RFR calls, made on their own
+            threads) could land while the game was ticking — and
+            RPC reads while the game ticks can crash DF (double-free
+            abort in the DFHack RPC server; the 2026-11-25 chop-test
+            evidence in read_safety.py, and the identical
+            "I/O error in receive header" + "free(): double free
+            detected in tcache 2" signature that killed runs #12
+            and #13 at tick 4 and tick 3). The daemon lock serializes
+            calls but does NOT stop a call from running while the
+            game ticks — only holding the lock across the whole
+            unpause does that. This endpoint holds rpc_lock from the
+            unpause through the re-pause, so no other thread can
+            make any RPC call while the game is running.
+
+            Body: {"sleep_s": float} (clamped to [0.25, 30.0], the
+            driver's window clamp). Returns {"ok", "tick_before",
+            "tick_after", "advanced", "sleep_s"}. On any failure
+            the handler re-pauses the game (best effort) before
+            returning the error, so a failed advance never leaves
+            the game running.
+            """
+            if client is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "no DFHack client")
+                return
+            try:
+                sleep_s = float(body.get("sleep_s") or 0.0)
+            except (TypeError, ValueError):
+                _error(self, 400, "BAD_REQUEST",
+                       "sleep_s (number) is required")
+                return
+            sleep_s = max(0.25, min(sleep_s, 30.0))
+            from . import observe
+            from .read_safety import paused_read
+
+            def _tick() -> int | None:
+                st = paused_read(
+                    client,
+                    lambda: observe.collect(
+                        client, sections=("status",)))
+                return (st.get("status") or {}).get("year_tick")
+
+            try:
+                with rpc_lock:
+                    tick_before = _tick()
+                    # The game is RUNNING from the moment the pause
+                    # flag clears until the re-pause verifies — the
+                    # set_paused round trips are inside that span,
+                    # not outside it. Time the whole span: the
+                    # driver calibrates its tick rate on it, and
+                    # run #12's first window overshot 803 ticks for
+                    # a 150 target because the rate was calibrated
+                    # on sleep_s alone (the verification overhead
+                    # ran uncounted while the game ticked).
+                    unpaused_start = time.monotonic()
+                    set_paused(client, False)
+                    try:
+                        time.sleep(sleep_s)
+                    finally:
+                        # Re-pause even if the sleep was interrupted;
+                        # a failed advance must never leave the game
+                        # running.
+                        set_paused(client, True)
+                    unpaused_s = time.monotonic() - unpaused_start
+                    tick_after = _tick()
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "RPC_ERROR",
+                       f"advance-clock failed: {exc}")
+                return
+            if not isinstance(tick_before, int) \
+                    or not isinstance(tick_after, int):
+                _error(self, 503, "RPC_ERROR",
+                       "advance-clock could not read the tick")
+                return
+            _json(self, 200, {
+                "ok": True, "tick_before": tick_before,
+                "tick_after": tick_after,
+                "advanced": tick_after - tick_before,
+                "sleep_s": sleep_s,
+                "unpaused_s": round(unpaused_s, 3)})
+
         def _diary(self, body: dict[str, Any]) -> None:
             # POST /v1/control/diary — write the diary entry for a
             # completed M1 day. The daemon's planner loop is paused
@@ -1914,9 +2007,16 @@ def create_server(
             # parsed from its snapshots) is merged in via
             # diary.merge_driver_record — the run's decisions are not
             # in the Journal and no trend samples are taken while
-            # the loop is paused. write_entry is idempotent per date,
-            # so a later daemon-trigger write for the same day
-            # replaces rather than duplicates.
+            # the loop is paused. The entry itself is AI-written
+            # (diary.write_ai_entry) from the per-dwarf feed — the
+            # template renderer is retired from the write path
+            # (Mikey: it reads as a list, not a diary entry). The
+            # driver's run-end citizens are recorded first, so the
+            # feed has today's per-dwarf samples. write_ai_body is
+            # idempotent per date, so a later daemon-trigger write
+            # for the same day replaces rather than duplicates. On
+            # model failure the day is skipped (503 DIARY_FAILED);
+            # a template list is never written instead.
             if daemon is None:
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "diary needs the daemon")
@@ -1928,22 +2028,42 @@ def create_server(
                 return
             year = body.get("year") or 0
             fort = body.get("fort_name") or ""
-            from .diary import (build_daily_summary,
-                                merge_driver_record, write_entry)
+            from .diary import (build_diary_feed,
+                                merge_driver_record, write_ai_entry)
+            from .dwarves import record_citizens
+            from .freepi import FreePiClient
             try:
-                summary = build_daily_summary(
-                    daemon.store, daemon.journal, day_start, fort, year)
+                citizens = body.get("citizens") or []
+                if citizens:
+                    # The run-end citizens are the dwarves' state at
+                    # the end of the entry's day; clamp the stamp to
+                    # the day's last tick so the feed sees them as
+                    # the day's current sample (the run itself ends
+                    # part-way into the next day).
+                    tick_end = day_start + 1200 - 1
+                    record_citizens(daemon.store, tick_end,
+                                    citizens)
+                citizens_start = body.get("citizens_start") or []
+                tick_start = body.get("tick_start")
+                if citizens_start and isinstance(tick_start, int):
+                    record_citizens(daemon.store, tick_start,
+                                    citizens_start)
+                feed = build_diary_feed(
+                    daemon.store, daemon.journal, day_start, fort,
+                    year, state_dir=daemon.state_dir)
                 merge_driver_record(
-                    summary,
+                    feed["summary"],
                     decisions=body.get("decisions") or [],
                     stocks_start=body.get("stocks_start") or {},
                     stocks_end=body.get("stocks_end") or {})
-                path = write_entry(daemon.state_dir, summary)
+                path = write_ai_entry(FreePiClient(),
+                                      feed, daemon.state_dir)
             except Exception as exc:  # noqa: BLE001 - best-effort
                 _error(self, 503, "DIARY_FAILED",
                        f"diary write failed: {exc}")
                 return
-            _json(self, 200, {"ok": True, "date": summary["date"],
+            _json(self, 200, {"ok": True,
+                              "date": feed["summary"]["date"],
                               "path": str(path)})
 
         def _quicksave(self) -> None:

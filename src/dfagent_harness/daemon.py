@@ -649,20 +649,25 @@ class Daemon:
         sampled = sample_daily(state, self.store)
         tick = (state.get("status") or {}).get("year_tick")
         # Diary (GOAL.md step 4): when a new day is sampled, the day
-        # that just ended gets its entry. The entry is built only
-        # from the Store + Journal for that day's tick range, so
-        # every claim traces to a recorded event, decision, or
-        # observation. Failures are logged, never fatal to the tick.
+        # that just ended gets its entry. The entry is AI-written
+        # from the per-dwarf feed (diary.write_ai_entry) — the
+        # template renderer is retired from the write path (Mikey:
+        # it reads as a list, not a diary entry). Every claim traces
+        # to a recorded Store/Journal row via the feed. On model
+        # failure the day is skipped (logged, never fatal to the
+        # tick); a template list is never written instead.
         if sampled and isinstance(tick, int) and tick >= TICKS_PER_DAY:
             try:
                 from .diary import (TICKS_PER_DAY as _TPD,
-                                    build_daily_summary, write_entry)
+                                    build_diary_feed, write_ai_entry)
+                from .freepi import FreePiClient
                 prev_start = (tick // _TPD - 1) * _TPD
                 fort = (state.get("status") or {}).get("fort_name") or ""
                 year = (state.get("status") or {}).get("year") or 0
-                summary = build_daily_summary(
-                    self.store, self.journal, prev_start, fort, year)
-                write_entry(self.state_dir, summary)
+                feed = build_diary_feed(
+                    self.store, self.journal, prev_start, fort, year,
+                    state_dir=self.state_dir)
+                write_ai_entry(FreePiClient(), feed, self.state_dir)
             except Exception as exc:  # noqa: BLE001 - never kill tick
                 self.journal.log_event(
                     "diary_error", f"diary write failed: {exc}")
@@ -1159,8 +1164,17 @@ class Daemon:
             from . import materials as _materials_mod
             stocks = state.get("stocks") or {}
             buildings = state.get("buildings") or {}
+            # Brews already queued hold a barrel + plant each
+            # (run #12: 4 brews against 2 empty barrels).
+            already_queued = (
+                _materials_mod.queued_count(
+                    state.get("jobs"), 211, "BREW_DRINK_FROM_PLANT")
+                + _materials_mod.queued_count(
+                    state.get("jobs"), 211,
+                    "BREW_DRINK_FROM_PLANT_GROWTH"))
             shortages = _materials_mod.check_job(
-                "brew", stocks, count=count, buildings=buildings)
+                "brew", stocks, count=count, buildings=buildings,
+                already_queued=already_queued)
             if shortages:
                 detail = "; ".join(
                     _materials_mod.format_shortage(s)

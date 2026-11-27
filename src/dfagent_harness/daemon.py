@@ -384,7 +384,15 @@ class Daemon:
             return
         self._stop.set()
         if self.planner is not None:
-            self._quicksave_if_due(force=True)
+            # A failed save must not abort shutdown: the poller,
+            # server, and RPC connection still need closing (H4
+            # root cause, 2026-11-27 — the old code let a
+            # set_paused failure here escape stop() entirely).
+            try:
+                self._quicksave_if_due(force=True)
+            except Exception as exc:  # noqa: BLE001 - shutdown continues
+                self.journal.log_event(
+                    "daemon_error", f"shutdown quicksave failed: {exc}")
         if self.poller is not None:
             self.poller.stop(timeout=5.0)
         if self.bus is not None:
@@ -1024,24 +1032,33 @@ class Daemon:
             self.journal.log_event(
                 "daemon_error", f"quicksave failed to set the flag: {exc}")
             return
+        # H3/H4 (2026-11-27, external review): the unpause window
+        # holds daemon.lock — which IS the server's rpc_lock
+        # (create_server is called with lock=self.lock) — so no
+        # other thread can run RPC reads while the game is running,
+        # the reads-while-running pattern the repo documents as a
+        # run-killer. `saved` is bound before the try so the publish
+        # below can never read an unbound name.
+        saved = False
         try:
-            set_paused(self.client, False)
-            deadline = time.time() + 90.0
-            saved = False
-            while time.time() < deadline:
-                time.sleep(5)
-                now_backups = {p.name for p in save_root.iterdir()
-                               if p.is_dir()
-                               and p.name.startswith(save_dir)}
-                after_mtime = (save_path.stat().st_mtime
-                               if save_path.exists() else 0.0)
-                if (now_backups - before_backups) or \
-                        after_mtime > before_mtime:
-                    saved = True
-                    break
+            with self.lock:
+                set_paused(self.client, False)
+                deadline = time.time() + 90.0
+                while time.time() < deadline:
+                    time.sleep(5)
+                    now_backups = {p.name for p in save_root.iterdir()
+                                   if p.is_dir()
+                                   and p.name.startswith(save_dir)}
+                    after_mtime = (save_path.stat().st_mtime
+                                   if save_path.exists() else 0.0)
+                    if (now_backups - before_backups) or \
+                            after_mtime > before_mtime:
+                        saved = True
+                        break
         finally:
             try:
-                set_paused(self.client, True)
+                with self.lock:
+                    set_paused(self.client, True)
             except Exception:  # noqa: BLE001 - pause is best-effort
                 pass
         if self.bus is not None:

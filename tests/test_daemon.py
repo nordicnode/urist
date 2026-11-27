@@ -11,6 +11,7 @@ import unittest
 import urllib.request
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -283,6 +284,148 @@ class ServerAuthTests(unittest.TestCase):
             self.assertTrue(body["steps"])
             status, body = _get(port, "/v1/tasks/nope/plan")
             self.assertEqual(status, 404)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class _SaveClient(_FakeClient):
+    """Fake DFHack client for quicksave tests: run_lua answers the
+    save-dir probe; the game itself is never touched."""
+
+    def run_lua(self, code, timeout=None):
+        if "cur_savegame" in code:
+            return "region2"
+        return ""
+
+    def close(self):
+        pass
+
+
+class TestQuicksaveLocks(unittest.TestCase):
+    """H3/H4 (2026-11-27, external review): the quicksave
+    unpause window must hold daemon.lock (== the server's
+    rpc_lock), and a failed save must not abort shutdown."""
+
+    def _daemon(self, tmp):
+        df_dir = tmp / "df"
+        (df_dir / "data" / "save" / "region2").mkdir(parents=True)
+        (df_dir / "data" / "save" / "region2" / "world.sav") \
+            .write_bytes(b"x")
+        daemon = Daemon(config=DaemonConfig(df_dir=str(df_dir)),
+                        state_dir=tmp / "state")
+        daemon.client = _SaveClient()
+        return daemon, df_dir
+
+    def test_quicksave_holds_lock_across_unpause_window(self):
+        import dfagent_harness.daemon as daemon_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            daemon, df_dir = self._daemon(tmp)
+            entered = threading.Event()
+            release = threading.Event()
+            calls = []
+
+            def fake_set_paused(client, paused):
+                calls.append(paused)
+                if paused is False:
+                    entered.set()
+                    release.wait(timeout=10)
+
+            with mock.patch.object(daemon_mod, "set_paused",
+                                   fake_set_paused):
+                t = threading.Thread(
+                    target=lambda: daemon._quicksave_if_due(force=True),
+                    daemon=True)
+                t.start()
+                try:
+                    self.assertTrue(entered.wait(timeout=10),
+                                    "unpause never started")
+                    # The saving thread holds daemon.lock across the
+                    # window: another thread cannot take it.
+                    self.assertFalse(daemon.lock.acquire(timeout=0.5))
+                    # Drop a new backup dir in while the game is
+                    # "running" so the first poll sees the save.
+                    (df_dir / "data" / "save"
+                     / "region2-00125-04-13").mkdir()
+                    release.set()
+                    t.join(timeout=15)
+                    self.assertFalse(t.is_alive())
+                finally:
+                    release.set()
+            self.assertEqual(calls, [False, True])
+            self.assertTrue(daemon.lock.acquire(timeout=0.5))
+            daemon.lock.release()
+
+    def test_stop_survives_failed_quicksave(self):
+        import dfagent_harness.daemon as daemon_mod
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            daemon, _df_dir = self._daemon(tmp)
+            daemon.planner = object()  # stop() saves only with one
+            stopped = []
+
+            class _FakePoller:
+                def stop(self, timeout=None):
+                    stopped.append("poller")
+
+            class _FakeServer:
+                def shutdown(self):
+                    stopped.append("shutdown")
+
+                def server_close(self):
+                    stopped.append("close")
+
+            daemon.poller = _FakePoller()
+            daemon.server = _FakeServer()
+
+            def boom(client, paused):
+                if paused is False:
+                    raise RuntimeError("RPC down")
+
+            with mock.patch.object(daemon_mod, "set_paused", boom):
+                daemon.stop()  # must not raise
+            self.assertEqual(stopped, ["poller", "shutdown", "close"])
+
+    def test_quicksave_endpoint_holds_rpc_lock(self):
+        # Server half of H3: while a quicksave is in flight, a
+        # concurrent GET /v1/health — which takes rpc_lock for its
+        # version read — must wait. If _quicksave did not hold the
+        # lock, health would answer while the game is running.
+        entered = threading.Event()
+        release = threading.Event()
+
+        class _BlockingDaemon:
+            def _quicksave_if_due(self, force=False):
+                entered.set()
+                release.wait(timeout=10)
+
+        server, port = _serve(EventBus(), client=_FakeClient(),
+                              daemon=_BlockingDaemon(), token="<redacted>")
+        try:
+            result = {}
+
+            def post():
+                result["post"] = _post(port, "/v1/control/quicksave",
+                                      {}, token="<redacted>")
+
+            t = threading.Thread(target=post, daemon=True)
+            t.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5),
+                                "quicksave never started")
+                with self.assertRaises(
+                        (urllib.error.URLError, TimeoutError)):
+                    urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/v1/health", timeout=1)
+            finally:
+                release.set()
+            t.join(timeout=5)
+            self.assertFalse(t.is_alive())
+            self.assertEqual(result["post"][0], 200)
+            status, body = _get(port, "/v1/health", token="<redacted>")
+            self.assertEqual(status, 200)
+            self.assertTrue(body["df_reachable"])
         finally:
             server.shutdown()
             server.server_close()

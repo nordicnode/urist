@@ -2206,7 +2206,12 @@ def create_server(
                 _error(self, 503, "GAME_NOT_RUNNING",
                        "quicksave needs the daemon")
                 return
-            daemon._quicksave_if_due(force=True)
+            # H3 (2026-11-27): the only RPC-touching handler that
+            # did not hold rpc_lock. A quicksave unpauses the game
+            # for up to 90 s; holding the lock for the call keeps
+            # every other handler from reading while it runs.
+            with rpc_lock:
+                daemon._quicksave_if_due(force=True)
             _json(self, 200, {"ok": True, "action": "quicksave",
                               "detail": "quicksave requested; see the "
                                         "event log for the save event",

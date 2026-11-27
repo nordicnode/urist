@@ -15,6 +15,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness.daemon import (  # noqa: E402
+    Daemon,
     DaemonConfig,
     load_config,
     load_or_create_token,
@@ -47,6 +48,62 @@ class ConfigTests(unittest.TestCase):
     def test_unknown_keys_ignored(self):
         cfg = DaemonConfig.from_dict({"http_port": 1234, "nope": 1})
         self.assertEqual(cfg.http_port, 1234)
+
+    def test_loop_paused_round_trip(self):
+        # The loop state must survive a config save/load cycle, so a
+        # daemon restart starts with the same loop state it stopped
+        # with (2026-11-27: the reset to "running" fired an
+        # immediate planner tick that unpaused DF and killed it).
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            cfg = load_config(state_dir)
+            self.assertFalse(cfg.loop_paused)
+            cfg.loop_paused = True
+            save_config(state_dir, cfg)
+            self.assertTrue(load_config(state_dir).loop_paused)
+
+
+class LoopPausedTests(unittest.TestCase):
+    def _daemon(self, tmp, **cfg_kw):
+        cfg = DaemonConfig(**cfg_kw)
+        return Daemon(config=cfg, state_dir=Path(tmp))
+
+    def test_daemon_init_reads_loop_paused_from_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self._daemon(tmp)._loop_paused)
+            self.assertTrue(
+                self._daemon(tmp, loop_paused=True)._loop_paused)
+
+    def test_set_loop_paused_persists_to_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            daemon = self._daemon(tmp)
+            daemon.set_loop_paused(True)
+            self.assertTrue(load_config(state_dir).loop_paused)
+            daemon.set_loop_paused(False)
+            self.assertFalse(load_config(state_dir).loop_paused)
+
+    def test_first_planner_tick_waits_one_interval(self):
+        # A fresh daemon must not fire a planner tick (which
+        # unpauses the game) before a controller has had a chance
+        # to pause the loop. With a 0.2 s interval, no tick may fire
+        # in the first 0.05 s, and at least one must fire by 0.8 s.
+        with tempfile.TemporaryDirectory() as tmp:
+            daemon = self._daemon(tmp, planner_interval=0.2)
+            calls = []
+            daemon._pause_guard = lambda: None
+            daemon._planner_tick = lambda: calls.append(1)
+            thread = threading.Thread(target=daemon._planner_loop,
+                                      daemon=True)
+            thread.start()
+            try:
+                threading.Event().wait(0.05)
+                self.assertEqual(calls, [])
+                threading.Event().wait(0.75)
+                self.assertGreaterEqual(len(calls), 1)
+            finally:
+                daemon._stop.set()
+                thread.join(timeout=2.0)
 
 
 class TokenTests(unittest.TestCase):

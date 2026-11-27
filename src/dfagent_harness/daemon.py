@@ -92,6 +92,15 @@ class DaemonConfig:
     df_dir: str = ""  # default: <repo>/third_party/df_47_05
     allow_raw_actions: bool = False
     no_auth: bool = False
+    # Whether the autonomous planner loop starts paused. Persisted
+    # (2026-11-27): the loop state used to live only in memory, so
+    # every daemon restart silently reset it to "running" and the
+    # first planner tick fired immediately — unpausing the game, and
+    # DF died on the unpause (Resetting-textures abort) three times
+    # in a row during M1 run #12 attempts. A restart must not reset
+    # the loop to running; once the driver pauses the loop, restarts
+    # start paused. Default False preserves fresh-daemon behaviour.
+    loop_paused: bool = False
     # Poll load measured 2026-11-26 (game paused): lite collect
     # ~1.6s every 2.0s + planner ~3s/30s + slow ~5s/30s = ~98% RPC
     # server saturation -> queueing -> 30s timeouts -> stale replies.
@@ -272,7 +281,11 @@ class Daemon:
         self.server = None
         self._stop = threading.Event()
         self._planner_thread: Optional[threading.Thread] = None
-        self._loop_paused = False  # autonomous loop paused (game runs)
+        # The loop state persists across restarts (DaemonConfig.
+        # loop_paused): a restart must not silently reset the loop
+        # to running and fire an immediate planner tick that
+        # unpauses the game. See the DaemonConfig.loop_paused note.
+        self._loop_paused = self.config.loop_paused
         self.started_at = time.time()
         self._last_quicksave = time.time()
         # NB: initialised to "now", not 0.0 — with 0.0 the first
@@ -414,6 +427,16 @@ class Daemon:
             print(f"dfh pause_guard: check failed: {exc}", flush=True)
 
     def _planner_loop(self) -> None:
+        # The first tick waits one full interval after startup: a
+        # fresh daemon must not fire a planner tick (which unpauses
+        # the game) before a controller has had a chance to pause
+        # the loop. Observed live 2026-11-27: the post-restart tick
+        # ran within seconds of daemon start, unpaused DF, and the
+        # game died on the unpause (Resetting-textures abort) three
+        # times in a row during M1 run #12 attempts. Autonomous
+        # mode is unaffected — its first tick just lands one
+        # interval later.
+        self._stop.wait(self.config.planner_interval)
         while not self._stop.is_set():
             try:
                 self._pause_guard()
@@ -1233,6 +1256,15 @@ class Daemon:
 
     def set_loop_paused(self, paused: bool) -> None:
         self._loop_paused = paused
+        # Persist the loop state: a daemon restart must start with
+        # the same loop state it stopped with (see the
+        # DaemonConfig.loop_paused note). Best-effort — a config
+        # write failure must never break the pause itself.
+        self.config.loop_paused = paused
+        try:
+            save_config(self.state_dir, self.config)
+        except Exception:
+            pass
         # Pausing the loop also pauses the game at once: otherwise a
         # pause request leaves the fort running until the next tick
         # (which is skipped while paused, so nothing re-pauses it).

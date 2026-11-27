@@ -278,9 +278,14 @@ class M1Driver:
         # failure) instead of repeating them blind.
         self.last_action_results: list[str] = []
         # Calibrated game-tick rate (ticks per wall second), used by
-        # _advance_clock. Starts at a measured-typical 50/s and is
-        # re-estimated from every window actually run.
-        self._tick_rate = 50.0
+        # _advance_clock. Starts at a measured-typical 200/s and is
+        # re-estimated from every window actually run. The old
+        # initial value (50/s) was far below the real rate
+        # (~265-350/s on this fort), so the FIRST window overshot
+        # ~10x and M1 run #9 ended after a single action tick
+        # (100800 -> 102392 for a 150-tick window). The cap is
+        # raised to 400 so the calibration can reach the real rate.
+        self._tick_rate = 200.0
 
     def _log(self, kind: str, **fields) -> None:
         rec = {"ts": datetime.now(timezone.utc).isoformat(),
@@ -477,7 +482,7 @@ class M1Driver:
         advanced = reached - current_tick
         if unpause_s > 0 and advanced > 0:
             rate = advanced / unpause_s
-            self._tick_rate = max(10.0, min(200.0, rate))
+            self._tick_rate = max(10.0, min(400.0, rate))
         if advanced <= 0:
             # The clock did not move during the window. A modal
             # dialog freezes the tick even when the pause flag is

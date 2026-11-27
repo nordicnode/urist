@@ -1,0 +1,5 @@
+{"ts": "2026-11-27T00:56:49.589410+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": false}
+{"ts": "2026-11-27T00:56:52.681499+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 100800, "end_tick": 102000, "date": "125-04-01"}
+{"ts": "2026-11-27T00:57:13.023955+00:00", "tick_no": 1, "kind": "action", "name": "build_workshop", "ok": true, "reason": "still workshop #8 built at [95, 108, 175] (construction_stage 3)", "model_reason": "No Still exists, so brewable plants cannot become drink; place it on the verified free 3x3 site."}
+{"ts": "2026-11-27T00:57:13.773912+00:00", "tick_no": 1, "kind": "action", "name": "create_stockpile", "ok": true, "reason": "food stockpile #9 created at (93,86,176) (5x5)", "model_reason": "A food stockpile near the fort gives the 15+15 drink units and 39 brewable plants a home close to the Still and kitchen."}
+{"ts": "2026-11-27T00:57:19.564861+00:00", "tick_no": 2, "kind": "run_end", "reason": "day complete", "tick": 102392, "end_tick": 102000, "actions_taken": 2, "idle_ticks": 0}

@@ -1,0 +1,6 @@
+{"ts": "2026-11-27T00:58:15.238051+00:00", "tick_no": 0, "kind": "run_start", "days": 1.0, "window": 150, "model": "deepseek-v4.1-flash", "mock": true}
+{"ts": "2026-11-27T00:58:18.191334+00:00", "tick_no": 0, "kind": "start_tick", "start_tick": 102392, "end_tick": 103592, "date": "125-04-02"}
+{"ts": "2026-11-27T00:58:21.391425+00:00", "tick_no": 1, "kind": "idle_tick", "reasoning": "mock: no suggestion", "stall_ticks": 1}
+{"ts": "2026-11-27T00:58:32.024952+00:00", "tick_no": 2, "kind": "idle_tick", "reasoning": "mock: no suggestion", "stall_ticks": 2}
+{"ts": "2026-11-27T00:58:43.881793+00:00", "tick_no": 3, "kind": "idle_tick", "reasoning": "mock: no suggestion", "stall_ticks": 3}
+{"ts": "2026-11-27T00:58:50.964763+00:00", "tick_no": 4, "kind": "run_end", "reason": "max_ticks reached"}

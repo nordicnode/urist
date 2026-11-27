@@ -1,0 +1,26 @@
+# urist-df-scratch — scratch DF (region5, farm / embark work) under
+# supervisor control. Same pattern as urist-df-main.service: the
+# wrapper runs scratch/reload_scratch.py (DISPLAY :98, RPC 5001,
+# loads region5) and watches the DF pid. No GUARD 2 here — the
+# scratch fort runs at drink 0 by design.
+[Unit]
+Description=Urist scratch DF (region5)
+Requires=urist-xvfb-scratch.service
+After=urist-xvfb-scratch.service
+PartOf=urist-stack.target
+StartLimitBurst=5
+StartLimitIntervalSec=1800
+
+[Service]
+Type=notify
+Environment=HOME=/home/hatch
+WorkingDirectory=/home/hatch/workspace/df-agent-harness
+ExecStart=/home/hatch/workspace/df-agent-harness/.venv/bin/python /home/hatch/workspace/df-agent-harness/scripts/supervisor/run_df.py --df-dir /home/hatch/workspace/df-agent-harness/scratch/m2-embark/df --display :98 --reload-cmd "/home/hatch/workspace/df-agent-harness/.venv/bin/python /home/hatch/workspace/df-agent-harness/scratch/reload_scratch.py" --name scratch
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=600
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+# urist-xvfb-main — virtual display :99 for the main DF instance.
+# Runs as root (the runtime user), matching the manual stack that
+# recover.sh starts. Installed by scripts/install-supervisor.sh.
+[Unit]
+Description=Urist virtual display :99 (main DF)
+After=network.target
+PartOf=urist-stack.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1024x768x24
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

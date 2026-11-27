@@ -1,0 +1,40 @@
+# urist-df-main — main DF (Erushtathtat) under supervisor control.
+#
+# The wrapper (scripts/supervisor/run_df.py) kills any stale DF in
+# this dir, runs reload_fort.py --exact to launch ./dfhack and load
+# region2-00125-04-12 with GUARD 1 (pause) and GUARD 2 (drink floor)
+# verified, then watches the DF pid. Type=notify: the wrapper calls
+# systemd-notify --ready only once the fort is loaded and paused, so
+# urist-daemon.service (After= this unit) starts against a live fort,
+# not a title screen. If DF dies, the wrapper exits nonzero and
+# systemd restarts the whole reload sequence.
+#
+# The save is pinned --exact on purpose: a bare region2 reload would
+# resolve to the NEWEST dated backup, which is the preserved drink-0
+# 125-07-01 fort (2026-11-26). Change the save here, never by editing
+# the wrapper.
+#
+# Runs as root (the runtime user), matching the manual stack.
+# HOME is set explicitly: the daemon state dir and several tools
+# follow $HOME, and systemd would otherwise set HOME=/root.
+[Unit]
+Description=Urist main DF (Erushtathtat, region2-00125-04-12)
+Requires=urist-xvfb-main.service
+After=urist-xvfb-main.service
+PartOf=urist-stack.target
+StartLimitBurst=5
+StartLimitIntervalSec=1800
+
+[Service]
+Type=notify
+Environment=HOME=/home/hatch
+WorkingDirectory=/home/hatch/workspace/df-agent-harness
+ExecStart=/home/hatch/workspace/df-agent-harness/.venv/bin/python /home/hatch/workspace/df-agent-harness/scripts/supervisor/run_df.py --df-dir /home/hatch/workspace/df-agent-harness/third_party/df_47_05 --display :99 --reload-cmd "/home/hatch/workspace/df-agent-harness/.venv/bin/python /home/hatch/workspace/df-agent-harness/scripts/reload_fort.py region2-00125-04-12 --exact" --name main
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=600
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

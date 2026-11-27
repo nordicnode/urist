@@ -1,0 +1,28 @@
+# urist-daemon — the harness daemon (HTTP 127.0.0.1:8765), foreground
+# mode. Requires the main DF: it starts only after urist-df-main
+# reports ready (fort loaded and paused). Requires= also stops the
+# daemon when the DF unit stops, and systemd restarts it fresh once
+# the DF is reloaded — so a DF death always yields a fresh daemon
+# bound to the new DF incarnation, never a daemon holding a stale
+# RPC connection (observed live 2026-11-27: DF killed 19:59:09,
+# daemon stopped 19:59:25, both back healthy 19:59:50).
+# TimeoutStopSec=120 lets the graceful stop finish its quicksave.
+[Unit]
+Description=Urist harness daemon
+Requires=urist-df-main.service
+After=urist-df-main.service
+PartOf=urist-stack.target
+StartLimitBurst=5
+StartLimitIntervalSec=1800
+
+[Service]
+Type=simple
+Environment=HOME=/home/hatch
+WorkingDirectory=/home/hatch/workspace/df-agent-harness
+ExecStart=/home/hatch/workspace/df-agent-harness/.venv/bin/python /home/hatch/workspace/df-agent-harness/scripts/dfh.py daemon
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

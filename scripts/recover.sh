@@ -116,3 +116,13 @@ for i in $(seq 1 30); do
 done
 .venv/bin/python scripts/rpc_smoke.py --port 5000
 echo "RECOVER-OK: DF 0.47.05 + DFHack up, RPC on port 5000"
+
+# 5. Boot supervisor (2026-11-27): install the systemd units so the
+#    stack comes back on the next reboot without a human. Best effort
+#    only — never fails the recovery. --install-only: the manual stack
+#    above keeps running until the next boot, when the units take over
+#    cleanly. After a VM replacement, re-run install-supervisor.sh
+#    (without --install-only) to hand the stack to systemd.
+if [[ -f "$HARNESS/scripts/install-supervisor.sh" ]]; then
+  bash "$HARNESS/scripts/install-supervisor.sh" --install-only || true
+fi

@@ -27,7 +27,9 @@ src/dfagent_harness/lua/  Lua helpers run inside the game via DFHack
 scripts/               CLIs: dfh (daemon), dfh-observe, dfh-act,
                        dfh-events, m1_driver, reload_fort, recover.sh,
                        rebuild_diary, retry_diary, rpc_smoke,
-                       freepi_token_poll
+                       freepi_token_poll, install-supervisor.sh
+scripts/supervisor/    run_df.py — systemd wrapper: reload + watch one DF
+systemd/               urist-*.service + urist-stack.target (boot supervisor)
 docs/                  OBSERVE.md, ACTIONS.md, EVENTS.md, DAEMON.md,
                        PLANNER.md, PROTOCOL.md, ACCEPTANCE.md,
                        DIALOGS.md, ADVANCED_MECHANICS.md, SETUP.md
@@ -82,6 +84,26 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   trust the live snapshot (`GET /v1/snapshot`), not `/v1/status`.
   `dfh.py stop` can claim "no daemon running" when the pid file is stale;
   SIGTERM the pid directly.
+- **The supervisor (boot auto-recovery, 2026-11-27):** the stack is
+  supervised by systemd so a reboot brings it back with no human in
+  the loop. Units live in the repo (`systemd/urist-*.service`,
+  `urist-stack.target`); install with
+  `bash scripts/install-supervisor.sh` (copies units to
+  /etc/systemd/system, enables the target, stops the manual stack,
+  starts the target). Status: `systemctl status urist-stack.target`,
+  `systemctl is-active urist-df-main.service urist-daemon.service`.
+  `systemctl stop/start urist-stack.target` stops/starts the whole
+  stack in dependency order (daemon first on stop, so its stop-time
+  quicksave lands while DF is still up). Main DF loads
+  `region2-00125-04-12 --exact` (pinned: a bare region2 would resolve
+  to the drink-0 125-07-01 backup); scratch loads region5. **Do not
+  start the target while manual Xvfb/DF/daemon processes are running**
+  — the units would fight them for :99/:98 and RPC 5000. Run the
+  install script (it hands over) or stop the manual processes first.
+  /etc survives a reboot but NOT a VM replacement: after a replacement,
+  run recover.sh, then install-supervisor.sh. A full VM reboot test
+  has NOT been done yet (verified: kill-restart + target stop/start);
+  the next real reboot is the proof.
 - **The M1 model:** DeepSeek V4.1 Flash via Free Pi, model id
   `deepseek-v4.1-flash-1017`, JWT at `~/.free-pi/agent/jwt.txt` (0600).
   Free Pi is the weak link (IncompleteRead, HTTP 429 "concurrent" when

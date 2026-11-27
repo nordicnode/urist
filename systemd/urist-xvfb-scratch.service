@@ -1,0 +1,15 @@
+# urist-xvfb-scratch — virtual display :98 for the scratch DF instance
+# (embark / farm work). See urist-xvfb-main.service.
+[Unit]
+Description=Urist virtual display :98 (scratch DF)
+After=network.target
+PartOf=urist-stack.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :98 -screen 0 1024x768x24
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

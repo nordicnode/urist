@@ -1,0 +1,12 @@
+# urist-stack — the whole Urist stack as one target: both Xvfbs,
+# both DFs, the daemon. Enable this target and the stack comes up
+# on boot in dependency order; stop it and everything stops in
+# reverse order (daemon first, so its stop-time quicksave lands
+# while the main DF is still up).
+[Unit]
+Description=Urist DF harness stack
+Wants=urist-xvfb-main.service urist-xvfb-scratch.service urist-df-main.service urist-df-scratch.service urist-daemon.service
+After=urist-xvfb-main.service urist-xvfb-scratch.service urist-df-main.service urist-df-scratch.service urist-daemon.service
+
+[Install]
+WantedBy=multi-user.target

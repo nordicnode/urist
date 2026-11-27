@@ -182,5 +182,30 @@ class TestParseFortName(unittest.TestCase):
         self.assertEqual(m1_driver.parse_fort_name(None), "")
 
 
+class TestSnapshotCitizens(unittest.TestCase):
+    def test_full_units_section(self):
+        snap = {"sections": {"units": {"citizens": [
+            {"id": 1, "name": "Udil Testdwarf"},
+            {"id": 2, "name": "Deduk Stakudunib"}]}}}
+        self.assertEqual(
+            [c["id"] for c in m1_driver._snapshot_citizens(snap)],
+            [1, 2])
+
+    def test_diffed_units_section_is_string(self):
+        # 2026-11-27 (run #15): the final snapshot diffs the units
+        # section to a one-liner STRING, and _snapshot_citizens
+        # called .get on it — AttributeError killed the diary
+        # write after the run had completed the day. A non-dict
+        # units section carries no citizens.
+        snap = {"sections": {"units": "units: unchanged (7 citizens)."}}
+        self.assertEqual(m1_driver._snapshot_citizens(snap), [])
+
+    def test_missing(self):
+        self.assertEqual(m1_driver._snapshot_citizens({}), [])
+        self.assertEqual(m1_driver._snapshot_citizens(None), [])
+        self.assertEqual(
+            m1_driver._snapshot_citizens({"sections": {}}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -356,6 +356,12 @@ def _snapshot_citizens(snap: dict | None) -> list[dict]:
     if not snap:
         return []
     units = (snap.get("sections") or {}).get("units") or {}
+    # A diffed-away section is a STRING ("unchanged ..."), not a
+    # dict — .get on it raises AttributeError and killed the diary
+    # write at the end of run #15 (the run itself had completed
+    # the day). A non-dict units section carries no citizens.
+    if not isinstance(units, dict):
+        return []
     citizens = units.get("citizens") or []
     return [c for c in citizens if isinstance(c, dict)]
 

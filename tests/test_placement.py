@@ -229,7 +229,6 @@ def test_alternative_site_none_when_no_verified_site():
 
 def test_planner_no_build_when_sites_none():
     from dfagent_harness.planner import decide
-    import copy
     import json
     from pathlib import Path
     # With no sites, the planner must NOT emit a build decision
@@ -254,7 +253,6 @@ def test_planner_no_build_when_sites_none():
 
 def test_assembler_placement_section():
     from dfagent_harness import assembler
-    import copy
     import json
     from pathlib import Path
     fixture = (Path(__file__).resolve().parent / "fixtures"

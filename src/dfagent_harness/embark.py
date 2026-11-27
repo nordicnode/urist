@@ -69,7 +69,7 @@ from typing import Any, Optional
 from dfhack_rpc import DFHackClient, DFHackError
 
 from . import ui
-from .actions import _load_lua, _run_helper
+from .actions import _run_helper
 
 __all__ = [
     "M2_PROFILE", "PROFILE_FIELDS", "EmbarkError", "EmbarkResult",
@@ -755,7 +755,7 @@ def navigate_to_embark_screen(client: DFHackClient, wid: str,
         # loads the world.
         _keys_one(wid, display, "Return", delay=0.5)
         try:
-            name = _wait_either_screen(
+            _wait_either_screen(
                 client, _ADOPT_OR_EMBARK, timeout=30.0)
             break
         except EmbarkError:
@@ -864,8 +864,8 @@ def embark_site(client: DFHackClient, df_dir: Path, wid: str,
     count = run_fileresult(client, df_dir, wid=wid, display=display)
     if count <= 0:
         raise EmbarkError(
-            f"embark_site: fileresult found 0 matches for the profile "
-            f"(loosen a criterion and retry)")
+            "embark_site: fileresult found 0 matches for the profile "
+            "(loosen a criterion and retry)")
     # The overlay is already active: run_fileresult activates it (every
     # embark-assistant invocation does), so do NOT press "a" here — it
     # would toggle the overlay off. Go straight to the full finder.

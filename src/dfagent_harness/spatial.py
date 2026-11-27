@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from dfhack_rpc import DFHackClient
 
-from .actions import _helper_or_fail, _run_helper
+from .actions import _helper_or_fail
 
 __all__ = [
     "LEGEND", "SLICE_LAYERS", "MAX_SLICE", "FULL_SLICE",
@@ -534,7 +534,6 @@ def derive_areas(state: dict[str, Any],
     # what is above and below it. The survey is not available here,
     # so the vertical facts are graph-based; the server re-describes
     # with the cached survey when one exists.
-    by_id = {a["id"]: a for a in areas}
     for area in areas:
         area["description"] = describe_area(
             area, areas, graph, survey=None, fort_centre=centre)

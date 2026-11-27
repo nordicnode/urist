@@ -40,12 +40,11 @@ a burn rate from a single snapshot.
 
 from __future__ import annotations
 
-import time
 from typing import Any, Optional
 
 from .attention import build_attention
 from .spatial import estimate_tokens
-from .store import Store, TICKS_PER_DAY, TREND_WINDOW_DAYS
+from .store import Store, TICKS_PER_DAY
 
 __all__ = [
     "TokenAccountant", "assemble", "suggest", "sample_daily",
@@ -366,7 +365,6 @@ def _units(state: dict[str, Any]) -> tuple[str, str]:
         counters = c.get("counters") or {}
         stress = (c.get("stress") or {}).get("level", 0)
         wounds = c.get("wounds") or []
-        idle = c.get("idle")
         if (stress >= 10000 or wounds
                 or (counters.get("thirst", 0) or 0) >= 15000
                 or (counters.get("hunger", 0) or 0) >= 30000

@@ -1,0 +1,15 @@
+# Ruff configuration (2026-11-27, external review Table 11 row 12).
+#
+# Pyflakes rules only (F): undefined names, unused imports/locals,
+# redefinitions. The project never adopted ruff's style rules (UP,
+# RUF, ...); enforcing those now would be unrelated churn, so the
+# CI lint job runs `ruff check` with this config and nothing more.
+#
+# The generated protobuf stubs under src/dfhack_rpc/proto are
+# excluded: they are produced by scripts/generate_protos.py and
+# must never be hand-edited, so their unused imports are not ours
+# to fix.
+exclude = ["src/dfhack_rpc/proto"]
+
+[lint]
+select = ["F"]

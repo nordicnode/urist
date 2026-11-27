@@ -50,7 +50,7 @@ from typing import Any, Optional
 from dfhack_rpc import DFHackClient
 
 from . import column as column_mod
-from .actions import _Fail, _run_helper
+from .actions import _run_helper
 
 #: How far below a down-stair / channel to look for hazards (levels).
 HAZARD_LOOKAHEAD = 3
@@ -397,7 +397,7 @@ def verify_dig(client: DFHackClient, box: tuple[int, ...],
             for z in range(z0, z1 + 1):
                 try:
                     col = column_mod.read_column(client, x, y)
-                except Exception as exc:  # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     terrain_ok = False
                     bad.append(f"({x}, {y}, {z}): column failed")
                     continue

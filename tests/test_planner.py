@@ -5,7 +5,6 @@ phase-1 observe dump (tests/fixtures/observe-athelunol.json) with
 targeted mutations — no game needed.
 """
 
-import copy
 import json
 import sys
 import tempfile
@@ -457,7 +456,7 @@ class PlannerTickTests(unittest.TestCase):
             with mock.patch(
                     "dfagent_harness.planner.act",
                     side_effect=[fail_result, ok_result,
-                                 ok_result, ok_result]) as mock_act:
+                                 ok_result, ok_result]):
                 records = planner.tick(state, manager=True,
                                        sites=_sites())
                 self.assertTrue(records)

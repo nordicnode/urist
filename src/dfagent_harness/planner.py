@@ -29,7 +29,6 @@ deferred), trade (no caravan on this fort yet), metal industry
 from __future__ import annotations
 
 import json
-import math
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -38,8 +37,7 @@ from typing import Any, Callable, Optional
 
 from dfhack_rpc import DFHackClient
 
-from . import observe
-from .actions import act, nobles as probe_nobles
+from .actions import act
 
 __all__ = [
     "Decision",

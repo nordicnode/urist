@@ -5,7 +5,6 @@ snapshot baseline, areas/survey versioning, the 7-day trend slope
 + days-remaining, unit history, and the death diagnosis.
 """
 
-import json
 import sys
 import tempfile
 import unittest

@@ -28,12 +28,12 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 # Allow running from the repo root without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness.events import (  # noqa: E402
-    DEFAULT_WATCH_LOG,
     EventBus,
     EventPoller,
     WatcherDrainer,

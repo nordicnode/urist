@@ -17,7 +17,6 @@ designation afterwards.
 """
 import argparse
 import sys
-import time
 from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent.parent

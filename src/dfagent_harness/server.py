@@ -100,7 +100,7 @@ from dfhack_rpc import DFHackClient
 from dfhack_rpc.proto import CoreProtocol_pb2 as core
 from dfhack_rpc.proto import RemoteFortressReader_pb2 as rfr
 
-from .actions import JOB_SPECS, act, get_paused, set_paused
+from .actions import act, get_paused, set_paused
 from .events import EventBus, EventPoller
 from .planner import state_summary
 from .read_safety import ReadRefused
@@ -500,13 +500,13 @@ def create_server(
         read). Triggers the area derivation (which runs the scan)
         and the survey (which runs the scan) only if uncached."""
         from . import spatial
-        areas = get_areas()
+        get_areas()
         survey_out = get_survey()
         scan = spatial_cache.get("scan")
         if scan is None:
             # The scan was derived before the cache was added (or
             # the areas came from an older cache): re-derive once.
-            areas = get_areas(refresh=True)
+            get_areas(refresh=True)
             scan = spatial_cache.get("scan")
         from .survey import FORT_CENTRE
         out = spatial.render_overview(scan, survey_out, FORT_CENTRE)

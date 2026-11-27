@@ -484,7 +484,6 @@ def survey_summary(s: dict[str, Any]) -> list[str]:
     """The ~150-token survey summary (design §5.2): nearest of each
     kind, in plain words, with distance and quantity."""
     lines: list[str] = []
-    fort = tuple(s["fort_centre"])
     if s["water_bodies"]:
         w = min(s["water_bodies"],
                 key=lambda b: b["nearest"]["distance_tiles"])

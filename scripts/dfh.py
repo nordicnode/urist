@@ -149,7 +149,6 @@ def _cmd_start(args: argparse.Namespace) -> int:
         cmd.append("--no-auth")
     if config.allow_raw_actions:
         cmd.append("--allow-raw")
-    env = dict(os.environ)
     proc = subprocess.Popen(
         cmd, stdout=log_fh, stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL, start_new_session=True,

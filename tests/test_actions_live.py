@@ -20,7 +20,6 @@ Run from the repo root:
 import json
 import os
 import sys
-import time
 import unittest
 from pathlib import Path
 

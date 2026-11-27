@@ -78,8 +78,6 @@ class TestKillDf(unittest.TestCase):
         kill.assert_not_called()
 
     def test_pgrep_failure_means_no_pids(self):
-        main = Path("/home/hatch/workspace/df-agent-harness"
-                    "/third_party/df_47_05")
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(reload_fort.subprocess, "run",
                           return_value=mock.Mock(returncode=1,

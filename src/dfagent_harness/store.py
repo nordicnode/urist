@@ -32,7 +32,6 @@ import json
 import os
 import sqlite3
 import threading
-import time
 from pathlib import Path
 from typing import Any, Optional
 

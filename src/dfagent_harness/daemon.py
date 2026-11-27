@@ -34,9 +34,9 @@ import secrets
 import signal
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from dfhack_rpc import DFHackClient
 
@@ -44,7 +44,6 @@ from . import observe
 from .actions import act, get_paused, set_paused
 from .assembler import TICKS_PER_DAY
 from .events import (
-    DEFAULT_WATCH_LOG,
     EventBus,
     EventPoller,
     WatcherDrainer,

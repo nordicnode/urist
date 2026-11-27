@@ -807,7 +807,6 @@ class TestTickLoopFailureAccounting(unittest.TestCase):
         # H1: DF dead + daemon up = every snapshot fails. The old
         # code retried forever; five consecutive failures end the
         # run non-zero, mirroring the model-failure rule.
-        import json as _json
         daemon = _ScriptDaemon(
             [_good_snap()] + [RuntimeError("daemon down")] * 10,
             fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])

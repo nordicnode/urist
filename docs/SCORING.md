@@ -236,7 +236,7 @@ Both runs are in the leaderboard (`scores.db`).
 - `src/dfagent_harness/lua/wealth.lua` — the fortress-value probe.
 - `src/dfagent_harness/observe.py` — "wealth" section (on-demand
   only, not in the per-tick fast sections).
-- `src/dfagent_harness/server.py` — `GET /v1/wealth`.
+- `src/dfagent_harness/server/routes_units.py` — `GET /v1/wealth`.
 - `scripts/score_run.py` — the CLI.
 - `scripts/m1_driver.py` — logs `wealth` records at run start and
   run end (`_fetch_wealth`, mirroring `_fetch_fresh_citizens`).

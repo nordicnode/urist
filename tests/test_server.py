@@ -344,6 +344,10 @@ class _FakeDaemon:
     def run_task(self, name, wait=120, count=1, **kwargs):
         return self._run_task(name, wait=wait, count=count, **kwargs)
 
+    def get_placement(self, kind, width, height):
+        return {"kind": kind, "width": width, "height": height,
+                "sites": [{"x": 1, "y": 2, "z": 3, "score": 9}]}
+
 
 class TestTaskGoalValidation(_HttpCase):
     def setUp(self):
@@ -387,6 +391,57 @@ class TestTaskGoalValidation(_HttpCase):
         status, raw = self._req("POST", "/v1/tasks/brew", {"wait": 5})
         self.assertEqual(status, 502, raw)
         self.assertEqual(json.loads(raw)["error"]["code"], "RPC_ERROR")
+
+
+class TestSitesRoute(_HttpCase):
+    def setUp(self):
+        self.daemon = _FakeDaemon()
+        self._start(daemon=self.daemon)
+
+    def test_sites_ok_returns_placement(self):
+        # Regression: the split renamed the handler param to `h`,
+        # which the height local then shadowed — the final _json
+        # crashed and the route 502'd on every successful search.
+        status, raw = self._req(
+            "GET", "/v1/sites?kind=workshop&w=3&h=3")
+        self.assertEqual(status, 200, raw)
+        body = json.loads(raw)
+        self.assertEqual(body["kind"], "workshop")
+        self.assertEqual(body["width"], 3)
+        self.assertEqual(body["height"], 3)
+        self.assertIn("cost", body)
+        self.assertIsInstance(body["cost"]["ms"], int)
+
+    def test_sites_defaults_to_workshop(self):
+        status, raw = self._req("GET", "/v1/sites")
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["kind"], "workshop")
+
+    def test_sites_bad_kind_is_400(self):
+        status, raw = self._req("GET", "/v1/sites?kind=nope")
+        self.assertEqual(status, 400, raw)
+        self.assertEqual(json.loads(raw)["error"]["code"],
+                         "BAD_REQUEST")
+
+    def test_sites_bad_size_is_400(self):
+        for qs in ("w=0&h=3", "w=3&h=abc", "w=99&h=3", "w=3&h=0"):
+            with self.subTest(qs=qs):
+                status, raw = self._req(
+                    "GET", f"/v1/sites?kind=workshop&{qs}")
+                self.assertEqual(status, 400, raw)
+                self.assertEqual(json.loads(raw)["error"]["code"],
+                                 "BAD_REQUEST")
+
+
+class TestSitesNoDaemon(_HttpCase):
+    def setUp(self):
+        self._start()
+
+    def test_sites_no_daemon_is_503(self):
+        status, raw = self._req("GET", "/v1/sites?kind=workshop")
+        self.assertEqual(status, 503, raw)
+        self.assertEqual(json.loads(raw)["error"]["code"],
+                         "NO_DAEMON")
 
 
 class TestPercentDecoding(_HttpCase):

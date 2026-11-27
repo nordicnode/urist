@@ -1188,7 +1188,7 @@ resuming afterwards.
   `src/dfagent_harness/catalog.py` (introspection-built,
   cannot drift), `src/dfagent_harness/diagnose.py`,
   `src/dfagent_harness/briefings.py` (caravan drift),
-  `src/dfagent_harness/wiki.py`, `src/dfagent_harness/server.py`
+  `src/dfagent_harness/wiki.py`, `src/dfagent_harness/server/routes_journal.py`
   (GET /v1/memory/why/<id> exists).
 - docs/MISTAKES.md (being drafted in parallel, 2026-11-27):
   the mistake ledger, the mirror of the skill library. The

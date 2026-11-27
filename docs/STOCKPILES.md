@@ -235,7 +235,7 @@ from the code, not assumed.
   stockpile at all and the verified box exists (planner.py).
 - `ui.py` still has a keystroke `create_stockpile`, wired into the
   Planner as `_ui_stockpile`. No current decision uses it (the planner's
-  food-stockpile decision uses the programmatic action, and server.py
+  food-stockpile decision uses the programmatic action, and `server/routes_actions.py`
   routes `create_stockpile` through the programmatic action). The ui path
   is dead weight that contradicts the no-keystrokes rule and must be
   confirmed unused and removed in phase 1.

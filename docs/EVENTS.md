@@ -17,7 +17,8 @@ happen** — push, not poll-only. Two sources feed one ordered stream
 
 Both feed `EventBus` (in-process pub/sub: ordering, dedup, replay),
 served over SSE by the minimal HTTP server
-(`src/dfagent_harness/server.py`; `GET /v1/events`).
+(`src/dfagent_harness/server/` package, `routes_events.py`;
+`GET /v1/events`).
 
 ## Status
 
@@ -173,7 +174,7 @@ food 38u (both above the lines).
   blank line. A `:heartbeat` comment is sent every 30 s while idle.
 - `?since=<seq>` or the `Last-Event-ID` header replays missed events
   from the bus ring, then continues live. Replay-then-subscribe is
-  ordered so no event is delivered twice (see `server.py`).
+  ordered so no event is delivered twice (see `server/routes_events.py`).
 - Without the SSE Accept header, `GET /v1/events?limit=N`
   (`?since=` also works) returns a JSON array:
   `{"events": [...], "latest_seq": N}` (default limit 100, max 1000).

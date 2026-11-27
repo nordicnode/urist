@@ -624,7 +624,7 @@ it is verified live.
 - `src/dfagent_harness/diary.py`: `open_threads` derives threads
   from current samples, stores nothing, closes when the condition
   clears.
-- `src/dfagent_harness/server.py`: `GET /v1/journal` serves recent
+- `src/dfagent_harness/server/routes_journal.py`: `GET /v1/journal` serves recent
   decisions and counts only.
 - No wiki queries were needed: every game-mechanics claim in this doc
   (the brew chain, bed making, the drink floor) is already verified

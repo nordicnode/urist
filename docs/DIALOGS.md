@@ -84,7 +84,7 @@ unknown modal is never dismissed.
 | Focus (prefix) | Dismissable | Reason |
 |---|---|---|
 | `textviewer` | yes | Announcement/help text; closing it commits nothing. Proven live. |
-| `topicmeeting` | yes | Liaison meeting; closing ends the meeting with no agreement — the same as leaving. |
+| `topicmeeting` | **no** | Liaison meeting; `screen.dismiss` re-creates it every tick — the peek needs the 'a' (finish peeking) menu choice and no Lua route expresses it. Proven live 2026-11-27; decision escalated. |
 | `announcelist` | yes | Announcements list; closing it commits nothing. |
 | anything else | **no** | Unknown or game-committing; named and returned as a failure. |
 
@@ -101,26 +101,72 @@ Verified live 2026-11-26:
   screen and the allowlist. The screen was NOT dismissed (focus
   stayed on it until the test cleaned it up by hand).
 
-## The meeting screen (status 2026-11-26)
+## The meeting screen (verified live 2026-11-27)
 
-The meeting screen (`viewscreen_topicmeetingst`) is the proven
-blocking case: DeepSeek's dfkit showed the live meeting screen
-ignored LEAVESCREEN and only closed with its menu key, and the
-outpost liaison meeting left a fort at tick 225920 for 20+ minutes.
-It is in the allowlist (dismiss = end the meeting with no
-agreement), and the dismiss mechanism is proven on native
-viewscreens, so the same `dfhack.screen.dismiss` call applies.
+The meeting screen is the proven blocking case: DeepSeek's dfkit
+showed the live meeting screen ignored LEAVESCREEN and only closed
+with its menu key, and the outpost liaison meeting left a fort at
+tick 225920 for 20+ minutes. It is in the allowlist (dismiss = end
+the meeting with no agreement), and the dismiss mechanism is proven
+on native viewscreens, so the same `dfhack.screen.dismiss` call
+applies.
 
-Live verification on a REAL meeting screen is still pending, because
-no liaison could be produced: the fort has no trade depot, and a
-forced Diplomat event (inserted directly into `timed_events` — the
-`force` command via RPC silently failed to insert it) fired but no
-diplomat appeared on the map and no meeting screen ever showed
-(~43,000 ticks watched). The liaison needs a trade depot to meet
-at; the harness has no depot-build action yet (that is a separate
-gap, not a dialog gap). Once a depot exists, force a Diplomat, watch
-for the `topicmeeting` focus, and run `advance` — the mechanism is
-already in place.
+**Live verification on a REAL meeting screen: DONE 2026-11-27 — and it
+CORRECTS the allowlist.** The scratch fort (region5, 238-07-18) was
+found frozen at tick 222278 with the outpost liaison meeting open —
+screenshot showed "The Fisherdwarf Urvad Takûsthututh meets with the
+outpost liaison Reg Mng..." / "Reg Mengokol: I am your liaison from
+the Mountainhomes. Let's discuss your situation." The FIRST screen
+was a `viewscreen_textviewerst` (focus `textviewer`); `advance`
+dismissed it in one round (focus `textviewer` ->
+`dwarfmode/Default`, clock advancing 222278 -> 222287). But the
+meeting then re-presented as a genuine `viewscreen_topicmeetingst`
+(focus `topicmeeting`) — the peek view: "There is much to share...
+<Information added to Civilizations/World Info>" with the single
+option "a - Finish peeking in on conversation." **That screen does
+NOT dismiss.** Five live experiments, all on the same meeting:
+(1) dismiss the topicmeeting child — marked dismissed, but a NEW
+topicmeeting appeared (different address; the parent re-creates the
+child); (2) dismiss the parent meetingst — marked dismissed, child
+stayed, tick frozen; (3) dismiss child + parent together — both
+marked, game ticked exactly +1, then the screen re-appeared;
+(4) write `option_key_pressed = 97` ('a') on the topicmeeting —
+field set (read-back 97), screen ignored it (the field is only read
+inside feed(), which runs on input events, not ticks);
+(5) write `popup.flags.close_screen = true` — ignored. Also
+established: `feed()` cannot express the letter 'a' —
+`df.interface_key` (1615 entries, enumerated numerically) has no
+single-letter key (SELECT=1, LEAVESCREEN=6); letter-key menu options
+are raw SDL keysyms, not interface keys. Structure found live:
+stack dwarfmodest -> meetingst (parent) -> topicmeetingst (child);
+`meeting_diplomat_info` (civ 68, diplomat 4275, cur_step 3, topics
+[8,6,5], no agreement yet); no flaggable "peek" state in the
+meeting/popup flags. **So `topicmeeting` is UNDISMISSABLE in
+`dialogs.ALLOWLIST` (not dismissable as previously written): the
+meeting is a scripted conversation (dipscript) that only ends when
+the player makes the menu choice, and no Lua route can make it. The
+only ways to press 'a' are RFR PassKeyboardEvent (sym=97) or
+xdotool — both rejected by the dialog directive — so the decision is
+escalated, not taken unilaterally.** Ending the peek commits
+NOTHING (no agreement, no trade; the NPCs keep talking off-screen
+and the meeting concludes on its own), which is why a narrow
+keypress exception for this one non-committal option is the thing to
+decide — not a general keystroke exception. The scratch fort is
+frozen at tick 222291 (paused, meeting open) until that decision.
+The 07-18 backup preserves the state but was saved AFTER the
+meeting opened, so reloading it restores the same frozen meeting.
+
+Two corrections to the earlier (2026-11-26) reasoning, both from
+this live case:
+- The liaison does NOT need a trade depot to meet: this fort has no
+  depot and the liaison still arrived in autumn and opened the
+  meeting. A depot is needed for TRADE, not for the meeting itself.
+- A frozen clock with 0 jobs over a long watch is the signature of
+  a blocking modal, not a job-creation failure: the autumn farm
+  watches that showed "0 PlantSeeds jobs in 600 s" ran against this
+  frozen clock. **Every watch must verify the tick advances; a
+  0-job reading with a frozen tick proves nothing.** See
+  docs/FARMING.md and the coordinator log (2026-11-27).
 
 ## What did NOT work (recorded so it is not retried)
 

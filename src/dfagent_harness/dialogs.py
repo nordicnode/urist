@@ -48,21 +48,28 @@ from dfhack_rpc import DFHackClient
 # it declines to engage, it does not commit the game to anything.
 #   textviewer: an announcement / help text. Dismissing closes it.
 #     Proven live 2026-11-26 (dfhack.screen.dismiss).
-#   topicmeeting: the outpost liaison meeting. Dismissing ends the
-#     meeting without an agreement — the same as leaving. The live
-#     meeting screen ignored LEAVESCREEN and only closed with its
-#     menu key (DeepSeek's dfkit, 2026-11-25), which is why the
-#     programmatic route matters. Dismiss on a real meeting screen
-#     is verified separately (see DIALOGS.md).
+#   topicmeeting: the outpost liaison meeting. NOT dismissable —
+#     proven live 2026-11-27 (see DIALOGS.md): dfhack.screen.dismiss
+#     on the child AND the parent marks dismissed, but the game
+#     re-creates the meeting screen on the next tick (the game ticked
+#     exactly +1, then the screen re-appeared) because the meeting is
+#     a scripted conversation (dipscript) that only ends when the
+#     player makes the menu choice ("a - Finish peeking in on
+#     conversation"). Writing option_key_pressed and the popup
+#     close_screen flag are both ignored, and feed() cannot express
+#     the letter key (no single-letter interface_key exists). So the
+#     meeting needs a menu choice no Lua route can make; it is
+#     refused and named, and the decision is escalated.
 #   announcelist: the announcements list. Dismissing closes it.
-# Game-committing = refusing to dismiss; the caller names the screen
+# Undismissable = refusing to dismiss; the caller names the screen
 # and returns it as a failure. These are screens where closing
-# without choosing would either commit the game or lose state.
+# without choosing would either commit the game or lose state, or
+# where dismissal does not work at all (the screen re-creates).
 #   (Populated as screens are encountered live; anything not in this
 #   table is REFUSED by default — an unknown modal is never dismissed.)
 ALLOWLIST: dict[str, tuple[bool, str]] = {
     "textviewer": (True, "announcement/help text; closing it commits nothing"),
-    "topicmeeting": (True, "liaison meeting; closing ends the meeting with no agreement"),
+    "topicmeeting": (False, "liaison meeting; screen.dismiss re-creates it every tick — the peek needs the 'a' (finish peeking) menu choice and no Lua route expresses it; see DIALOGS.md"),
     "announcelist": (True, "announcements list; closing it commits nothing"),
 }
 
@@ -79,7 +86,11 @@ def classify_focus(focus: str | None) -> tuple[str, bool, str]:
     """Classify a focus string.
 
     Returns (kind, dismissable, reason) where kind is one of
-    "non_modal", "dismissable", "committing", "unknown".
+    "non_modal", "dismissable", "undismissable", "unknown".
+    "undismissable" covers both game-committing screens (closing
+    without choosing would commit the game or lose state) and
+    screens where dismissal does not work at all (the screen
+    re-creates); both are refused and named, never dismissed.
     """
     if not focus:
         return ("unknown", False, "no focus string")
@@ -88,7 +99,7 @@ def classify_focus(focus: str | None) -> tuple[str, bool, str]:
             return ("non_modal", False, "playable screen")
     for prefix, (ok, reason) in ALLOWLIST.items():
         if focus.startswith(prefix):
-            return ("dismissable" if ok else "committing", ok, reason)
+            return ("dismissable" if ok else "undismissable", ok, reason)
     return ("unknown", False, f"focus {focus!r} is not in the dialog allowlist")
 
 

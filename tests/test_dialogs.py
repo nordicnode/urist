@@ -30,9 +30,12 @@ def test_classify_dismissable():
             assert kind == "dismissable", prefix
             assert dismissable is True
     # Sub-screens inherit the parent's classification (prefix match).
+    # topicmeeting is UNDISMISSABLE (proven live 2026-11-27: the
+    # meeting screen re-creates itself on every tick), so its
+    # sub-screens inherit that refusal.
     kind, dismissable, _ = classify_focus("topicmeeting_takerequests")
-    assert kind == "dismissable"
-    assert dismissable is True
+    assert kind == "undismissable"
+    assert dismissable is False
 
 
 def test_classify_unknown_refused():
@@ -56,8 +59,11 @@ def test_classify_empty():
 
 
 def test_allowlist_has_meeting_and_textviewer():
-    # The two proven blocking cases are in the allowlist.
+    # The two proven blocking cases are in the allowlist. textviewer
+    # is dismissable (proven live); topicmeeting is in the allowlist
+    # as UNDISMISSABLE (proven live 2026-11-27: screen.dismiss
+    # re-creates it every tick — it needs the menu choice).
     assert "topicmeeting" in ALLOWLIST
-    assert ALLOWLIST["topicmeeting"][0] is True
+    assert ALLOWLIST["topicmeeting"][0] is False
     assert "textviewer" in ALLOWLIST
     assert ALLOWLIST["textviewer"][0] is True

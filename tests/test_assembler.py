@@ -444,6 +444,42 @@ class TestSuggest(unittest.TestCase):
                 "Suggested action: gather the brewing materials"),
             out)
 
+    def _farm_state(self, with_plot=False, seeds=6):
+        # A still exists and drink is plentiful, so neither the
+        # still-build nor the brew branch fires; only the farm
+        # branch can. category_stacks.SEEDS is the raw
+        # game-category count (it includes seeds still in the
+        # wagon, unlike seeds_stacks).
+        buildings = [{"id": 1, "type": "Workshop",
+                      "subtype": "Still"}]
+        if with_plot:
+            buildings.append({"id": 2, "type": "FarmPlot",
+                              "x1": 82, "y1": 82, "x2": 84, "y2": 84,
+                              "z": 49, "construction_stage": 3})
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 1}],
+            "list": buildings})
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["drink_units"] = 120
+        st["stocks"]["category_stacks"] = {"SEEDS": seeds}
+        return st
+
+    def test_proactive_farm_suggestion_no_plot_with_seeds(self):
+        st = self._farm_state()
+        sites = {"farm_site": (82, 82, 175)}
+        out = suggest(st, [], sites=sites)
+        self.assertIn("NO FARM PLOT EXISTS", out)
+        self.assertIn("build_farm_plot at 82, 82, 175", out)
+        self.assertIn("POST /v1/tasks/farm", out)
+
+    def test_no_farm_suggestion_when_plot_exists(self):
+        st = self._farm_state(with_plot=True)
+        self.assertIsNone(suggest(st, []))
+
+    def test_no_farm_suggestion_without_seeds(self):
+        st = self._farm_state(seeds=0)
+        self.assertIsNone(suggest(st, []))
+
 
 class TestBuildingsAndStocksVisibility(unittest.TestCase):
     # Mikey, 2026-11-26: M1 ticks 1 and 4 burned idle ticks asking

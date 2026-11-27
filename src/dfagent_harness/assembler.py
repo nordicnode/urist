@@ -801,6 +801,14 @@ def _material_blocker_suggestion(
     return None
 
 
+def _has_farm_plot(state: dict[str, Any]) -> bool:
+    """True when a FarmPlot building exists (built or building)."""
+    for b in (state.get("buildings") or {}).get("list") or []:
+        if b.get("type") == "FarmPlot":
+            return True
+    return False
+
+
 def _still_build_suggestion(
         sites: Optional[dict[str, Any]]) -> str:
     """The still-build suggestion text (shared by the low-drink
@@ -907,6 +915,35 @@ def suggest(state: dict[str, Any],
                     "(POST /v1/tasks/brew) — the still is built "
                     "and drink is finite; brewing turns plants "
                     "into drink before the stock runs out.")
+    # Proactive farm: no farm plot exists, but the fort holds seeds.
+    # category_stacks.SEEDS is the raw game-category count — it
+    # includes seeds still in the wagon, unlike seeds_stacks, so
+    # this fires on a fresh fort too. A fort that only gathers will
+    # run out of plants; a farm grows plump helmets underground and
+    # surface crops in the sun. Fires only when nothing more urgent
+    # did — farming is growth, not survival. The farm_site
+    # coordinate is area-derived, not probe-verified; the build
+    # action re-verifies the site and names a verified alternative
+    # when it is not free.
+    if not _has_farm_plot(state):
+        seeds = ((state.get("stocks") or {}).get("category_stacks")
+                 or {}).get("SEEDS")
+        if isinstance(seeds, int) and seeds > 0:
+            farm_site = None
+            if sites:
+                fs = sites.get("farm_site")
+                if isinstance(fs, (list, tuple)) and len(fs) == 3:
+                    farm_site = (int(fs[0]), int(fs[1]), int(fs[2]))
+            at = (f" at {farm_site[0]}, {farm_site[1]}, {farm_site[2]}"
+                  if farm_site else "")
+            return ("Suggested action: NO FARM PLOT EXISTS, so the "
+                    "fort cannot grow its own food. Build a farm "
+                    "plot FIRST: build_farm_plot"
+                    f"{at} (3x3; the build verifies the site and "
+                    "names a verified alternative when it is not "
+                    "free). Then run the farm task "
+                    "(POST /v1/tasks/farm) — it picks a crop for the "
+                    "plot's light and biome and plants it.")
     return None
 
 

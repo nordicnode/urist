@@ -138,6 +138,7 @@ def find_sites(client: DFHackClient,
                limit: int = 5,
                search_radius: int = 20,
                probe_budget: int = 12,
+               z_levels: Optional[tuple[int, ...]] = None,
                timeout: float = 30.0
                ) -> dict[str, Any]:
     """Find verified-free sites for a kind + size.
@@ -148,6 +149,13 @@ def find_sites(client: DFHackClient,
     PLUS reachability from from_pos (the fort centre, where
     dwarves stand). Returns {"sites": [verified...], "blocked":
     [top blocked candidates with reasons], "kind": kind, ...}.
+
+    ``z_levels`` overrides the searched levels (default surface_z
+    and surface_z + 1): an underground farm plot lives a level or
+    two below the surface, in a dug-out room — pass the room's z
+    (e.g. (surface_z - 1,)) once the digging is done. Farm plots
+    are probed with farm=True, so each verified site carries its
+    soil/light/biome summary ("farm") for the crop decision.
 
     A site is verified only when probe_site says free AND
     reachable is True. A site whose reachability could not be
@@ -178,7 +186,9 @@ def find_sites(client: DFHackClient,
     verified: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     probed = 0
-    for z in (surface_z, surface_z + 1):
+    levels = (z_levels if z_levels is not None
+              else (surface_z, surface_z + 1))
+    for z in levels:
         if len(verified) >= limit:
             break
         try:
@@ -214,6 +224,7 @@ def find_sites(client: DFHackClient,
                     client, "probe_site.lua",
                     {"x": pos[0], "y": pos[1], "z": pos[2],
                      "width": width, "height": height,
+                     "farm": kind == "farm_plot",
                      "from_x": from_pos[0], "from_y": from_pos[1],
                      "from_z": from_pos[2]},
                     timeout=timeout)
@@ -228,6 +239,8 @@ def find_sites(client: DFHackClient,
                         "height": height, "reachable": True,
                         "why": site_why(
                             {"pos": [pos[0], pos[1], pos[2]]}, centre)}
+                if kind == "farm_plot":
+                    site["farm"] = probe.get("farm")
                 verified.append(site)
             else:
                 problems = probe.get("problems") or []
@@ -258,6 +271,7 @@ def verify_site(client: DFHackClient,
     Returns {"free": bool, "reachable": bool|None,
     "problems": [...]}. Used by the build actions to check a
     specific site, and by the query route for a single-site check.
+    Farm plots also carry the soil/light/biome summary ("farm").
     """
     if kind not in PLACEMENT_KINDS:
         raise ValueError(f"unknown placement kind {kind!r}")
@@ -265,15 +279,19 @@ def verify_site(client: DFHackClient,
         client, "probe_site.lua",
         {"x": pos[0], "y": pos[1], "z": pos[2],
          "width": width, "height": height,
+         "farm": kind == "farm_plot",
          "from_x": from_pos[0], "from_y": from_pos[1],
          "from_z": from_pos[2]},
         timeout=timeout)
     if not probe.get("ok", False):
         return {"free": False, "reachable": None,
                 "problems": [f"probe failed: {probe.get('error')}"]}
-    return {"free": bool(probe.get("free")),
-            "reachable": probe.get("reachable"),
-            "problems": list(probe.get("problems") or [])}
+    out: dict[str, Any] = {"free": bool(probe.get("free")),
+                           "reachable": probe.get("reachable"),
+                           "problems": list(probe.get("problems") or [])}
+    if kind == "farm_plot":
+        out["farm"] = probe.get("farm")
+    return out
 
 
 def placement_anchor(state: dict[str, Any],

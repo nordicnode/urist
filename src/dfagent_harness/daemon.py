@@ -223,7 +223,14 @@ TASK_DEFS: dict[str, dict[str, Any]] = {
                     "need": "carpenter", "wait_job": "CustomReaction"},
     "gather": {"action": "designate_gather",
                "need": None, "wait_job": "GatherPlants"},
+    "farm": {"action": "set_farm_crop",
+             "need": None, "wait_job": "PlantSeeds"},
 }
+
+#: Surface crops the farm task knows, verified live 2026-11-27
+#: (depth 0-0, biome flags + seasons from the plant raws).
+#: Underground plots always plant plump helmets.
+_FARM_SURFACE_CROPS = ("REED_ROPE", "GRASS_LONGLAND")
 
 
 def _find_workshop(state: dict[str, Any],
@@ -1049,8 +1056,173 @@ class Daemon:
                 "may not have processed; the game was re-paused")
 
     # -- composed tasks --------------------------------------------------
+    def _run_farm_task(self, state: dict[str, Any], started: float,
+                       wait: float, kwargs: dict[str, Any]
+                       ) -> dict[str, Any]:
+        """The farm task (PROTOCOL.md §4.3): plant a crop on a built
+        farm plot and verify PlantSeeds jobs appear and finish.
+
+        Self-contained: it finds the plot, picks the crop for the
+        plot's light/biome/season (dark -> plump helmets; light ->
+        the surface crop with the most seeds on hand that grows in
+        this biome and season), and lets set_farm_crop enforce every
+        precondition before anything is written. A caller may pass
+        building_id / plant / season to override the choice; a wrong
+        override is refused by the action, not planted.
+        """
+        def _fail(msg: str, fix: Optional[str] = None
+                  ) -> dict[str, Any]:
+            out: dict[str, Any] = {
+                "ok": False, "action": "task:farm", "reason": msg,
+                "detail": msg, "evidence": None,
+                "took_ms": round((time.monotonic() - started) * 1000)}
+            if fix:
+                out["fix"] = fix
+            return out
+
+        from .actions import _SEASON_NAMES, _run_helper, _wait_for_paused
+        plots = [b for b in (state.get("buildings") or {}).get("list")
+                 or [] if b.get("type") == "FarmPlot"]
+        if kwargs.get("building_id") is not None:
+            plots = [b for b in plots
+                     if b.get("id") == kwargs["building_id"]]
+            if not plots:
+                return _fail(
+                    f"no farm plot #{kwargs['building_id']}",
+                    "Fix: build a farm plot first (action "
+                    "build_farm_plot).")
+        if not plots:
+            return _fail(
+                "no farm plot exists",
+                "Fix: build a farm plot first (action "
+                "build_farm_plot) — the farm task plants a crop, it "
+                "does not build the plot.")
+        plot = next((b for b in plots
+                     if b.get("construction_stage") in (None, 3)), None)
+        if plot is None:
+            return _fail(
+                "a farm plot exists but is still under construction",
+                "Fix: wait for the plot to finish building, then run "
+                "the farm task again.")
+        # The plot's light/biome, from a fresh probe of its rect.
+        x1, y1, z = plot["x1"], plot["y1"], plot["z"]
+        width = plot["x2"] - x1 + 1
+        height = plot["y2"] - y1 + 1
+        site = _run_helper(
+            self.client, "probe_site.lua",
+            {"x": x1, "y": y1, "z": z, "width": width, "height": height,
+             "farm": True})
+        farm = (site.get("farm") or {}) if site.get("ok") else {}
+        light = farm.get("light")
+        if light == "mixed":
+            return _fail(
+                f"farm plot #{plot['id']} has mixed Light and Dark "
+                f"tiles — it will never be fully planted",
+                "Fix: deconstruct it and rebuild the plot wholly "
+                "above ground or wholly underground.")
+        plant = kwargs.get("plant")
+        if plant is None:
+            if light == "dark":
+                plant = "MUSHROOM_HELMET_PLUMP"
+            elif light == "all":
+                # The surface crop with the most seeds on hand whose
+                # biome flags include the plot's biome and whose
+                # season flag includes the current season.
+                seeds = _run_helper(self.client, "probe_seeds.lua", {})
+                by_plant = (seeds.get("by_plant") or {}) \
+                    if seeds.get("ok") else {}
+                best: Optional[tuple[str, int]] = None
+                for cand in _FARM_SURFACE_CROPS:
+                    crop = _run_helper(self.client, "probe_crop.lua",
+                                       {"crop": cand})
+                    if not crop.get("ok"):
+                        continue
+                    seasons = [str(s) for s in crop.get("seasons")
+                               or []]
+                    cur = _SEASON_NAMES[crop["cur_season"]].upper()
+                    if cur not in seasons:
+                        continue
+                    if any(f"BIOME_{b}" not in
+                           (crop.get("biome_flags") or [])
+                           for b in farm.get("biomes") or []):
+                        continue
+                    have = int(((by_plant.get(cand) or {})
+                                .get("units") or 0))
+                    if have < 1:
+                        continue
+                    if best is None or have > best[1]:
+                        best = (cand, have)
+                if best is None:
+                    return _fail(
+                        "no surface crop can be planted on farm plot "
+                        f"#{plot['id']} right now (no seeds on hand "
+                        "for a crop that grows in this biome and "
+                        "season)",
+                        "Fix: gather surface plants (task gather) to "
+                        "get seeds, or plant plump helmets in an "
+                        "underground plot instead.")
+                plant = best[0]
+            else:
+                return _fail(
+                    f"farm plot #{plot['id']} light is {light!r} — "
+                    f"cannot tell whether it is above or below ground",
+                    "Fix: check the plot's site (the probe may have "
+                    "failed) and rebuild it if it is mixed.")
+        result = act(self.client, "set_farm_crop",
+                     building_id=plot["id"], plant=plant,
+                     season=kwargs.get("season"))
+        if not result.ok:
+            return {**result.to_dict(), "action": "task:farm"}
+        # Wait for PlantSeeds jobs to appear, then leave the list.
+        # Appearance is the proof the crop is plantable here (seeds
+        # reachable, a planter exists); disappearance is the proof
+        # the planting was worked (or cancelled — the newest reports
+        # name the cause, same check as the generic path).
+        def _seeds_jobs() -> list[dict[str, Any]]:
+            cur = observe.collect(self.client, sections=("jobs",))
+            # NOTE: jobs.lua puts the NAME in "type" and the numeric
+            # id in "job_type" — matching "job_type" against the
+            # string "PlantSeeds" never matches.
+            return [j for j in (cur.get("jobs") or {}).get("list") or []
+                    if j.get("type") == "PlantSeeds"]
+
+        appear_wait = min(wait, 60.0)
+        appeared = _wait_for_paused(
+            self.client, lambda: _seeds_jobs() or None, appear_wait)
+        if not appeared:
+            return _fail(
+                f"crop {plant} set on farm plot #{plot['id']} but no "
+                f"PlantSeeds job appeared within {appear_wait:g}s",
+                "Diagnosis: the seeds may still be locked in the "
+                "wagon (deconstruct it), no dwarf may have the "
+                "Farming labor, or the crop may be invalid for this "
+                "plot despite the checks. Check the newest reports "
+                "for a cancellation.")
+        finished = _wait_for_paused(
+            self.client, lambda: not _seeds_jobs(), wait)
+        took_ms = round((time.monotonic() - started) * 1000)
+        if not finished:
+            msg = (f"crop {plant} set on farm plot #{plot['id']} and "
+                   f"PlantSeeds jobs started, but they did not finish "
+                   f"within {wait:g}s")
+            return {"ok": False, "action": "task:farm", "reason": msg,
+                    "detail": msg,
+                    "evidence": {"building_id": plot["id"],
+                                 "plant": plant},
+                    "took_ms": took_ms}
+        msg = (f"farm plot #{plot['id']} planted with {plant} "
+               f"({result.detail.get('tiles_plantable')} of "
+               f"{result.detail.get('tiles')} tiles)")
+        return {"ok": True, "action": "task:farm", "reason": msg,
+                "detail": msg,
+                "evidence": {"building_id": plot["id"], "plant": plant,
+                             "tiles_plantable": result.detail.get(
+                                 "tiles_plantable"),
+                             "tiles": result.detail.get("tiles")},
+                "took_ms": took_ms}
+
     def run_task(self, name: str, wait: float = 120.0,
-                 count: int = 1) -> dict[str, Any]:
+                 count: int = 1, **kwargs: Any) -> dict[str, Any]:
         """Run a composed task (PROTOCOL.md §4.3): queue the work,
         then wait (bounded) for the queued job to leave the job list
         — disappearance means it was worked (or cancelled, which the
@@ -1140,6 +1312,16 @@ class Daemon:
             # gathering was designated (the surface z, never z=42).
             return {**result.to_dict(), "action": f"task:{name}",
                     "box": list(box)}
+        if name == "farm":
+            # Self-contained: find a built farm plot, pick a crop
+            # for its light/biome/season, set it (the action
+            # verifies every precondition before writing), then wait
+            # (bounded) for PlantSeeds jobs to appear and finish.
+            # The caller may pass building_id / plant / season to
+            # override the choice; the action still enforces the
+            # rules, so a wrong override is refused, not planted.
+            return self._run_farm_task(state, started, wait,
+                                       kwargs)
         need = spec["need"]
         subtype = {"still": "Still", "kitchen": "Kitchen",
                    "carpenter": "Carpenters"}[need]

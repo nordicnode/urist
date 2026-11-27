@@ -170,11 +170,40 @@ NOTES: dict[str, dict[str, Any]] = {
             "z": "The z-level (the ground).",
         },
         "constraints": [
-            "A farm plot needs soil (or mud) and a dwarf with the "
-            "Farming labor. Plant plump helmets for brewing.",
+            "A farm plot needs soil (or muddied stone) and a dwarf "
+            "with the Farming labor. The build result names the "
+            "site's soil/light/biome summary: all-soil + all-light "
+            "grows above-ground crops, all-soil + all-dark grows "
+            "subterranean crops (plump helmets). A plot on a soil "
+            "layer yields 75% less (poor soil); muddied stone "
+            "yields full. Set the crop afterwards with "
+            "set_farm_crop — a plot with no crop set grows nothing.",
         ],
         "example": {"x": 90, "y": 90, "z": 175, "width": 3,
                     "height": 3},
+    },
+    "set_farm_crop": {
+        "params": {
+            "building_id": "The farm plot's building id.",
+            "plant": "The crop's plant raw id, e.g. "
+                     "MUSHROOM_HELMET_PLUMP (plump helmets, "
+                     "underground, any season), GRASS_WHEAT_CAVE "
+                     "(cave wheat, underground, summer/autumn), "
+                     "REED_ROPE (rope reed, above ground).",
+            "season": "0 spring, 1 summer, 2 autumn, 3 winter; "
+                      "omit for the current season.",
+        },
+        "constraints": [
+            "The crop is verified BEFORE it is set: the plot must "
+            "be all-light (above-ground crop) or all-dark "
+            "(subterranean crop) — a mixed plot is refused; the "
+            "crop must grow in the season; an above-ground crop "
+            "must grow in the plot's biome; and seeds must be on "
+            "hand (1 per tile — a partial count plants that many "
+            "tiles). A refusal names the cause and the fix.",
+        ],
+        "example": {"building_id": 1,
+                    "plant": "MUSHROOM_HELMET_PLUMP"},
     },
     "build_furniture": {
         "params": {

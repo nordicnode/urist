@@ -179,7 +179,7 @@ class TestVerifyDig(unittest.TestCase):
     def setUp(self):
         self.client = mock.Mock()
 
-    def _verify(self, dig_total, col):
+    def _verify(self, dig_total, col, mode="down-stair"):
         def _helper(client, name, params, timeout=30.0):
             if name == "probe_dig.lua":
                 return {"ok": True, "dig_total": dig_total}
@@ -190,7 +190,7 @@ class TestVerifyDig(unittest.TestCase):
                 mock.patch.object(digging.column_mod, "read_column",
                                   return_value=col):
             return digging.verify_dig(
-                self.client, (97, 97, 175, 97, 97, 175), "down-stair")
+                self.client, (97, 97, 175, 97, 97, 175), mode)
 
     def test_complete_when_designation_gone_and_terrain_changed(self):
         # The floor at z175 is now a stair (not a solid floor).
@@ -217,6 +217,25 @@ class TestVerifyDig(unittest.TestCase):
         out = self._verify(0, col)
         self.assertFalse(out["complete"])
         self.assertIn("still floor", out["reason"])
+
+    def test_dig_mode_floor_is_dug(self):
+        # A plain dig mines a wall out and leaves a FLOOR tile — the
+        # room dig on the region5 fort (2026-11-27) "failed" for
+        # 600 s with its designations gone and its tiles reading
+        # 'floor', because the old code listed 'floor' as undug for
+        # every mode. For mode "dig", floor IS the dug state.
+        col = _surface_col()
+        out = self._verify(0, col, mode="dig")
+        self.assertTrue(out["complete"], out["reason"])
+
+    def test_dig_mode_soil_is_not_dug(self):
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "soil"},
+            {"z0": 0, "z1": 174, "class": "stone"},
+        ])
+        out = self._verify(0, col, mode="dig")
+        self.assertFalse(out["complete"])
+        self.assertIn("still soil", out["reason"])
 
 
 class TestDeriveDigSite(unittest.TestCase):

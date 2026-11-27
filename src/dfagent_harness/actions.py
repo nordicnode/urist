@@ -85,6 +85,7 @@ __all__ = [
     "labor_toggle",
     "queue_job",
     "build_farm_plot",
+    "set_farm_crop",
     "build_furniture",
     "deconstruct_building",
     "create_stockpile",
@@ -1446,6 +1447,7 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
     site = _run_helper(client, "probe_site.lua",
                        {"x": x, "y": y, "z": z,
                         "width": width, "height": height,
+                        "farm": True,
                         "from_x": from_pos[0] if from_pos else None,
                         "from_y": from_pos[1] if from_pos else None,
                         "from_z": from_pos[2] if from_pos else None},
@@ -1478,7 +1480,11 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
                               timeout=timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     base = {"pos": [x, y, z], "size": [width, height],
-            "building_id": building_id}
+            "building_id": building_id,
+            # The farm summary (soil/light/biome) from the site
+            # probe, so the caller knows what this ground can grow
+            # before choosing a crop.
+            "farm": site.get("farm")}
     if done is None:
         return ActionResult(
             ok=False, action="build_farm_plot",
@@ -1505,6 +1511,185 @@ def build_farm_plot(client: DFHackClient, x: int, y: int, z: int,
         reason=(f"farm plot #{building_id} built at "
                 f"{done['building'].get('center')} ({width}x{height})"),
         took_ms=took_ms, detail=base)
+
+
+_SEASON_NAMES = ("spring", "summer", "autumn", "winter")
+
+
+def set_farm_crop(client: DFHackClient, building_id: int, plant: str,
+                  season: Optional[int] = None,
+                  timeout: float = 30.0) -> ActionResult:
+    """Set a farm plot's crop for one season — after verifying the
+    planting is appropriate, before anything is written.
+
+    Checks, in order (each a fail-fast refusal naming the cause and
+    the fix — a wrong-location planting is a failure the harness
+    must prevent, not just report):
+      1. the plot exists, is a FarmPlot, and is built;
+      2. the crop is a known plant raw;
+      3. the crop grows in the season (plump helmets: any season;
+         cave wheat: summer/autumn only);
+      4. the plot is all-light for an above-ground crop, all-dark
+         for a subterranean crop — a mixed plot never fully plants
+         (wiki "Farming") and an underground plot exposed to
+         sunlight never grows underground plants again;
+      5. for above-ground crops, every tile's biome is one the crop
+         grows in (tile biome from the map-block designation,
+         matched against the raw's BIOME_* flags — verified live:
+         tile biome 4 = SWAMP_TEMPERATE_SALTWATER, rope reed
+         carries BIOME_SWAMP_TEMPERATE_SALTWATER). Subterranean
+         crops skip this: their biome is the underground, not the
+         tile's surface biome;
+      6. seeds on hand (have/need: 1 seed per tile; a partial
+         count plants that many tiles and says so — it does not
+         refuse, planting 5 of 9 tiles is still progress).
+
+    The write is verified by read-back (plant_id[season] must equal
+    the crop's index). Planting itself is verified by the caller:
+    PlantSeeds jobs appear once the crop is set and seeds are
+    reachable — if no job appears, the crop cannot grow here
+    (biome the harness cannot see, seeds locked away, no planter).
+    """
+    started = time.monotonic()
+    if season is not None and season not in (0, 1, 2, 3):
+        raise _Fail("precondition",
+                    f"bad season {season!r} (want 0-3: spring, "
+                    f"summer, autumn, winter)")
+    buildings = _read_section(client, "buildings", timeout=timeout)
+    plot = next((b for b in buildings.get("list") or []
+                 if b.get("id") == building_id), None)
+    if plot is None:
+        raise _Fail("precondition",
+                    f"no building #{building_id}")
+    if plot.get("type") != "FarmPlot":
+        raise _Fail("precondition",
+                    f"building #{building_id} is a "
+                    f"{plot.get('type')}, not a farm plot")
+    if plot.get("construction_stage") not in (None, 3):
+        raise _Fail("precondition",
+                    f"farm plot #{building_id} is still under "
+                    f"construction (stage "
+                    f"{plot.get('construction_stage')}) — set the "
+                    f"crop once it is built")
+    crop = _run_helper(client, "probe_crop.lua", {"crop": plant},
+                       timeout=timeout)
+    if not crop.get("ok", False):
+        raise _Fail("precondition",
+                    f"unknown crop {plant!r}: {crop.get('error')}")
+    cur_season = crop["cur_season"]
+    if season is None:
+        season = cur_season
+    season_name = _SEASON_NAMES[season]
+    seasons = [str(s) for s in crop.get("seasons") or []]
+    if season_name.upper() not in seasons:
+        raise _Fail(
+            "precondition",
+            f"{plant} does not grow in {season_name} (grows in "
+            f"{', '.join(s.lower() for s in seasons) or 'no season'})")
+    x1, y1, z = plot["x1"], plot["y1"], plot["z"]
+    width = plot["x2"] - x1 + 1
+    height = plot["y2"] - y1 + 1
+    tiles = width * height
+    site = _run_helper(
+        client, "probe_site.lua",
+        {"x": x1, "y": y1, "z": z, "width": width, "height": height,
+         "farm": True}, timeout=timeout)
+    if not site.get("ok", False):
+        raise _Fail("transport",
+                    f"farm site read-back failed: {site.get('error')}")
+    farm = site.get("farm") or {}
+    light = farm.get("light")
+    depth_min = crop.get("depth_min", 0)
+    underground = depth_min is not None and depth_min >= 1
+    if light == "mixed":
+        raise _Fail(
+            "precondition",
+            f"farm plot #{building_id} has mixed Light and Dark "
+            f"tiles — it will never be fully planted (wiki "
+            f"\"Farming\"). Fix: deconstruct it and rebuild the "
+            f"plot wholly above ground (for {plant} this plot is "
+            f"{'underground' if underground else 'above ground'} "
+            f"only) or wholly underground.")
+    if underground and light != "dark":
+        raise _Fail(
+            "precondition",
+            f"{plant} grows underground, but farm plot "
+            f"#{building_id} is sunlit (light: {light}). Fix: build "
+            f"an underground plot (dig a room below the surface, "
+            f"on soil) and plant {plant} there.")
+    if not underground and light != "all":
+        raise _Fail(
+            "precondition",
+            f"{plant} grows above ground, but farm plot "
+            f"#{building_id} is dark (light: {light}). Fix: build "
+            f"an above-ground plot on sunlit soil and plant "
+            f"{plant} there.")
+    if not underground:
+        # Tile biome (designation.biome) matched against the raw's
+        # BIOME_* flags, name for name.
+        wanted = {f"BIOME_{b}" for b in farm.get("biomes") or []}
+        have = set(crop.get("biome_flags") or [])
+        missing = sorted(wanted - have)
+        if missing:
+            raise _Fail(
+                "precondition",
+                f"{plant} does not grow in this plot's biome "
+                f"({', '.join(missing)}). It grows in: "
+                f"{', '.join(sorted(have)) or 'no biome'}. Fix: "
+                f"plant a crop for this biome, or build the plot "
+                f"in a biome {plant} grows in.")
+    seeds = _run_helper(client, "probe_seeds.lua", {},
+                        timeout=timeout)
+    if not seeds.get("ok", False):
+        raise _Fail("transport",
+                    f"seed read-back failed: {seeds.get('error')}")
+    have_seeds = (seeds.get("by_plant") or {}).get(plant) or {}
+    seed_units = int(have_seeds.get("units") or 0)
+    seed_wagon = int(have_seeds.get("in_wagon_units") or 0)
+    if seed_units < 1:
+        raise _Fail(
+            "precondition",
+            f"no {plant} seeds on hand (have 0, need 1 per tile, "
+            f"{tiles} tiles). Fix: gather {plant} (designate_gather "
+            f"on the surface) or buy seeds from a caravan — "
+            f"brewing/eating the plant produces its seeds.")
+    plantable = min(seed_units, tiles)
+    out = _helper_or_fail(
+        client, "act_farm_crop.lua",
+        {"building_id": building_id, "season": season,
+         "plant_index": crop["index"]}, timeout=timeout)
+    took_ms = round((time.monotonic() - started) * 1000)
+    poor_soil = (farm.get("soil_tiles") or 0) == tiles
+    reason = (f"farm plot #{building_id} set to {plant} for "
+              f"{season_name} (season {season}); {plantable} of "
+              f"{tiles} tiles will be planted "
+              f"({seed_units} seeds on hand")
+    if seed_wagon == seed_units and seed_units > 0:
+        reason += ", all still in the wagon — deconstruct the wagon "
+        reason += "so planters can reach them"
+    reason += ")"
+    if plantable < tiles:
+        reason += (f"; {tiles - plantable} tiles stay empty until "
+                   f"more {plant} seeds arrive")
+    if poor_soil:
+        reason += ("; note: this is a soil-layer plot, yields are "
+                   "reduced 75% (poor soil) — a muddied-stone plot "
+                   "yields full")
+    return ActionResult(
+        ok=True, action="set_farm_crop",
+        before={"plant_id": None},
+        after={"plant_id": out.get("plant_id")},
+        reason=reason, took_ms=took_ms,
+        detail={"building_id": building_id, "plant": plant,
+                "plant_index": crop["index"], "season": season,
+                "season_name": season_name,
+                "seeds_have": seed_units,
+                "seeds_in_wagon": seed_wagon,
+                "tiles": tiles, "tiles_plantable": plantable,
+                "light": light, "underground": underground,
+                "biomes": farm.get("biomes"),
+                "soil_tiles": farm.get("soil_tiles"),
+                "poor_soil": poor_soil})
 
 
 def build_furniture(client: DFHackClient, kind: str,
@@ -1859,6 +2044,7 @@ ACTIONS: dict[str, Callable[..., ActionResult]] = {
     "labor_toggle": labor_toggle,
     "queue_job": queue_job,
     "build_farm_plot": build_farm_plot,
+    "set_farm_crop": set_farm_crop,
     "build_furniture": build_furniture,
     "deconstruct_building": deconstruct_building,
     "create_stockpile": create_stockpile,

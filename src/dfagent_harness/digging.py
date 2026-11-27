@@ -301,6 +301,19 @@ def verify_dig(client: DFHackClient, box: tuple[int, ...],
         {"x0": x0, "y0": y0, "z0": z0, "x1": x1, "y1": y1, "z1": z1})
     left = probe.get("dig_total", -1) if probe.get("ok") else -1
     # Terrain: every tile in the box must no longer be solid.
+    # A dug tile is a stair, a ramp, or open space — or, for a
+    # plain dig, a FLOOR: mining a wall out leaves a FLOOR tile
+    # (column.lua classifies FLOOR shape as 'floor'). The old code
+    # listed 'floor' as undug for every mode, so a horizontal dig
+    # could never verify — the room dig on the region5 fort
+    # (2026-11-27) had its designations gone and its tiles reading
+    # 'floor' and still "failed" after 600 s. For stair/channel
+    # modes a tile still reading 'floor' IS unchanged (a down-stair
+    # must become a stair), so 'floor' stays bad there.
+    bad_classes = {"stone", "soil", "mineral", "aquifer",
+                   "hidden (unrevealed)"}
+    if mode != "dig":
+        bad_classes = bad_classes | {"floor"}
     terrain_ok = True
     bad: list[str] = []
     for x in range(x0, x1 + 1):
@@ -313,10 +326,7 @@ def verify_dig(client: DFHackClient, box: tuple[int, ...],
                     bad.append(f"(x{x}, y{y}, z{z}): column failed")
                     continue
                 cls = _class_at(col, z)
-                # A dug tile is a stair, a ramp, or open space — not
-                # a solid wall/floor/soil/stone.
-                if cls in ("stone", "soil", "mineral", "aquifer",
-                           "floor", "hidden (unrevealed)"):
+                if cls in bad_classes:
                     terrain_ok = False
                     bad.append(f"(x{x}, y{y}, z{z}) still {cls}")
     complete = (left == 0 and terrain_ok)

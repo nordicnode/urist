@@ -18,10 +18,26 @@
 -- When no from-point is given, reachable is nil (unchecked) and the
 -- caller must say so explicitly — never silently hand the model an
 -- unverified site.
--- PARAMS: x,y,z,width,height[,from_x,from_y,from_z]. Prints one JSON object.
+-- FARM (2026-11-27): when PARAMS.farm is true, each tile also
+-- reports its floor material (SOIL/STONE/...), its light flag and
+-- its biome, and the result carries a farm summary: soil_tiles,
+-- stone_tiles, light ("all" = every tile lit, "dark" = none lit,
+-- "mixed" = some lit), biomes (the tile biomes, as names). The
+-- material/light/biome facts are what decide whether a crop can
+-- grow there (wiki "Farming"): a plot needs soil (or muddied
+-- stone — mud itself is not readable, so stone tiles are reported
+-- as "may be muddied", never as ready); above-ground crops need
+-- all-light tiles, subterranean crops need all-dark tiles, and a
+-- mixed plot will never be fully planted. The farm facts are
+-- informational here — this probe never refuses on them; the
+-- crop-setting action (set_farm_crop) is the one that refuses a
+-- wrong-location planting, because only it knows the crop.
+-- PARAMS: x,y,z,width,height[,from_x,from_y,from_z][,farm]. Prints one JSON object.
 local ok, err = pcall(function()
   local problems = dfh_arr()
   local reachable = nil
+  local farm = nil
+  local seen_biome = nil
   local m = df.global.world.map
   if PARAMS.x < 0 or PARAMS.y < 0
     or PARAMS.x + PARAMS.width > m.x_count
@@ -29,6 +45,11 @@ local ok, err = pcall(function()
     or PARAMS.z < 0 or PARAMS.z >= m.z_count then
     problems[#problems+1] = 'site out of map bounds'
   else
+    if PARAMS.farm then
+      farm = {soil_tiles = 0, stone_tiles = 0, other_tiles = 0,
+              light_tiles = 0, total_tiles = 0, biomes = dfh_arr()}
+      seen_biome = {}
+    end
     for x = PARAMS.x, PARAMS.x + PARAMS.width - 1 do
       for y = PARAMS.y, PARAMS.y + PARAMS.height - 1 do
         local b = dfhack.maps.getTileBlock(x, y, PARAMS.z)
@@ -43,6 +64,25 @@ local ok, err = pcall(function()
         if b.occupancy[x % 16][y % 16].building ~= 0 then
           problems[#problems+1] = 'tile ' .. x .. ',' .. y
             .. ' has stale building occupancy'
+        end
+        if farm then
+          farm.total_tiles = farm.total_tiles + 1
+          local mat = tostring(df.tiletype_material[
+            df.tiletype.attrs[tt].material])
+          if mat == 'SOIL' then
+            farm.soil_tiles = farm.soil_tiles + 1
+          elseif mat == 'STONE' or mat == 'MINERAL' then
+            farm.stone_tiles = farm.stone_tiles + 1
+          else
+            farm.other_tiles = farm.other_tiles + 1
+          end
+          local des = b.designation[x % 16][y % 16]
+          if des.light then farm.light_tiles = farm.light_tiles + 1 end
+          local biome = tostring(df.biome_type[des.biome])
+          if not seen_biome[biome] then
+            seen_biome[biome] = true
+            farm.biomes[#farm.biomes+1] = biome
+          end
         end
       end
     end
@@ -91,6 +131,16 @@ local ok, err = pcall(function()
   end
   result = {ok = true, probe = 'site', free = #problems == 0,
     reachable = reachable, problems = problems}
+  if farm ~= nil then
+    if farm.light_tiles == farm.total_tiles then
+      farm.light = 'all'
+    elseif farm.light_tiles == 0 then
+      farm.light = 'dark'
+    else
+      farm.light = 'mixed'
+    end
+    result.farm = farm
+  end
 end)
 if not ok then
   result = {ok = false, probe = 'site', error = tostring(err)}

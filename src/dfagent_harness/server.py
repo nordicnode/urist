@@ -1626,6 +1626,25 @@ def create_server(
             if spec is None:
                 _error(self, 404, "NOT_FOUND", f"unknown task {name!r}")
                 return
+            if name == "farm":
+                _json(self, 200, {
+                    "task": name,
+                    "steps": [
+                        "find a built farm plot",
+                        "pick a crop for the plot's light, biome and "
+                        "season (dark: plump helmets; light: the "
+                        "surface crop with the most seeds)",
+                        "set the crop (verified before writing)",
+                        "wait (bounded) for PlantSeeds jobs to appear "
+                        "and finish",
+                        "report the planted count or a diagnosis",
+                    ],
+                    "preconditions": [
+                        "a built farm plot exists",
+                        "seeds on hand for a crop that grows there",
+                    ],
+                })
+                return
             _json(self, 200, {
                 "task": name,
                 "steps": [

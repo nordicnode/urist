@@ -47,9 +47,16 @@ Log everything there. GOAL.md in the same goal dir is the design record.
 - **Python:** always `.venv/bin/python`. Never the system python3 — it has
   no pytest and no protobuf.
 - **Tests:** `.venv/bin/python -m pytest tests/ -q`. The offline tests pass
-  without a game. The live tests (`*_live.py`, `TestTasksLive`) need the
-  game and the daemon running, and fail without them — that is expected,
-  not a regression. The full suite takes ~6 minutes.
+  without a game. The live tests need the game and the daemon running,
+  and fail without them — that is expected, not a regression. The full
+  suite takes ~6 minutes. **Offline invocation (do not improvise it):**
+  ignore every `*_live.py` file AND deselect the six live classes that
+  live in non-live files, by exact class name:
+  `.venv/bin/python -m pytest tests/ -q --ignore-glob='tests/*_live.py' -k "not TestBriefingsLive and not TestCatalogLive and not TestDiagnoseLive and not TestSitesLive and not TestTasksLive and not TestWikiLive"`.
+  Do NOT use `-k "not live"` or `-k "not Live"`: `-k` matching is
+  case-insensitive, so "live" also deselects the scoring tests whose
+  names contain "lives" (silently dropping 3 tests). A partial ignore
+  once ran live tests against the game and advanced it to tick 135706.
 - **The game:** launch with `./dfhack`, NEVER `./df` (`./df` runs vanilla
   DF with no DFHack loaded). It runs under Xvfb on display `:99`
   (`Xvfb :99 -screen 0 1024x768x24`). DFHack RPC listens on **TCP 5000**.

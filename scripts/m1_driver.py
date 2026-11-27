@@ -148,6 +148,12 @@ class DaemonClient:
         units = res.get("units") or []
         return [u for u in units if isinstance(u, dict)]
 
+    def wealth(self) -> dict:
+        """Fortress value from a fresh collect (GET /v1/wealth).
+        On-demand only — a per-run measurement, not a per-tick
+        signal. See lua/wealth.lua for the definition."""
+        return self.get("/v1/wealth", timeout=120)
+
     def status(self) -> dict:
         return self.get("/v1/status", timeout=15)
 
@@ -516,6 +522,24 @@ class M1Driver:
         self._log("diary_citizens", when=when, count=len(citizens))
         return citizens
 
+    def _fetch_wealth(self, when: str) -> dict | None:
+        """Fortress value from a fresh collect, for the scoring
+        system (GOAL.md item 15). Best-effort: a failed fetch logs
+        and returns None (the score's wealth dimension is neutral
+        without both readings, and the CLI accepts explicit
+        --wealth-start / --wealth-end). Never raises — a wealth
+        sample must not fail the run."""
+        try:
+            res = self.daemon.wealth()
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self._log("wealth", when=when, error=str(exc)[:200])
+            return None
+        self._log("wealth", when=when,
+                  fortress_value=res.get("fortress_value"),
+                  created_value=res.get("created_value"),
+                  item_count=res.get("item_count"))
+        return res
+
     def _write_diary(self, snap: dict) -> None:
         """Write the diary entry for the completed day (POST
         /v1/control/diary). The daemon's planner loop is paused
@@ -852,6 +876,10 @@ class M1Driver:
         if not self.args.mock:
             self.citizens_start_fresh = self._fetch_fresh_citizens(
                 "start")
+            # The scoring system's run-start fortress value: a fresh
+            # collect now, while the game is paused at the run's
+            # start tick (same moment as the citizen sample).
+            self._fetch_wealth("start")
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
                   date=snap0.get("date"))
@@ -881,6 +909,12 @@ class M1Driver:
                           tick=tick, end_tick=self.end_tick,
                           actions_taken=self.actions_taken,
                           idle_ticks=self.idle_ticks)
+                # The scoring system's run-end fortress value: a
+                # fresh collect now, while the game is paused at the
+                # run's end tick (same moment as the diary's
+                # run-end citizen sample).
+                if not self.args.mock:
+                    self._fetch_wealth("end")
                 self._write_diary(snap)
                 return 0
             # Fort dead check: parse the citizen count out of the

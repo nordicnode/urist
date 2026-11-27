@@ -62,7 +62,13 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   (`Xvfb :99 -screen 0 1024x768x24`). DFHack RPC listens on **TCP 5000**.
   Verify with `./dfhack-run lua 'print("PROBE-OK df="..dfhack.getDFVersion().." dfhack="..dfhack.getDFHackVersion())'`
   — it must print `PROBE-OK df=v0.47.05 linux64 dfhack=0.47.05-r8`.
-  **DF ignores SIGTERM.** Stop it with `pkill -9 -x Dwarf_Fortress`.
+  **DF ignores SIGTERM.** Stop it by PID after confirming its cwd
+  via `/proc/<pid>/cwd` (main = `third_party/df_47_05`, scratch =
+  `scratch/m2-embark/df`). **Never use bare `pkill -9 -x
+  Dwarf_Fortress`** — it matches by process name and kills every DF
+  at once (it killed the main fort while targeting the scratch DF on
+  2026-11-27). `reload_fort.py` has the same flaw (line 229) and is
+  owed a PID-based fix.
 - **The daemon:** `.venv/bin/python scripts/dfh.py start|stop|status`.
   HTTP API on `127.0.0.1:8765`, bearer token in
   `~/.config/df-agent-harness/token` (0600). `/v1/health` needs no auth.

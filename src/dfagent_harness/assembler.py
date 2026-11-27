@@ -368,15 +368,20 @@ def _buildings(state: dict[str, Any]) -> tuple[str, str]:
     lst = buildings.get("list") or []
     if not summary and not lst:
         return "Buildings: none.", "0 buildings"
-    # Workshops by subtype with state. The model must be able to
-    # tell a Carpenter's from a Still without spending a query
-    # turn: M1 ticks 1 and 4 burned idle ticks asking what the
-    # single existing building is, and by tick 6 three brewers
+    # Workshops by subtype with state AND id. The model must be
+    # able to tell a Carpenter's from a Still without spending a
+    # query turn: M1 ticks 1 and 4 burned idle ticks asking what
+    # the single existing building is, and by tick 6 three brewers
     # were enabled without ever checking whether a Still existed.
     # construction_stage >= 2 is built (the live Carpenter's is 3;
     # the fake's completed build is 2); 0/1 is under construction.
     # The Still is named explicitly when absent, so the model never
-    # has to guess whether brewing is possible.
+    # has to guess whether brewing is possible. The id is carried
+    # because queue_job needs a building_id — M1 run #10 stalled
+    # for three idle ticks ("I need the building ids for the
+    # carpenter and still before I can queue bed-making or
+    # brewing") because the list named the workshops but not
+    # their ids.
     workshops = [b for b in lst if b.get("type") == "Workshop"]
     parts: list[str] = []
     for b in workshops:
@@ -385,7 +390,10 @@ def _buildings(state: dict[str, Any]) -> tuple[str, str]:
         state_txt = ("under construction"
                      if isinstance(stage, int) and stage < 2
                      else "built")
-        parts.append(f"{sub} ({state_txt})")
+        bid = b.get("id")
+        parts.append(f"{sub} #{bid} ({state_txt})"
+                     if isinstance(bid, int)
+                     else f"{sub} ({state_txt})")
     if not any(b.get("subtype") == "Still" for b in workshops):
         parts.append("Still: none")
     # Other building types as counts (workshops are listed above,
@@ -475,8 +483,24 @@ def _placement(placement: Optional[dict[str, Any]]
         return ("Placement: no verified sites on hand — query "
                 "/v1/sites?kind=<kind> to search.",
                 "no verified sites")
-    n = sum(len(v) for v in by_kind.values())
-    return text, f"{n} verified sites"
+    # The short form is what the diffed one-liner shows when the
+    # section is unchanged ("placement: unchanged (SHORT)"). A
+    # bare count ("16 verified sites") loses the coordinates, and
+    # M1 run #10 ticks 3 and 6 stalled asking for verified free
+    # sites the model had already been given on tick 1. Carry the
+    # first site per kind, compactly — the full list is in the
+    # section text on a changed tick and behind /v1/sites.
+    short_parts = []
+    for kind in PLACEMENT_KINDS:
+        sites = by_kind.get(kind) or []
+        if not sites:
+            continue
+        p = (sites[0].get("pos") or [])
+        if len(p) == 3:
+            short_parts.append(f"{kind} ({p[0]},{p[1]},{p[2]})")
+    short = "; ".join(short_parts) if short_parts else \
+        f"{sum(len(v) for v in by_kind.values())} verified sites"
+    return text, short
 
 
 def _report_line(entry: Any) -> str:

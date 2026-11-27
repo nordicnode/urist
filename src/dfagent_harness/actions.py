@@ -1494,9 +1494,34 @@ def build_furniture(client: DFHackClient, kind: str,
                  for e in items.get("by_type") or []
                  if e.get("type") == item_type), 0)
     if have < 1:
+        # Name the exact fix, not just "make one first": the model
+        # retried build_furniture Bed 4 times across M1 run #10
+        # ticks 1 and 4 because the error never said HOW to make
+        # one. queue_job make_bed needs the carpenter's building
+        # id, which the snapshot now carries (buildings list).
+        carpenter_id = None
+        try:
+            bldgs = _read_section(client, "buildings",
+                                  timeout=timeout)
+            carpenter = next(
+                (b for b in bldgs.get("list") or []
+                 if b.get("type") == "Workshop"
+                 and b.get("subtype") == "Carpenter"),
+                None)
+            carpenter_id = (carpenter or {}).get("id")
+        except Exception:  # noqa: BLE001 - id is best-effort
+            carpenter_id = None
+        if isinstance(carpenter_id, int):
+            fix = (f"make one first: queue_job job=make_bed at "
+                   f"building #{carpenter_id} (the Carpenter's "
+                   f"workshop), then place the {kind} once the bed "
+                   f"item is in stock")
+        else:
+            fix = ("make one first: build a Carpenter's workshop, "
+                   "then queue_job job=make_bed at it")
         raise _Fail("precondition",
                     f"no {item_type} item in stock to place a {kind} "
-                    f"(make one at the carpenter first)")
+                    f"({fix})")
     before = _read_section(client, "buildings", timeout=timeout)
     out = _helper_or_fail(client, "act_furniture.lua",
                           {"kind": kind, "x": pos[0], "y": pos[1],

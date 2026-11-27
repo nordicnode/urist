@@ -279,6 +279,35 @@ def test_assembler_placement_section():
     assert "93,87,176" in text
 
 
+def test_placement_short_form_carries_first_site_per_kind():
+    # M1 run #10 ticks 3 and 6 stalled asking for verified free
+    # sites the model had already been given on tick 1: the
+    # placement short form ("16 verified sites") was just a count,
+    # so the coordinates were lost when the section diffed to
+    # "unchanged". The short form now carries the first site per
+    # kind, compactly.
+    from dfagent_harness.assembler import _placement
+    placement_cache = {
+        "workshop": [
+            {"pos": (95, 108, 175), "kind": "workshop",
+             "width": 3, "height": 3, "reachable": True,
+             "why": "nearest the fort"},
+            {"pos": (96, 103, 175), "kind": "workshop",
+             "width": 3, "height": 3, "reachable": True,
+             "why": "4 tiles north east of the fort"},
+        ],
+        "stockpile": [
+            {"pos": (93, 86, 176), "kind": "stockpile",
+             "width": 5, "height": 5, "reachable": True,
+             "why": "19 tiles north of the fort"},
+        ],
+    }
+    _text, short = _placement(placement_cache)
+    assert "workshop (95,108,175)" in short
+    assert "stockpile (93,86,176)" in short
+    assert short != "3 verified sites"
+
+
 def test_assembler_placement_cache_with_centre_and_from():
     # The daemon's placement cache also carries "centre" and
     # "from" (lists of ints, not site lists). The assembler must

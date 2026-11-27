@@ -346,7 +346,7 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
                       "subtype": "Carpenters",
                       "construction_stage": 3}]})
         text, short = _buildings(st)
-        self.assertIn("Carpenters (built)", text)
+        self.assertIn("Carpenters #7 (built)", text)
         self.assertIn("Still: none", text)
         self.assertIn("Bed x10", text)
         self.assertNotIn("Workshop x", text)
@@ -354,7 +354,7 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
         # unchanged (SHORT)"). It must carry the subtypes too:
         # M1 run #7 tick 6 re-asked what the building was because
         # the one-liner said only "1 buildings".
-        self.assertIn("Carpenters (built)", short)
+        self.assertIn("Carpenters #7 (built)", short)
         self.assertIn("Still: none", short)
 
     def test_buildings_names_still_when_present(self):
@@ -367,8 +367,8 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
                       "subtype": "Still",
                       "construction_stage": 1}]})
         text, _short = _buildings(st)
-        self.assertIn("Carpenters (built)", text)
-        self.assertIn("Still (under construction)", text)
+        self.assertIn("Carpenters #7 (built)", text)
+        self.assertIn("Still #8 (under construction)", text)
         self.assertNotIn("Still: none", text)
 
     def test_stocks_head_line_has_brewable_plants(self):

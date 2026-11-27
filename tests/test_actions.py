@@ -151,9 +151,15 @@ class FakeGame:
                        "stone_units": 0, "seeds_units": 35,
                        "barrels": 15, "empty_barrels": 3,
                        "by_material": [
-                           {"material":
-                            "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
-                            "units": 33}]}
+                           # Real plants (type PLANT, STRUCTURAL,
+                           # flagged brewable by stocks.lua) — NOT
+                           # the old DRINK-material entry, which
+                           # counted brewed drink as plants
+                           # (2026-11-27, external review C3).
+                           {"type": "PLANT",
+                            "material":
+                            "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+                            "brewable": True, "units": 33}]}
         self.spawn_jobs = True       # tier-2: game spawns FellTree/etc.
         self.complete_builds = True  # buildings finish construction
         self.build_polls = 0

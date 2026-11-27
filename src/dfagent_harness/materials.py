@@ -146,15 +146,37 @@ WORKSHOP_MATERIALS: dict[str, list[dict[str, Any]]] = {
 # Stock counts
 # ----------------------------------------------------------------------
 
+def is_brewable_entry(entry: dict[str, Any]) -> bool:
+    """True when one by_material entry counts as a brewable plant.
+
+    stocks.lua marks PLANT entries with ``brewable`` (true iff the
+    plant raw defines a DRINK material). Entries from an older
+    collect carry no flag: fall back to the item type, counting
+    PLANT items. The fallback overcounts non-brewable plants
+    (dimple cup, quarry bush) — it is best-effort for old data
+    only; the flag is the exact rule. Brewed drink is NEVER
+    counted: a DRINK entry's material token ends :DRINK, which is
+    what the old rule matched — it returned the fort's drink
+    count, not its plants (2026-11-27, external review C3).
+    """
+    if not isinstance(entry, dict):
+        return False
+    flag = entry.get("brewable")
+    if flag is not None:
+        return flag is True
+    return entry.get("type") == "PLANT"
+
+
 def brewable_plants(stocks: dict[str, Any]) -> int:
-    """Brewable plant units in stock: PLANT items whose material has
-    a DRINK product (by_material entries like
-    PLANT:MUSHROOM_HELMET_PLUMP:DRINK). Same rule as the assembler's
-    and the planner's ``_brewable_plants``."""
+    """Brewable plant units in stock: PLANT items whose plant has
+    a DRINK product. The planner's and the assembler's
+    ``_brewable_plants`` both delegate here, so the rule lives in
+    exactly one place (the old rule was copied in three modules
+    and all three were wrong together).
+    """
     total = 0
     for e in stocks.get("by_material") or []:
-        mat = str(e.get("material") or "")
-        if mat.startswith("PLANT:") and mat.endswith(":DRINK"):
+        if is_brewable_entry(e):
             total += int(e.get("units") or 0)
     return total
 

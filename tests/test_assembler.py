@@ -398,8 +398,9 @@ class TestSuggest(unittest.TestCase):
         # proactive fallback only fires when no still exists. With
         # a still present, drink finite (< 50), and a brew
         # possible, suggest the brew task. (The plant count is a
-        # by_material DRINK entry — brewable_plants() reads that,
-        # not a "brewable_plants" key.)
+        # by_material PLANT entry flagged brewable by stocks.lua —
+        # a DRINK entry is brewed drink and does not count;
+        # 2026-11-27, external review C3.)
         st = _state(buildings={
             "summary": [{"type": "Workshop", "count": 2}],
             "list": [{"id": 1, "type": "Workshop",
@@ -411,8 +412,9 @@ class TestSuggest(unittest.TestCase):
         st["stocks"]["empty_barrels"] = 2
         st["stocks"]["by_material"] = list(st["stocks"]["by_material"])
         st["stocks"]["by_material"].append(
-            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
-             "units": 35})
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+             "brewable": True, "units": 35})
         out = suggest(st, [])
         self.assertTrue(
             out.startswith("Suggested action: run the brew task"),
@@ -436,8 +438,9 @@ class TestSuggest(unittest.TestCase):
         st["stocks"]["empty_barrels"] = 0
         st["stocks"]["by_material"] = list(st["stocks"]["by_material"])
         st["stocks"]["by_material"].append(
-            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
-             "units": 35})
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+             "brewable": True, "units": 35})
         out = suggest(st, [])
         self.assertTrue(
             out.startswith(
@@ -524,14 +527,18 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
         st = _state()
         st["stocks"] = dict(st["stocks"])
         st["stocks"]["by_material"] = [
-            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+            {"type": "DRINK",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
              "units": 12},
-            {"material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
-             "units": 5},
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+             "brewable": True, "units": 5},
             {"material": "wood", "units": 211}]
         text, _short = _stocks(st, None, 0)
-        # Only the DRINK material counts; STRUCTURAL does not.
-        self.assertIn("brewable plants 12", text.split("\n")[0])
+        # Only the flagged PLANT entry counts; brewed drink does
+        # not (the old rule had this exactly backwards: it counted
+        # the 12 drink and ignored the 5 plants — 2026-11-27 C3).
+        self.assertIn("brewable plants 5", text.split("\n")[0])
 
     def test_stocks_head_line_has_empty_barrels_and_food_stacks(self):
         # Reinforced 2026-11-27: the barrel count is the brew

@@ -488,17 +488,12 @@ def _buildings(state: dict[str, Any]) -> tuple[str, str]:
 
 
 def _brewable_plants(stocks: dict[str, Any]) -> int:
-    """Brewable plant units in stock: PLANT items whose material
-    has a DRINK product (by_material entries like
-    PLANT:MUSHROOM_HELMET_PLUMP:DRINK). Same rule as the planner's
-    _brewable_plants; surfaced in the snapshot so the model can
-    decide about brewing without a query turn."""
-    total = 0
-    for e in stocks.get("by_material") or []:
-        mat = str(e.get("material") or "")
-        if mat.startswith("PLANT:") and mat.endswith(":DRINK"):
-            total += int(e.get("units") or 0)
-    return total
+    """Brewable plant units in stock — see materials.brewable_plants.
+    The rule lives there so it cannot drift across the three copies
+    again (2026-11-27, external review C3); surfaced in the snapshot
+    so the model can decide about brewing without a query turn."""
+    from . import materials as _materials
+    return _materials.brewable_plants(stocks)
 
 
 def _jobs(state: dict[str, Any]) -> tuple[str, str]:

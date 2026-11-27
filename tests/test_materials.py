@@ -28,9 +28,21 @@ def _stocks(**over):
          "wood_units": 124, "stone_units": 0, "seeds_units": 35,
          "barrels": 15, "empty_barrels": 3,
          "by_material": [
-             {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
-              "units": 33},
-             {"material": "PLANT:POD_SWEET:DRINK", "units": 15}]}
+             # Real plants (type PLANT, STRUCTURAL material, flagged
+             # brewable by stocks.lua) — these are the 48 brewable
+             # plants. The DRINK entry below is brewed drink (20u):
+             # it must NOT count (the old rule matched its :DRINK
+             # material and returned the fort's drink count instead
+             # of its plants — 2026-11-27, external review C3).
+             {"type": "PLANT",
+              "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+              "brewable": True, "units": 33},
+             {"type": "PLANT",
+              "material": "PLANT:POD_SWEET:STRUCTURAL",
+              "brewable": True, "units": 15},
+             {"type": "DRINK",
+              "material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+              "units": 20}]}
     s.update(over)
     return s
 
@@ -93,6 +105,28 @@ class TestRequirementsTable(unittest.TestCase):
 class TestStockCounts(unittest.TestCase):
     def test_brewable_plants_from_by_material(self):
         self.assertEqual(materials.brewable_plants(_stocks()), 48)
+
+    def test_brewable_plants_counts_plants_not_drink(self):
+        # C3 (2026-11-27): the old rule (material starts PLANT:
+        # and ends :DRINK) matched ONLY brewed drink — it returned
+        # the fort's drink count. Plants carry STRUCTURAL; drinks
+        # carry DRINK. A DRINK entry must not count, a non-brewable
+        # PLANT (dimple cup, brewable False) must not count, and
+        # an entry without the flag falls back to its type.
+        stocks = {"by_material": [
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+             "brewable": True, "units": 10},
+            {"type": "DRINK",
+             "material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
+             "units": 99},
+            {"type": "PLANT",
+             "material": "PLANT:MUSHROOM_CUP_DIMPLE:STRUCTURAL",
+             "brewable": False, "units": 7},
+            {"type": "PLANT",
+             "material": "PLANT:GRASS_TAIL_PIG:STRUCTURAL",
+             "units": 3}]}
+        self.assertEqual(materials.brewable_plants(stocks), 13)
 
     def test_empty_barrels_falls_back_to_total(self):
         old = _stocks()
@@ -270,8 +304,9 @@ class TestRequirementsForState(unittest.TestCase):
         # present with exact numbers.
         state = _state(
             stocks=_stocks(by_material=[
-                {"material": "PLANT:MUSHROOM_HELMET_PLUMP:DRINK",
-                 "units": 33}]),
+                {"type": "PLANT",
+                 "material": "PLANT:MUSHROOM_HELMET_PLUMP:STRUCTURAL",
+                 "brewable": True, "units": 33}]),
             items={"by_type": [{"type": "BED", "units": 7},
                                {"type": "BARREL", "units": 15}]})
         lines = materials.requirements_for_state(state)

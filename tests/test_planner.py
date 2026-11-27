@@ -90,7 +90,9 @@ class DecideDrinkTests(unittest.TestCase):
         state = load_state()
         _set_stock(state, drink_units=2)
         _add_building(state, "Workshop", "Still", bid=10)
-        # Fixture by_material already has PLANT:GRASS_WHEAT_CAVE:DRINK.
+        # Fixture by_material already has a brewable PLANT entry
+        # (15u plump helmet, STRUCTURAL) — the DRINK entries are
+        # brewed drink and do not count (2026-11-27, C3).
         decisions = decide(state)
         brews = [d for d in decisions if d.goal_key == "drink:brew"]
         self.assertEqual(len(brews), 1)
@@ -102,10 +104,13 @@ class DecideDrinkTests(unittest.TestCase):
         state = load_state()
         _set_stock(state, drink_units=0)
         _add_building(state, "Workshop", "Still", bid=10)
+        # Strip every brewable plant: PLANT-type entries (flagged
+        # or, in this old fixture, unflagged and counted by the
+        # type fallback). The DRINK entries stay — brewed drink
+        # does not count as plants (2026-11-27, C3).
         state["stocks"]["by_material"] = [
             e for e in state["stocks"]["by_material"]
-            if not (str(e.get("material") or "").startswith("PLANT:")
-                    and str(e.get("material") or "").endswith(":DRINK"))]
+            if e.get("type") != "PLANT"]
         decisions = decide(state)
         gathers = [d for d in decisions if d.goal_key == "drink:gather"]
         self.assertEqual(len(gathers), 1)
@@ -353,6 +358,29 @@ class EvaluateGoalTests(unittest.TestCase):
 
 
 class PlannerTickTests(unittest.TestCase):
+    def test_tick_increments_ticks_by_exactly_one(self):
+        # Regression guard for the duplicated tick() preamble
+        # (2026-11-27, external review C2): the preamble block
+        # (self.ticks += 1, _summary, records, now, blocked) was
+        # pasted twice verbatim, so ticks counted double per tick
+        # — every tick-based rate, backoff and log line built on it
+        # was wrong by 2x.
+        state = load_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = Journal(Path(tmp) / "j.db")
+            planner = Planner(client=object(), journal=journal,
+                              backoff_s=60.0, max_actions_per_tick=1)
+            self.assertEqual(planner.ticks, 0)
+            with mock.patch("dfagent_harness.planner.act",
+                            return_value=mock.Mock(
+                                ok=True, reason="built",
+                                error_kind=None)):
+                planner.tick(state, manager=True, sites=_sites())
+                self.assertEqual(planner.ticks, 1)
+                planner.tick(state, manager=True, sites=_sites())
+                self.assertEqual(planner.ticks, 2)
+            journal.close()
+
     def test_tick_executes_top_decisions_and_backs_off(self):
         state = load_state()
         _set_stock(state, drink_units=2)

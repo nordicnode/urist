@@ -47,6 +47,29 @@ local ok, err = pcall(function()
     end
     return false
   end
+  local function plant_is_brewable(it)
+    -- A PLANT item is brewable iff its plant raw defines a DRINK
+    -- material (verified live 2026-11-27: plump helmet, pig tail,
+    -- cave wheat and sweet pod carry DRINK; quarry bush and dimple
+    -- cup do not). The item's material index IS the plant raw index
+    -- (a plump helmet PLANT item reads mat_index 172). The old
+    -- Python rule matched the material token PLANT:...:DRINK,
+    -- which is what brewed DRINK items carry — it counted the
+    -- booze, never the plants (external review C3). The flag is
+    -- computed here, where the raw is, so the Python side never
+    -- has to guess brewability from a token again.
+    local idx = dfh_try(function() return it:getMaterialIndex() end,
+                        nil)
+    if idx == nil then return false end
+    return dfh_try(function()
+      local raw = df.global.world.raws.plants.all[idx]
+      if raw == nil then return false end
+      for _, m in ipairs(raw.material) do
+        if m.id == "DRINK" then return true end
+      end
+      return false
+    end, false)
+  end
   local function add_mat(itype, it)
     local decoded = dfh_try(function()
       return dfhack.matinfo.decode(it:getMaterial(), it:getMaterialIndex())
@@ -57,7 +80,15 @@ local ok, err = pcall(function()
     end, tostring(decoded))
     if mi then
       local key = tostring(df.item_type[itype]) .. '|' .. mi
-      mat_breakdown[key] = (mat_breakdown[key] or 0) + it:getStackSize()
+      local e = mat_breakdown[key]
+      if e == nil then
+        e = {units = 0}
+        if itype == df.item_type.PLANT then
+          e.brewable = plant_is_brewable(it)
+        end
+        mat_breakdown[key] = e
+      end
+      e.units = e.units + it:getStackSize()
     end
   end
   for _, it in ipairs(df.global.world.items.other.IN_PLAY) do
@@ -111,11 +142,15 @@ local ok, err = pcall(function()
   local mats = dfh_arr()
   for k, v in pairs(mat_breakdown) do
     local sep = string.find(k, '|', 1, true)
-    mats[#mats+1] = {
+    local entry = {
       type = string.sub(k, 1, sep - 1),
       material = string.sub(k, sep + 1),
-      units = v,
+      units = v.units,
     }
+    -- Only PLANT entries carry brewable (true iff the plant raw
+    -- defines a DRINK material; see plant_is_brewable above).
+    if v.brewable ~= nil then entry.brewable = v.brewable end
+    mats[#mats+1] = entry
   end
   table.sort(mats, function(a, b) return a.units > b.units end)
   -- Raw `other` category counts for the headline categories DF players use.

@@ -182,15 +182,12 @@ def _count_jobs(summary: dict[str, Any], job_type: str) -> int:
 
 
 def _brewable_plants(summary: dict[str, Any]) -> int:
-    """Brewable plant units in stock: PLANT items whose material has
-    a DRINK product (by_material entries like
-    PLANT:MUSHROOM_HELMET_PLUMP:DRINK)."""
-    total = 0
-    for e in summary["by_material"]:
-        mat = str(e.get("material") or "")
-        if mat.startswith("PLANT:") and mat.endswith(":DRINK"):
-            total += int(e.get("units") or 0)
-    return total
+    """Brewable plant units in stock — see materials.brewable_plants.
+    The rule lives there so it cannot drift across the three copies
+    again (2026-11-27, external review C3)."""
+    from . import materials as _materials
+    return _materials.brewable_plants(
+        {"by_material": summary.get("by_material") or []})
 
 
 def _nearest_hostile_distance(summary: dict[str, Any]) -> Optional[int]:
@@ -786,15 +783,6 @@ class Planner:
         both are forwarded to the placement-aware build actions so
         a site-not-free failure names a verified alternative.
         """
-        self.ticks += 1
-        s = _summary(state)
-        tick = s["tick"]
-        year = s["year"]
-        records: list[dict[str, Any]] = []
-        now = time.time()
-        blocked = frozenset(
-            k for k, t in self._last_failure.items()
-            if now - t < self.backoff_s)
         self.ticks += 1
         s = _summary(state)
         tick = s["tick"]

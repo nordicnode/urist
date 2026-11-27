@@ -42,11 +42,97 @@ class TestDiaryDecisionText(unittest.TestCase):
                  "on": True}),
             "enable BREWER labor on Olon")
 
-    def test_unmapped_action_falls_back_to_name_and_kwargs(self):
-        text = m1_driver.diary_decision_text(
-            "appoint_noble", {"noble": "manager"})
-        self.assertIn("appoint_noble", text)
-        self.assertIn("manager", text)
+    def test_unmapped_action_returns_none(self):
+        # A diary phrase must be a clean action phrase — the old
+        # "name k=v" fallback leaked raw kwargs into the diary.
+        # An unmapped action returns None and the caller skips it.
+        self.assertIsNone(m1_driver.diary_decision_text(
+            "appoint_noble", {"noble": "manager"}))
+
+    def test_dig_to_completion_uses_start_coordinate(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "dig_to_completion",
+                {"box": [95, 95, 175, 95, 95, 175],
+                 "mode": "down-stair"}),
+            "dig a down-stair at (95, 95, 175)")
+
+    def test_manager_order_create(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "manager_order_create",
+                {"job_type": "MakeBarrel", "amount": 5}),
+            "order MakeBarrel x5 from the manager")
+
+    def test_manager_order_remove(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "manager_order_remove", {"order_id": 3}),
+            "remove manager order #3")
+
+    def test_deconstruct_building(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "deconstruct_building", {"building_id": 8}),
+            "deconstruct building #8")
+
+    def test_designate_dig(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "designate_dig",
+                {"box": [90, 100, 175, 94, 104, 175], "mode": "dig"}),
+            "dig at (90, 100, 175)")
+
+    def test_build_farm_plot_uses_xyz(self):
+        self.assertEqual(
+            m1_driver.diary_decision_text(
+                "build_farm_plot",
+                {"x": 95, "y": 108, "z": 175, "width": 3, "height": 3}),
+            "build a farm plot at (95, 108, 175)")
+
+
+class TestParseSuggestion(unittest.TestCase):
+    """The mock runs the snapshot's suggestion verbatim, so the
+    parser must read the suggestion's PRIMARY action — the one the
+    leading "Suggested action:" clause names first. The mock runs
+    of 2026-11-27 drove task:brew three times on a fort with no
+    still because the old unanchored regex matched the trailing
+    brew-task clause of the still-build suggestion."""
+
+    STILL = ("Suggested action: NO STILL EXISTS, so brewing is "
+             "impossible until you build one. Build a still FIRST: "
+             "build_workshop kind=still at 94, 107, 175 (a "
+             "probe-verified free 3x3 site). If the build reports "
+             "'site not free', gather the blocking plant or use the "
+             "next free site. Only then run the brew task.")
+    BREW = ("Suggested action: run the brew task "
+            "(POST /v1/tasks/brew) — the fort is short on drink and "
+            "brewing turns plants into drink.")
+    BLOCKER = ("Suggested action: gather the brewing materials "
+               "first — need 1 empty barrel for brew, have 0. Only "
+               "then run the brew task (POST /v1/tasks/brew).")
+    THREAT = ("Suggested action: query unit 123 to see what it is "
+              "and where it is going — a demon is near the fort.")
+
+    def test_still_build_suggestion_names_no_task(self):
+        # The trailing "Only then run the brew task" is a
+        # subordinate mention, not the action to run.
+        self.assertIsNone(m1_driver.parse_suggestion(self.STILL))
+
+    def test_brew_suggestion_runs_brew(self):
+        self.assertEqual(m1_driver.parse_suggestion(self.BREW),
+                         ("task", "brew"))
+
+    def test_blocker_suggestion_names_no_task(self):
+        self.assertIsNone(m1_driver.parse_suggestion(self.BLOCKER))
+
+    def test_threat_suggestion_queries_the_unit(self):
+        self.assertEqual(m1_driver.parse_suggestion(self.THREAT),
+                         ("query", "/v1/unit/123"))
+
+    def test_empty_suggestion_is_none(self):
+        self.assertIsNone(m1_driver.parse_suggestion(None))
+        self.assertIsNone(m1_driver.parse_suggestion(""))
 
 
 class TestParseSnapshotStocks(unittest.TestCase):

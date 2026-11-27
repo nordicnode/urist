@@ -72,11 +72,20 @@ def date_str(tick: int, year: int = 0) -> str:
     return f"{y}-{m:02d}-{d:02d}"
 
 
+def _ordinal(n: int) -> str:
+    """English ordinal suffix: 1st, 2nd, 3rd, 4th, 11th, 12th, 13th,
+    21st, 22nd, 23rd. The old table ({1: "st", 2: "nd", 3: "rd"})
+    gave "22th" — 21/22/23 need the same suffixes as 1/2/3, and
+    11/12/13 are always "th"."""
+    if 11 <= n % 100 <= 13:
+        return "th"
+    return {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+
+
 def date_words(tick: int, year: int = 0) -> str:
     """'2nd of Galena, 125' for a year_tick + year."""
     y, m, d = date_of_tick(tick, year)
-    suffix = {1: "st", 2: "nd", 3: "rd"}.get(d, "th")
-    return f"{d}{suffix} of {MONTHS[m - 1]}, {y}"
+    return f"{d}{_ordinal(d)} of {MONTHS[m - 1]}, {y}"
 
 
 def season_of_tick(tick: int) -> str:
@@ -87,6 +96,179 @@ def day_range(day_start_tick: int) -> tuple[int, int]:
     """(first, last) year_tick of the day starting at day_start_tick
     (which must be a multiple of TICKS_PER_DAY)."""
     return day_start_tick, day_start_tick + TICKS_PER_DAY - 1
+
+
+# ----------------------------------------------------------------------
+# The diary text boundary (quality pass, 2026-11-27).
+#
+# The diary only ever receives cleaned, overseer-facing text. Raw
+# tool output, internal references and diagnostic prose are stopped
+# HERE, at the data boundary — never rendered and never patched over
+# afterwards. Three typed inputs, three renderers; nothing is
+# concatenated blindly into "I decided to ...".
+# ----------------------------------------------------------------------
+
+#: Journal decision actions that are diagnostics, not decisions.
+#: A "log" decision is the planner noting something (a dwarf in
+#: distress, a threat) — it is routed to the observation renderer,
+#: never rendered as "I decided to ...".
+LOG_ACTIONS = frozenset({"log"})
+
+#: Daemon event kinds the diary renders as lines. Everything else
+#: is a harness operation (pause_guard, dialog_dismissed, snapshot,
+#: daemon_loop_paused, ...) and never reaches the diary — the diary
+#: is the fort's story, not the harness's log. Arrivals and threats
+#: are counted above, not rendered here. Fort-event kinds added by
+#: later systems (mood, flood) go in this set when they land.
+RENDERABLE_EVENT_KINDS = frozenset()
+
+#: Markers of harness-internal text. A parenthetical carrying one
+#: is stripped; a bare one outside a parenthetical drops the whole
+#: piece (better to lose a sentence than print harness internals
+#: in the overseer's diary).
+_PAREN_MARKERS = ("see ", "logged", "verified live", ".md",
+                  "display :", "keystroke", "Traceback", "read-back",
+                  "no Dwarf Fortress window", "jobs [-1")
+_BARE_MARKERS = (".md", "display :", "keystroke", "Traceback",
+                 "read-back", "no Dwarf Fortress window", "jobs [-1",
+                 "Error:", "verified live")
+
+
+def clean_diary_text(text: Any) -> str:
+    """Strip internal debris from a piece of diary text. Returns ""
+    when the piece is dropped entirely."""
+    if not isinstance(text, str):
+        return ""
+    # Drop parentheticals that carry an internal marker.
+    def _drop_group(m: Any) -> str:
+        inner = m.group(0)
+        if any(marker.lower() in inner.lower()
+               for marker in _PAREN_MARKERS):
+            return ""
+        return inner
+    text = re.sub(r"\([^()]*\)", _drop_group, text)
+    # A bare marker outside a parenthetical drops the whole piece.
+    low = text.lower()
+    if any(marker.lower() in low for marker in _BARE_MARKERS):
+        return ""
+    # Tidy up: collapse spaces, drop a dangling dash or comma.
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+—\s*$", "", text).strip()
+    text = re.sub(r"\s*,\s*$", "", text).strip()
+    return text
+
+
+_DISTRESS_RE = re.compile(
+    r"(\d+) citizen\(s\) past a distress line: (.+?)(?: — |$)")
+_NEED_RE = re.compile(r"^(.+?) \(([^)]+)\)$")
+
+
+def parse_distress(reason: Any) -> str | None:
+    """A planner distress diagnostic as an overseer's observation.
+    "15 citizen(s) past a distress line: Udil (thirsty), ... —
+    <advice>; <note>" -> "15 dwarves were in distress, all thirsty."
+    The advice and the internal note after the dash are planner
+    guidance, not story, and are dropped. Returns None when the
+    reason is not a distress diagnostic."""
+    if not isinstance(reason, str):
+        return None
+    m = _DISTRESS_RE.search(reason)
+    if not m:
+        return None
+    pairs = []
+    for part in m.group(2).split(", "):
+        nm = _NEED_RE.match(part.strip())
+        if nm:
+            pairs.append((nm.group(1), nm.group(2)))
+    if not pairs:
+        return None
+    needs = sorted({need for _, need in pairs})
+    if len(pairs) == 1:
+        return f"{pairs[0][0]} was in distress, {needs[0]}."
+    if len(needs) == 1:
+        return f"{len(pairs)} dwarves were in distress, all {needs[0]}."
+    return (f"{len(pairs)} dwarves were in distress "
+            f"({', '.join(needs)}).")
+
+
+def _finalize_decisions(decisions: list[dict[str, Any]]
+                        ) -> tuple[list[dict[str, Any]],
+                                   list[str]]:
+    """Split a day's decision records into (decisions, observations)
+    and deduplicate the decisions.
+
+    * Log/diagnostic records are not decisions: a distress
+      diagnostic becomes an observation sentence, anything else
+      diagnostic is dropped.
+    * A decision phrase that does not survive cleaning is dropped.
+    * The planner re-decides the same thing every tick at a frozen
+      game tick, so the same phrase repeated 30 times is ONE story
+      beat, not 30. A repeated decision whose outcome CHANGED
+      (failed, then worked) is kept a second time, flagged as a
+      retry — the outcome changing is a story beat. At most one
+      keep per (phrase, outcome): an outcome that oscillates
+      (failed, worked, failed, worked) is told once per outcome,
+      not once per flip — the diary is a story, not a tick log.
+    * ok is normalized here (the Journal stores it as a SQLite
+      int 0/1, the driver passes a bool): after this, ok is
+      True/False/None, so the renderer sees the outcomes. An
+      outcome-less repeat never creates a beat — it adds nothing
+      to a decision already told.
+
+    Idempotent: re-finalizing an already-finalized list changes
+    nothing (the log records are already gone, the dedup is
+    stable)."""
+    kept: list[dict[str, Any]] = []
+    kept_ok: dict[str, set] = {}
+    observations: list[str] = []
+    for dec in decisions or []:
+        action = dec.get("action") or ""
+        if action in LOG_ACTIONS:
+            obs = parse_distress(dec.get("reason") or "")
+            if obs and obs not in observations:
+                observations.append(obs)
+            continue
+        phrase = clean_diary_text(
+            dec.get("decision") or action or "")
+        if not phrase:
+            continue
+        ok = dec.get("ok")
+        ok = None if ok is None else bool(ok)
+        oks = kept_ok.setdefault(phrase, set())
+        if ok in oks:
+            continue  # same decision, same outcome — already told
+        if ok is None and oks:
+            continue  # unknown outcome on a decision already told
+        oks.add(ok)
+        entry = dict(dec)
+        entry["decision"] = phrase
+        entry["ok"] = ok
+        if len(oks) > 1:
+            entry["retry"] = True
+        kept.append(entry)
+    return kept, observations
+
+
+def ledger_stocks(body: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Parse the ledger line of an existing diary entry body back
+    into (stocks_start, stocks_end). The ledger is a recorded fact
+    — it was rendered from live samples — so a rebuild recovers the
+    numbers from it when the Store no longer has samples for that
+    day (old samples were cleared). Accepts the old "Souls" label
+    as well as "Citizens". Returns ({}, {}) when there is no ledger
+    line."""
+    labels = {"Drink": "drink", "Food": "food", "Wood": "wood",
+              "Stone": "stone", "Citizens": "population",
+              "Souls": "population"}
+    start: dict[str, Any] = {}
+    end: dict[str, Any] = {}
+    for label, metric in labels.items():
+        m = re.search(rf"{label}: (\d+)(?: -> (\d+))?", body or "")
+        if not m:
+            continue
+        start[metric] = int(m.group(1))
+        end[metric] = int(m.group(2)) if m.group(2) else int(m.group(1))
+    return start, end
 
 
 # ----------------------------------------------------------------------
@@ -111,6 +293,7 @@ def build_daily_summary(store: Any, journal: Any,
         "season": season_of_tick(first), "fort_name": fort_name,
         "stocks_start": {}, "stocks_end": {},
         "deaths": [], "decisions": [], "events": [],
+        "observations": [],
         "arrivals": 0, "threats": 0,
     }
     # Stocks at the day boundaries, from the trend samples (one per
@@ -181,6 +364,12 @@ def build_daily_summary(store: Any, journal: Any,
     # Chronological order (the Journal returns newest-first).
     summary["decisions"].reverse()
     summary["events"].reverse()
+    # Diary boundary: diagnostics become observations, repeated
+    # identical decisions collapse to one story beat.
+    decisions, observations = _finalize_decisions(
+        summary["decisions"])
+    summary["decisions"] = decisions
+    summary["observations"] = observations
     return summary
 
 
@@ -197,22 +386,54 @@ def _stock_line(start: dict[str, Any], end: dict[str, Any],
     return f"{label}: {int(val)}"
 
 
+def _stock_crisis_lines(summary: dict[str, Any]) -> list[str]:
+    """Stock-crisis sentences (significance, 2026-11-27): a survival
+    stock hitting zero, or sitting at zero, is significant even when
+    no event record fired — a day like that can never be called
+    quiet. Returns the sentences, [] when the stocks are fine."""
+    lines = []
+    start = summary.get("stocks_start") or {}
+    end = summary.get("stocks_end") or {}
+    for metric, label in (("drink", "drink"), ("food", "food")):
+        s = start.get(metric)
+        e = end.get(metric)
+        # Stocks are numbers (ints or floats — the Store returns
+        # floats); a zero value of either type is a zero stock.
+        if isinstance(e, (int, float)) and e == 0 \
+                and isinstance(s, (int, float)) and s > 0:
+            lines.append(f"The last of the {label} ran out today.")
+        elif isinstance(e, (int, float)) and e == 0:
+            lines.append(f"There is no {label} left in the fort.")
+    return lines
+
+
 def render_entry(summary: dict[str, Any]) -> str:
     """Render the daily summary as a diary entry (markdown body, no
-    heading — write_entry adds the heading). First-person overseer
-    voice, Boatmurdered-style, but every sentence states a recorded
-    fact from the summary. Nothing is invented: when there is nothing
-    to say about a topic, it is not mentioned."""
+    heading — write_entry adds the heading). Narrative prose in the
+    overseer's voice, Boatmurdered-style: the day's story — what
+    happened, what was decided, what went wrong, what the dwarves
+    did — with the stock numbers kept as a ledger line, not the
+    story itself. Every sentence states a recorded fact from the
+    summary; nothing is invented. When there is nothing to say
+    about a topic, it is not mentioned.
+
+    The decisions are one flowing paragraph, not a list: the
+    planner re-decides the same thing every tick, so the summary
+    already collapsed repeats to one story beat (a changed outcome
+    reads as "I tried again to ..."). A decision's reason and raw
+    result never render — the reason is planner rationale, the
+    result is tool output; the outcome is only "It worked." /
+    "It did not work.", from the recorded ok flag."""
     lines: list[str] = []
     date = summary["date_words"]
     season = summary["season"]
     lines.append(f"The {date}, {season}.")
     lines.append("")
-    # Stocks.
+    # The ledger: the numbers stay, as a ledger line.
     stock_bits = []
     for metric, label in (("drink", "Drink"), ("food", "Food"),
                           ("wood", "Wood"), ("stone", "Stone"),
-                          ("population", "Souls")):
+                          ("population", "Citizens")):
         line = _stock_line(summary["stocks_start"],
                            summary["stocks_end"], metric, label)
         if line:
@@ -220,61 +441,63 @@ def render_entry(summary: dict[str, Any]) -> str:
     if stock_bits:
         lines.append(" ".join(stock_bits) + ".")
         lines.append("")
-    # Deaths first — they are the day's weight.
+    # The story: what happened, in the order it matters.
+    story: list[str] = []
+    # Stock crises first — they are the day's weight when they happen.
+    story.extend(_stock_crisis_lines(summary))
+    # Deaths.
     for death in summary["deaths"]:
-        cause = death.get("cause") or "unknown cause"
-        uid = death.get("unit_id")
-        lines.append(f"A dwarf died today (id {uid}): {cause}.")
-    if summary["deaths"]:
-        lines.append("")
+        cause = death.get("cause") or "an unknown cause"
+        story.append(f"A dwarf died today: {cause}.")
     # Arrivals and threats.
     if summary["arrivals"]:
         n = summary["arrivals"]
-        lines.append(f"{n} new {'soul' if n == 1 else 'souls'} "
+        story.append(f"{n} new {'dwarf' if n == 1 else 'dwarves'} "
                      f"joined the fort today.")
     if summary["threats"]:
-        lines.append("Something hostile came too close today; "
+        story.append("Something hostile came too close today; "
                      "the fort held its breath.")
-    if summary["arrivals"] or summary["threats"]:
-        lines.append("")
-    # Decisions, in the order they were made, with their outcome.
+    # Distress observations (parsed from the planner's diagnostics).
+    for obs in summary.get("observations") or []:
+        story.append(obs)
+    # Decisions, as one flowing paragraph.
+    dec_sentences = []
     for dec in summary["decisions"]:
-        what = dec.get("decision") or dec.get("action") or "a decision"
-        why = dec.get("reason") or ""
-        ok = dec.get("ok")
-        outcome = ""
-        if ok is True:
-            outcome = " It worked."
-        elif ok is False:
-            outcome = " It did not work."
-        result = dec.get("result") or ""
-        if result:
-            outcome += f" ({result})"
-        sentence = f"I decided to {what}."
-        if why:
-            sentence += f" {why}"
-        sentence += outcome
-        lines.append(sentence)
-    if summary["decisions"]:
-        lines.append("")
-    # Notable events (not arrivals/threats, which are above).
-    skip = {"citizen_new", "new_arrival", "threat_hold",
-            "hostile_spawn", "invasion", "snapshot"}
-    for ev in summary["events"]:
-        if ev.get("kind") in skip:
+        phrase = clean_diary_text(
+            dec.get("decision") or dec.get("action") or "")
+        if not phrase:
             continue
-        detail = ev.get("detail") or ""
+        verb = ("I tried again to" if dec.get("retry")
+                else "I decided to")
+        sentence = f"{verb} {phrase}."
+        if dec.get("ok") is True:
+            sentence += " It worked."
+        elif dec.get("ok") is False:
+            sentence += " It did not work."
+        dec_sentences.append(sentence)
+    if dec_sentences:
+        story.append(" ".join(dec_sentences))
+    # Notable fort events only (the allowlist in
+    # RENDERABLE_EVENT_KINDS) — daemon operations never render.
+    event_lines = []
+    for ev in summary["events"]:
+        if ev.get("kind") not in RENDERABLE_EVENT_KINDS:
+            continue
+        detail = clean_diary_text(ev.get("detail") or "")
         kind = ev.get("kind") or "event"
         if detail:
-            lines.append(f"{kind}: {detail}")
+            event_lines.append(f"{kind}: {detail}")
         else:
-            lines.append(f"{kind}.")
-    if any(ev.get("kind") not in skip
-           for ev in summary["events"]):
-        lines.append("")
-    # A quiet day says so, plainly.
-    if (not summary["deaths"] and not summary["decisions"]
-            and not summary["events"]):
+            event_lines.append(f"{kind}.")
+    story.extend(event_lines)
+    # A quiet day says so, plainly — but only when NOTHING
+    # significant happened: no deaths, decisions, fort events,
+    # arrivals, threats, distress, and no survival stock at zero.
+    if story:
+        for s in story:
+            lines.append(s)
+            lines.append("")
+    else:
         lines.append("A quiet day. Nothing happened that the "
                      "fort felt the need to record.")
         lines.append("")
@@ -304,8 +527,17 @@ def merge_driver_record(summary: dict[str, Any],
     its snapshots — nothing is invented.
     """
     if decisions:
-        summary["decisions"] = (list(summary.get("decisions") or [])
-                                + list(decisions))
+        combined = (list(summary.get("decisions") or [])
+                    + list(decisions))
+        # The driver's decisions are raw action records: run them
+        # through the same boundary as the Journal's (dedup repeats,
+        # split diagnostics) so the entry does not repeat a decision
+        # once per tick.
+        final, new_obs = _finalize_decisions(combined)
+        summary["decisions"] = final
+        existing_obs = summary.get("observations") or []
+        summary["observations"] = existing_obs + [
+            o for o in new_obs if o not in existing_obs]
     for key, val in (("stocks_start", stocks_start),
                      ("stocks_end", stocks_end)):
         if val:

@@ -208,12 +208,160 @@ class TestRenderEntry(unittest.TestCase):
         s = _day_summary(store=store)
         entry = diary.render_entry(s)
         self.assertIn("died of thirst", entry)
-        self.assertIn("id 42", entry)
+        # The unit id is harness-internal; the overseer names the
+        # death, not the id.
+        self.assertNotIn("id 42", entry)
 
     def test_quiet_day_says_so(self):
         s = _day_summary()
         entry = diary.render_entry(s)
         self.assertIn("quiet day", entry.lower())
+
+
+class TestDiaryQuality(unittest.TestCase):
+    """The 2026-11-27 quality pass: root-cause fixes, not patches.
+
+    Each test pins one of the defects found in the live diary.md:
+    a stock hitting zero called "quiet", a distress diagnostic
+    rendered as a decision, internal debris in the text, the
+    "22th" ordinal, "Souls" for population, and one decision
+    repeated 93 times.
+    """
+
+    def test_ordinal_22nd(self):
+        self.assertEqual(diary.date_words(5 * 33600 + 21 * 1200, 125),
+                         "22nd of Galena, 125")
+        self.assertEqual(diary.date_words(5 * 33600 + 10 * 1200, 125),
+                         "11th of Galena, 125")
+        self.assertEqual(diary.date_words(5 * 33600 + 22 * 1200, 125),
+                         "23rd of Galena, 125")
+
+    def test_stock_zero_is_not_quiet(self):
+        # The 125-06-20 defect: drink 6 -> 0, no events, and the
+        # entry called it a quiet day. A stock hitting zero is
+        # significant even when no event record fired.
+        store = FakeStore()
+        store.add_trend("drink", 169200, 6.0)
+        store.add_trend("drink", 170400, 0.0)
+        s = _day_summary(store=store)
+        entry = diary.render_entry(s)
+        self.assertNotIn("quiet day", entry.lower())
+        self.assertIn("The last of the drink ran out today.", entry)
+
+    def test_stock_at_zero_stays_significant(self):
+        store = FakeStore()
+        store.add_trend("drink", 169200, 0.0)
+        store.add_trend("drink", 170400, 0.0)
+        s = _day_summary(store=store)
+        entry = diary.render_entry(s)
+        self.assertNotIn("quiet day", entry.lower())
+        self.assertIn("There is no drink left in the fort.", entry)
+
+    def test_log_decision_becomes_observation_not_decision(self):
+        # The 125-06-28 defect: a distress diagnostic rendered as
+        # "I decided to a dwarf is in distress. 1 citizen(s) past
+        # a distress line: ... (see PLANNER.md) (logged)".
+        journal = FakeJournal()
+        journal.add_decision(
+            169300, "a dwarf is in distress",
+            reason="1 citizen(s) past a distress line: "
+                   "Olon Medtobalod (thirsty) — check drink/food "
+                   "stocks first (the usual cause); no hospital "
+                   "zone exists yet (see PLANNER.md)",
+            action="log", ok=True, result="logged")
+        s = _day_summary(journal=journal)
+        self.assertEqual(len(s["decisions"]), 0)
+        entry = diary.render_entry(s)
+        self.assertNotIn("I decided to a dwarf", entry)
+        self.assertNotIn("PLANNER.md", entry)
+        self.assertNotIn("(logged)", entry)
+        self.assertNotIn("check drink/food", entry)
+        self.assertIn("Olon Medtobalod was in distress, thirsty.",
+                      entry)
+
+    def test_distress_plural(self):
+        self.assertEqual(
+            diary.parse_distress(
+                "15 citizen(s) past a distress line: Udil (thirsty), "
+                "Zefon (thirsty) — check stocks"),
+            "2 dwarves were in distress, all thirsty.")
+        self.assertIsNone(diary.parse_distress("brew drink"))
+
+    def test_repeated_decision_collapses_to_one(self):
+        # The 125-04-01 defect: one decision repeated 93 times.
+        journal = FakeJournal()
+        for _ in range(30):
+            journal.add_decision(169300, "appoint a manager",
+                                 action="ui:appoint_noble", ok=False)
+        s = _day_summary(journal=journal)
+        self.assertEqual(len(s["decisions"]), 1)
+        entry = diary.render_entry(s)
+        self.assertEqual(entry.count("appoint a manager"), 1)
+        self.assertIn("It did not work.", entry)
+
+    def test_changed_outcome_kept_as_retry(self):
+        journal = FakeJournal()
+        journal.add_decision(169300, "appoint a manager",
+                             action="ui:appoint_noble", ok=False)
+        journal.add_decision(169400, "appoint a manager",
+                             action="ui:appoint_noble", ok=True)
+        s = _day_summary(journal=journal)
+        self.assertEqual(len(s["decisions"]), 2)
+        entry = diary.render_entry(s)
+        self.assertIn("I tried again to appoint a manager.", entry)
+
+    def test_int_ok_normalized_and_unknown_ok_no_retry(self):
+        # The Journal stores ok as SQLite ints (0/1); the renderer
+        # must see them as outcomes, and an outcome-less repeat
+        # must not add a story beat.
+        journal = FakeJournal()
+        journal.add_decision(169300, "appoint a manager",
+                             action="ui:appoint_noble", ok=0)
+        journal.add_decision(169400, "appoint a manager",
+                             action="ui:appoint_noble", ok=1)
+        journal.add_decision(169500, "appoint a manager",
+                             action="ui:appoint_noble", ok=None)
+        s = _day_summary(journal=journal)
+        self.assertEqual(len(s["decisions"]), 2)
+        entry = diary.render_entry(s)
+        self.assertIn("I decided to appoint a manager. "
+                      "It did not work.", entry)
+        self.assertIn("I tried again to appoint a manager. "
+                      "It worked.", entry)
+
+    def test_oscillating_outcome_told_once_per_outcome(self):
+        # The planner re-decides every tick, so one decision's
+        # outcome can flip (failed, worked, failed, worked) across
+        # the day. The diary tells it once per outcome, not once
+        # per flip — the 125-04-01 entry rendered "appoint a
+        # manager" five times before this cap.
+        journal = FakeJournal()
+        for i, ok in enumerate([False, True, False, True, False]):
+            journal.add_decision(169300 + i * 100, "appoint a manager",
+                                 action="ui:appoint_noble", ok=ok)
+        s = _day_summary(journal=journal)
+        self.assertEqual(len(s["decisions"]), 2)
+        entry = diary.render_entry(s)
+        self.assertEqual(entry.count("appoint a manager"), 2)
+
+    def test_population_uses_citizens(self):
+        store = FakeStore()
+        store.add_trend("population", 169200, 10.0)
+        s = _day_summary(store=store)
+        entry = diary.render_entry(s)
+        self.assertIn("Citizens: 10", entry)
+        self.assertNotIn("Souls", entry)
+
+    def test_ledger_stocks_round_trips(self):
+        start, end = diary.ledger_stocks(
+            "Drink: 39 -> 33 Food: 32 Wood: 124 Stone: 0 Citizens: 7.")
+        self.assertEqual(start["drink"], 39)
+        self.assertEqual(end["drink"], 33)
+        self.assertEqual(end["population"], 7)
+        # The old "Souls" label parses too.
+        start, end = diary.ledger_stocks("Souls: 10.")
+        self.assertEqual(start["population"], 10)
+        self.assertEqual(diary.ledger_stocks("A quiet day."), ({}, {}))
 
 
 class TestWriteEntry(unittest.TestCase):

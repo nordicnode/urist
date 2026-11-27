@@ -240,27 +240,46 @@ def parse_model_reply(text: str) -> tuple[str, list[dict]]:
 def parse_suggestion(text: str | None) -> tuple[str, str] | None:
     """Parse the snapshot's free-text suggestion into something the
     driver can run. Returns ("task", name), ("query", route), or
-    None when the suggestion names nothing runnable. The suggestion
-    is prose ("Suggested action: run the brew task (POST
-    /v1/tasks/brew) — ..."), so this matches its known shapes
-    rather than pretending it is structured."""
+    None when the suggestion names nothing runnable.
+
+    Only the suggestion's PRIMARY action counts: the one the
+    leading "Suggested action:" clause names first. A later
+    subordinate mention must never be mistaken for the action —
+    the still-build suggestion ends "Only then run the brew task.",
+    and the old unanchored regex matched that trailing clause and
+    drove task:brew on a fort with no still (the mock runs of
+    2026-11-27, three times). A suggestion whose primary action is
+    a raw action (build a still) or a gathering fix names no
+    runnable task/query, so this returns None and the caller takes
+    no action — a missed action is visible in the log; a wrong one
+    silently drives a dead end.
+    """
     if not text:
         return None
     import re
-    m = re.search(r"run the (\w+) task", text)
+    head = text
+    prefix = "Suggested action:"
+    if prefix in text:
+        head = text.split(prefix, 1)[1]
+    head = head.strip()
+    m = re.match(r"run the (\w+) task", head)
     if m:
         return ("task", m.group(1))
-    m = re.search(r"query unit (\d+)", text)
+    m = re.match(r"query unit (\d+)", head)
     if m:
         return ("query", f"/v1/unit/{m.group(1)}")
     return None
 
 
-def diary_decision_text(name: str, kwargs: dict) -> str:
+def diary_decision_text(name: str, kwargs: dict) -> str | None:
     """One model action as a diary decision phrase ("build a Still
     at (95, 108, 175)"). Plain words, not the action name — the
-    diary renders "I decided to <phrase>." Unmapped actions fall
-    back to the name + key kwargs, so nothing is ever lost."""
+    diary renders "I decided to <phrase>." Every current action is
+    mapped here; an unmapped action returns None and the caller
+    skips it (a diary phrase must be a clean action phrase — the
+    old fallback of "name k=v" leaked raw kwargs into the diary).
+    A None return is a signal to add the mapping, not to patch
+    around it."""
     kind = str(kwargs.get("kind", ""))
     pos = kwargs.get("pos")
     pos_txt = f" at {tuple(pos)}" if pos else ""
@@ -285,16 +304,36 @@ def diary_decision_text(name: str, kwargs: dict) -> str:
         return "gather plants"
     if name == "designate_chop":
         return "chop trees"
+    if name == "designate_dig":
+        box = kwargs.get("box") or []
+        at = f" at {tuple(box[:3])}" if len(box) >= 3 else ""
+        mode = kwargs.get("mode", "")
+        if mode in ("", "dig"):
+            return f"dig{at}".strip()
+        return f"dig a {mode}{at}".strip()
     if name == "dig_to_completion":
-        return f"dig {kwargs.get('mode', '')} at {kwargs.get('box', '')}"
+        box = kwargs.get("box") or []
+        at = f" at {tuple(box[:3])}" if len(box) >= 3 else ""
+        return f"dig a {kwargs.get('mode', '')}{at}".strip()
     if name == "build_furniture":
         return f"build {kind or 'furniture'}{pos_txt}"
     if name == "build_farm_plot":
+        if not pos_txt and kwargs.get("x") is not None:
+            pos_txt = (f" at ({kwargs.get('x')}, "
+                       f"{kwargs.get('y')}, {kwargs.get('z')})")
         return f"build a farm plot{pos_txt}"
+    if name == "deconstruct_building":
+        return (f"deconstruct building "
+                f"#{kwargs.get('building_id', '?')}")
+    if name == "manager_order_create":
+        return (f"order {kwargs.get('job_type', 'an order')} "
+                f"x{kwargs.get('amount', 1)} from the manager")
+    if name == "manager_order_remove":
+        return (f"remove manager order "
+                f"#{kwargs.get('order_id', '?')}")
     if name.startswith("task:"):
         return f"run the {name[len('task:'):]} task"
-    bits = [f"{k}={v}" for k, v in kwargs.items()]
-    return f"{name} {' '.join(bits)}".strip()
+    return None
 
 
 def parse_snapshot_stocks(sections: dict | None) -> dict:
@@ -817,14 +856,23 @@ class M1Driver:
                         # The daemon's Journal never sees M1 actions
                         # (its loop is paused), so without this the
                         # diary entry for the day would be empty.
-                        self.diary_decisions.append({
-                            "decision": diary_decision_text(
-                                a["action"], a.get("kwargs") or {}),
-                            "reason": a.get("reason", ""),
-                            "action": a["action"],
-                            "ok": bool(res.get("ok")),
-                            "result": str(res.get("reason") or "")[:300],
-                        })
+                        # An action with no clean diary phrase is
+                        # skipped here (logged, so the mapping gap
+                        # is visible) rather than rendered as raw
+                        # name + kwargs.
+                        phrase = diary_decision_text(
+                            a["action"], a.get("kwargs") or {})
+                        if phrase is None:
+                            self._log("diary_no_phrase",
+                                      name=a["action"])
+                        else:
+                            self.diary_decisions.append({
+                                "decision": phrase,
+                                "reason": a.get("reason", ""),
+                                "action": a["action"],
+                                "ok": bool(res.get("ok")),
+                                "result": str(res.get("reason") or "")[:300],
+                            })
                         self.last_action_results.append(
                             f"{a['action']} -> "
                             f"{'OK' if res.get('ok') else 'FAILED'}: "

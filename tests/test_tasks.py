@@ -51,6 +51,25 @@ class TestTaskDefsOffline(unittest.TestCase):
         self.assertEqual(daemon_mod.TASK_DEFS["cook"]["wait_job"],
                          "PrepareMeal")
 
+    def test_failed_task_names_its_reason(self):
+        # The mock runs of 2026-11-27 drove task:brew three times
+        # and the run log recorded reason "None": run_task's returns
+        # carried "detail" but no "reason", and the driver reads
+        # "reason". Every failure path must name its reason through
+        # the standard field. The unknown-task path needs no game
+        # (it returns before the client check).
+        daemon = daemon_mod.Daemon()
+        result = daemon.run_task("bogus_task")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "unknown task 'bogus_task'")
+        self.assertEqual(result["detail"], result["reason"])
+
+    def test_no_client_task_names_its_reason(self):
+        daemon = daemon_mod.Daemon()
+        result = daemon.run_task("brew")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "daemon has no DFHack client")
+
 
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestTasksLive(unittest.TestCase):
@@ -77,12 +96,16 @@ class TestTasksLive(unittest.TestCase):
         cls.client.close()
 
     def test_brew_without_a_still_fails_fast(self):
-        # The fort has no workshops at all, so the brew task must
-        # fail on the prerequisite (a still), not queue a job that
-        # can never be worked.
+        # The fort has no still (only a carpenter's workshop), so
+        # the brew task must fail on the prerequisite (a still), not
+        # queue a job that can never be worked.
         result = self.daemon.run_task("brew")
         self.assertFalse(result["ok"])
         self.assertIn("no still workshop exists", result["detail"])
+        # The failure reason must be readable through the standard
+        # "reason" field (the driver and the run log read it there).
+        self.assertEqual(result["reason"], result["detail"])
+        self.assertIn("no still workshop exists", result["reason"])
 
     def test_gather_uses_a_surface_box(self):
         # The gather box is derived from the live state (a probe for
@@ -112,6 +135,7 @@ class TestTasksLive(unittest.TestCase):
         result = self.daemon.run_task("bogus_task")
         self.assertFalse(result["ok"])
         self.assertIn("unknown task", result["detail"])
+        self.assertIn("unknown task", result["reason"])
 
 
 if __name__ == "__main__":

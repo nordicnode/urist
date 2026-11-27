@@ -1026,16 +1026,28 @@ class Daemon:
         """Run a composed task (PROTOCOL.md §4.3): queue the work,
         then wait (bounded) for the queued job to leave the job list
         — disappearance means it was worked (or cancelled, which the
-        newest report reveals). Returns an action envelope."""
+        newest report reveals). Returns an action envelope.
+
+        The envelope carries "reason" (the human-readable outcome,
+        the standard field every action envelope and the driver read)
+        alongside "detail" (kept for backward compatibility — the
+        HTTP API returns this dict verbatim and existing readers
+        take the message from "detail"). A failed task MUST name
+        its reason: the mock runs of 2026-11-27 drove task:brew
+        three times and the run log recorded reason "None", because
+        these returns had no "reason" key at all.
+        """
         started = time.monotonic()
         spec = TASK_DEFS.get(name)
         if spec is None:
             return {"ok": False, "action": f"task:{name}",
+                    "reason": f"unknown task {name!r}",
                     "detail": f"unknown task {name!r}",
                     "evidence": None,
                     "took_ms": 0}
         if self.client is None:
             return {"ok": False, "action": f"task:{name}",
+                    "reason": "daemon has no DFHack client",
                     "detail": "daemon has no DFHack client",
                     "evidence": None,
                     "took_ms": 0}
@@ -1050,6 +1062,7 @@ class Daemon:
                     lambda: observe.collect(self.client))
             except ReadRefused as exc:
                 return {"ok": False, "action": f"task:{name}",
+                        "reason": f"read refused: {exc}",
                         "detail": f"read refused: {exc}",
                         "evidence": None,
                         "took_ms": round((time.monotonic() - started)
@@ -1078,6 +1091,8 @@ class Daemon:
             shrubs = probe.get("plants") or []
             if not shrubs:
                 return {"ok": False, "action": f"task:{name}",
+                        "reason": "no shrubs on the surface — "
+                                  "nothing to gather",
                         "detail": "no shrubs on the surface — "
                                   "nothing to gather",
                         "fix": "Fix: plant a farm plot (action "
@@ -1103,6 +1118,7 @@ class Daemon:
         workshop = _find_workshop(state, subtype)
         if workshop is None:
             return {"ok": False, "action": f"task:{name}",
+                    "reason": f"no {need} workshop exists",
                     "detail": f"no {need} workshop exists",
                     "evidence": None,
                     "took_ms": round((time.monotonic() - started) * 1000)}
@@ -1126,9 +1142,11 @@ class Daemon:
                 detail = "; ".join(
                     _materials_mod.format_shortage(s)
                     for s in shortages)
+                msg = (f"cannot brew: material shortage "
+                       f"— {detail}")
                 return {"ok": False, "action": f"task:{name}",
-                        "detail": f"cannot brew: material shortage "
-                                  f"— {detail}",
+                        "reason": msg,
+                        "detail": msg,
                         "fix": f"Fix: {detail}.",
                         "evidence": None,
                         "took_ms": round((time.monotonic() - started)
@@ -1155,10 +1173,12 @@ class Daemon:
         finished = _wait_for_paused(self.client, _jobs_done, wait)
         took_ms = round((time.monotonic() - started) * 1000)
         if not finished:
+            msg = (f"queued {job_name} x{count} on "
+                   f"building #{workshop['id']} but the job "
+                   f"did not finish within {wait}s")
             return {"ok": False, "action": f"task:{name}",
-                    "detail": f"queued {job_name} x{count} on "
-                              f"building #{workshop['id']} but the job "
-                              f"did not finish within {wait}s",
+                    "reason": msg,
+                    "detail": msg,
                     "evidence": {"job_ids": sorted(job_ids)},
                     "took_ms": took_ms}
         # The job left the list — but disappearance means it was
@@ -1179,6 +1199,8 @@ class Daemon:
                         and rep["time"] < start_tick:
                     continue
                 return {"ok": False, "action": f"task:{name}",
+                        "reason": f"the {job_name} job was cancelled: "
+                                  f"{text}",
                         "detail": f"the {job_name} job was cancelled: "
                                   f"{text}",
                         "evidence": {"job_ids": sorted(job_ids)},
@@ -1188,6 +1210,8 @@ class Daemon:
             # leave the list, so report it as completed.
             pass
         return {"ok": True, "action": f"task:{name}",
+                "reason": f"{job_name} x{count} completed on building "
+                          f"#{workshop['id']}",
                 "detail": f"{job_name} x{count} completed on building "
                           f"#{workshop['id']}",
                 "evidence": {"job_ids": sorted(job_ids)},

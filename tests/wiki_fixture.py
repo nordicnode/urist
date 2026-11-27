@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from dfagent_harness import wiki
+from dfagent_harness import briefings, wiki
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "wiki"
 FIXTURE_DFQ = FIXTURE_DIR / "dfq.py"
@@ -37,6 +37,12 @@ class WikiFixtureMixin:
         ]
         for patch in self._wiki_fixture_patches:
             patch.start()
+        # The briefing wiki cache is module-level and keyed only by
+        # event kind: a test that ran first against the real (absent
+        # in CI) export caches [] for a kind, and a fixture test
+        # would reuse that stale empty entry without re-fetching.
+        # Switching backends must drop the cache.
+        briefings.clear_wiki_cache()
 
     def tearDown(self):
         for patch in reversed(self._wiki_fixture_patches):

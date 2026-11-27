@@ -373,42 +373,13 @@ def decision_phrase_from_log(rec: dict) -> str | None:
     return diary_decision_text(name, params)
 
 
-def parse_snapshot_stocks(sections: dict | None) -> dict:
-    """Start/end stocks from a snapshot's sections (the diary's
-    opening/closing numbers). The sections carry the numbers in
-    both forms — the full "Stocks: drink 35, food 32, ..." line and
-    the diffed "stocks: unchanged (drink 35, ...)" one-liner — so
-    one regex covers both. Population comes from the status section
-    the same way. Missing values stay None (never guessed)."""
-    import re as _re
-    out: dict = {}
-    if not sections:
-        return out
-    stocks = str((sections or {}).get("stocks", ""))
-    m = _re.search(r"drink (\d+), food (\d+), wood (\d+), "
-                   r"stone (\d+)", stocks)
-    if m:
-        for key, val in zip(("drink", "food", "wood", "stone"),
-                            m.groups()):
-            out[key] = int(val)
-    status = str((sections or {}).get("status", ""))
-    m = _re.search(r"(\d+) citizens", status)
-    if m:
-        out["population"] = int(m.group(1))
-    return out
-
-
-def parse_snapshot_stocks_text(text: str) -> dict:
-    """Stocks from a snapshot's rendered text. The run log's
-    snapshot records carry only the text (no sections), so the
-    retry path cannot use parse_snapshot_stocks — it posted {}
-    and the feed fell back to a stale trend sample for the
-    opening number (run 064517: the retry's entry said "drink
-    down to 33 from 39" when the live run-start number was 38).
-    Same regexes as parse_snapshot_stocks, applied to the
-    'Stocks: drink 38, food 32, wood 124, stone 0, ...' line
-    and the 'N citizens' line. Missing values stay absent
-    (never guessed)."""
+def _stocks_from_text(text: str) -> dict:
+    """The stocks/population numbers out of rendered text. One
+    core for both parsers below (they were two copies of the same
+    regexes). The numbers live in the 'Stocks: drink 38, food 32,
+    wood 124, stone 0, ...' line and the 'N citizens' line; the
+    diffed 'stocks: unchanged (drink 35, ...)' one-liner matches
+    the same regex. Missing values stay absent (never guessed)."""
     import re as _re
     out: dict = {}
     if not text:
@@ -425,6 +396,43 @@ def parse_snapshot_stocks_text(text: str) -> dict:
     return out
 
 
+def parse_snapshot_stocks(sections: dict | None) -> dict:
+    """Start/end stocks from a snapshot's sections (the diary's
+    opening/closing numbers). The sections carry the numbers in
+    both forms — the full "Stocks: drink 35, food 32, ..." line and
+    the diffed "stocks: unchanged (drink 35, ...)" one-liner — so
+    one regex covers both. Population comes from the status section
+    the same way."""
+    if not sections:
+        return {}
+    stocks = str((sections or {}).get("stocks", ""))
+    status = str((sections or {}).get("status", ""))
+    return _stocks_from_text(stocks + "\n" + status)
+
+
+def parse_snapshot_stocks_text(text: str) -> dict:
+    """Stocks from a snapshot's rendered text. The run log's
+    snapshot records carry only the text (no sections), so the
+    retry path cannot use parse_snapshot_stocks — it posted {}
+    and the feed fell back to a stale trend sample for the
+    opening number (run 064517: the retry's entry said "drink
+    down to 33 from 39" when the live run-start number was 38)."""
+    return _stocks_from_text(text)
+
+
+def parse_snapshot_stocks_any(snap: dict | None) -> dict:
+    """Stocks from a snapshot by whatever it carries: the rendered
+    text first, the sections as fallback. The live path and the
+    retry path both use this, so they read the same numbers the
+    same way — the retry used to inline this text-or-sections
+    choice and the live path used sections only, which is how the
+    two drifted apart."""
+    if not snap:
+        return {}
+    return (parse_snapshot_stocks_text(snap.get("text") or "")
+            or parse_snapshot_stocks((snap or {}).get("sections")))
+
+
 def parse_fort_name(snap: dict | None) -> str:
     """The fort name from a snapshot ("Erushtathtat, 125-04-02 ..."
     in the header line, or "header: unchanged (Erushtathtat,
@@ -436,6 +444,35 @@ def parse_fort_name(snap: dict | None) -> str:
         (snap.get("sections") or {}).get("header", ""))
     m = _re.search(r"([A-Z][\w ]*?),\s*\d+-\d+-\d+", text)
     return m.group(1).strip() if m else ""
+
+
+def build_diary_body(*, start_tick: int, year: int, fort_name: str,
+                     decisions: list, stocks_start: dict,
+                     stocks_end: dict, citizens: list,
+                     citizens_start: list) -> dict:
+    """The POST /v1/control/diary body — the single source of
+    truth for it. The live driver (_write_diary) and the retry
+    script (retry_diary.py) both build this body; they used to
+    each carry their own copy of the dict literal, and the copies
+    had already diverged (the live path gained the fresh-citizens
+    fix, the retry path did not; the retry gained the text-first
+    stocks fallback, the live path did not). The callers differ
+    only in where their inputs come from — live state versus a
+    reconstructed run log — so every input is a parameter and the
+    assembly lives here exactly once. ``day_start_tick`` is the
+    day boundary the run started on (start_tick floored to the
+    day), which is the date the entry is filed under."""
+    return {
+        "day_start_tick": (start_tick // TICKS_PER_DAY * TICKS_PER_DAY),
+        "year": year,
+        "fort_name": fort_name,
+        "decisions": decisions,
+        "stocks_start": stocks_start,
+        "stocks_end": stocks_end,
+        "citizens": citizens,
+        "citizens_start": citizens_start,
+        "tick_start": start_tick,
+    }
 
 
 def _snapshot_citizens(snap: dict | None) -> list[dict]:
@@ -567,36 +604,32 @@ class M1Driver:
             year = int(str(date).split("-")[0])
         except (ValueError, IndexError):
             year = 0
-        body = {
-            "day_start_tick": (self.start_tick // TICKS_PER_DAY
-                               * TICKS_PER_DAY),
-            "year": year,
-            "fort_name": parse_fort_name(self.snap0),
-            "decisions": self.diary_decisions,
-            "stocks_start": parse_snapshot_stocks(
-                (self.snap0 or {}).get("sections")),
-            "stocks_end": parse_snapshot_stocks(
-                snap.get("sections")),
-            # The run-end citizens and the run-start citizens are
-            # the feed's per-dwarf samples: the server records them
-            # so the diary feed can diff what changed for each dwarf
-            # across the run's day. They come from a fresh full
-            # units collect, NOT the snapshot: the final snapshot's
-            # units section is usually diffed to a one-liner string
-            # ("unchanged ..."), which carries no citizens — and
-            # snap0's can be stale from a previous daemon instance.
-            # With no samples the feed has no dwarf facts for the
-            # day and the AI fills the gap from old entries (run
-            # #17: Olon credited as the brewer; the brewer is
-            # Mestthos). The snapshot citizens are only a fallback
-            # when the fresh fetch fails.
-            "citizens": (self._fetch_fresh_citizens("end")
-                         or _snapshot_citizens(snap)),
-            "citizens_start": (self.citizens_start_fresh
-                               if self.citizens_start_fresh is not None
-                               else _snapshot_citizens(self.snap0)),
-            "tick_start": self.start_tick,
-        }
+        # The run-end citizens and the run-start citizens are
+        # the feed's per-dwarf samples: the server records them
+        # so the diary feed can diff what changed for each dwarf
+        # across the run's day. They come from a fresh full
+        # units collect, NOT the snapshot: the final snapshot's
+        # units section is usually diffed to a one-liner string
+        # ("unchanged ..."), which carries no citizens — and
+        # snap0's can be stale from a previous daemon instance.
+        # With no samples the feed has no dwarf facts for the
+        # day and the AI fills the gap from old entries (run
+        # #17: Olon credited as the brewer; the brewer is
+        # Mestthos). The snapshot citizens are only a fallback
+        # when the fresh fetch fails.
+        body = build_diary_body(
+            start_tick=self.start_tick,
+            year=year,
+            fort_name=parse_fort_name(self.snap0),
+            decisions=self.diary_decisions,
+            stocks_start=parse_snapshot_stocks_any(self.snap0),
+            stocks_end=parse_snapshot_stocks_any(snap),
+            citizens=(self._fetch_fresh_citizens("end")
+                      or _snapshot_citizens(snap)),
+            citizens_start=(self.citizens_start_fresh
+                            if self.citizens_start_fresh is not None
+                            else _snapshot_citizens(self.snap0)),
+        )
         try:
             res = self.daemon.post("/v1/control/diary", body)
             self._log("diary", ok=res.get("ok"), date=res.get("date"),

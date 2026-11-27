@@ -489,5 +489,152 @@ class TestPreflight(unittest.TestCase):
         self.assertTrue(any("loop not paused" in f for f in failures))
 
 
+class TestParseSnapshotStocksAny(unittest.TestCase):
+    """parse_snapshot_stocks_any: the text first, the sections as
+    fallback — the one stocks reader both diary paths use."""
+
+    _TEXT = ("Erushtathtat, 125-04-01 (tick 101323) paused: True.\n\n"
+             "Stocks: drink 38, food 32, wood 124, stone 0.\n"
+             "Population: 7 citizens (25 animals).")
+    _SECTIONS = {
+        "stocks": "Stocks: drink 39, food 32, wood 124, stone 0",
+        "status": "7 citizens",
+    }
+
+    def test_text_first_when_present(self):
+        snap = {"text": self._TEXT, "sections": self._SECTIONS}
+        self.assertEqual(m1_driver.parse_snapshot_stocks_any(snap),
+                         {"drink": 38, "food": 32, "wood": 124,
+                          "stone": 0, "population": 7})
+
+    def test_sections_fallback_when_text_has_no_stocks(self):
+        snap = {"text": "Erushtathtat, 125-04-01 (tick 101323).",
+                "sections": self._SECTIONS}
+        self.assertEqual(m1_driver.parse_snapshot_stocks_any(snap),
+                         {"drink": 39, "food": 32, "wood": 124,
+                          "stone": 0, "population": 7})
+
+    def test_empty_when_neither(self):
+        self.assertEqual(m1_driver.parse_snapshot_stocks_any({}), {})
+        self.assertEqual(m1_driver.parse_snapshot_stocks_any(None), {})
+
+    def test_agrees_with_sections_parse(self):
+        # The live path switched to this helper: on a snapshot
+        # carrying both, it must read the same numbers as the old
+        # sections-only parse (the text is rendered from the same
+        # collect).
+        snap = {"text": self._TEXT, "sections": {
+            "stocks": "Stocks: drink 38, food 32, wood 124, stone 0",
+            "status": "7 citizens",
+        }}
+        self.assertEqual(
+            m1_driver.parse_snapshot_stocks_any(snap),
+            m1_driver.parse_snapshot_stocks(snap["sections"]))
+
+
+class TestBuildDiaryBody(unittest.TestCase):
+    """build_diary_body: the single source of truth for the diary
+    POST body, used by the live driver and the retry script."""
+
+    def test_assembles_all_nine_fields(self):
+        body = m1_driver.build_diary_body(
+            start_tick=107000, year=125, fort_name="Erushtathtat",
+            decisions=[{"decision": "build a Still"}],
+            stocks_start={"drink": 38}, stocks_end={"drink": 68},
+            citizens=[{"id": 1}], citizens_start=[{"id": 1}])
+        self.assertEqual(body["day_start_tick"], 106800)
+        self.assertEqual(body["tick_start"], 107000)
+        self.assertEqual(body["year"], 125)
+        self.assertEqual(body["fort_name"], "Erushtathtat")
+        self.assertEqual(body["decisions"],
+                         [{"decision": "build a Still"}])
+        self.assertEqual(body["stocks_start"], {"drink": 38})
+        self.assertEqual(body["stocks_end"], {"drink": 68})
+        self.assertEqual(body["citizens"], [{"id": 1}])
+        self.assertEqual(body["citizens_start"], [{"id": 1}])
+
+    def test_day_start_tick_floors_to_the_day(self):
+        # start_tick 101323 is mid-day 125-04-01 (day = 1200 ticks,
+        # day 84 starts at 100800).
+        body = m1_driver.build_diary_body(
+            start_tick=101323, year=125, fort_name="",
+            decisions=[], stocks_start={}, stocks_end={},
+            citizens=[], citizens_start=[])
+        self.assertEqual(body["day_start_tick"], 100800)
+
+
+_RETRY_SPEC = importlib.util.spec_from_file_location(
+    "retry_diary",
+    Path(__file__).resolve().parent.parent / "scripts" / "retry_diary.py")
+retry_diary = importlib.util.module_from_spec(_RETRY_SPEC)
+_RETRY_SPEC.loader.exec_module(retry_diary)
+
+
+class TestBuildRetryBody(unittest.TestCase):
+    """retry_diary.build_retry_body reconstructs the same body the
+    live driver would have posted, from a run log."""
+
+    def _recs(self):
+        return [
+            {"kind": "run_start", "start_tick": 101323},
+            {"kind": "snapshot", "tick": None, "date": "",
+             "text": ("Erushtathtat, 125-04-01 (tick 101323) paused: "
+                      "True focus: dwarfmode/Default.\n\n"
+                      "Stocks: drink 38, food 32, wood 124, stone 0, "
+                      "brewable plants 38.\n"
+                      "Population: 7 citizens (25 animals)."),
+             "sections": None},
+            {"kind": "action", "name": "build_workshop",
+             "params": {"kind": "Still", "pos": [95, 108, 175]},
+             "phrase": "build a Still at (95, 108, 175)",
+             "model_reason": "need drink", "ok": True,
+             "reason": "built workshop #8"},
+            {"kind": "action", "name": "queue_job", "params": {},
+             "model_reason": "", "ok": True,
+             "reason": ("queued make_barrel x4 on building #7 "
+                        "(jobs [89, 90, 91, 92])")},
+            {"kind": "snapshot", "tick": None, "date": "",
+             "text": ("Erushtathtat, 125-04-06 (tick 108000) paused: "
+                      "True focus: dwarfmode/Default.\n\n"
+                      "Stocks: drink 68, food 25, wood 121, stone 0.\n"
+                      "Population: 7 citizens (25 animals)."),
+             "sections": None},
+        ]
+
+    def test_rebuilds_the_live_body(self):
+        body = retry_diary.build_retry_body(self._recs())
+        self.assertEqual(body["day_start_tick"], 100800)
+        self.assertEqual(body["tick_start"], 101323)
+        self.assertEqual(body["year"], 125)
+        self.assertEqual(body["fort_name"], "Erushtathtat")
+        self.assertEqual(
+            [d["decision"] for d in body["decisions"]],
+            ["build a Still at (95, 108, 175)",
+             "queue make_barrel x4 at building #7"])
+        self.assertEqual(body["stocks_start"],
+                         {"drink": 38, "food": 32, "wood": 124,
+                          "stone": 0, "population": 7})
+        self.assertEqual(body["stocks_end"],
+                         {"drink": 68, "food": 25, "wood": 121,
+                          "stone": 0, "population": 7})
+        # The log's snapshots carry no units sections, so the
+        # retry's citizens are snapshot-only (empty here) — the
+        # known limit, documented in retry_diary.py.
+        self.assertEqual(body["citizens"], [])
+        self.assertEqual(body["citizens_start"], [])
+
+    def test_no_start_tick_raises(self):
+        recs = self._recs()
+        recs[1]["text"] = "Erushtathtat, 125-04-01 paused: True."
+        recs[0] = {"kind": "run_start"}
+        with self.assertRaises(ValueError):
+            retry_diary.build_retry_body(recs)
+
+    def test_no_snapshots_raises(self):
+        with self.assertRaises(ValueError):
+            retry_diary.build_retry_body(
+                [{"kind": "run_start", "start_tick": 1}])
+
+
 if __name__ == "__main__":
     unittest.main()

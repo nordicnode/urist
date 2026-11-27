@@ -206,6 +206,23 @@ def diary_write(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict
             decisions=body.get("decisions") or [],
             stocks_start=body.get("stocks_start") or {},
             stocks_end=stocks_end)
+        # Thin-feed guard (the 04-05 retry class): a feed with no
+        # ledger stocks at all AND no dwarves AND no decisions is
+        # nothing to write from — the model would invent the day
+        # from the recent entries. Refuse it rather than letting
+        # the model write from nothing. This stops the
+        # pure-invention case only; the numbers validator in
+        # write_ai_entry is the real protection for a feed that
+        # has facts but a model that ignores them.
+        summary = feed["summary"]
+        if (not summary.get("stocks_start")
+                and not summary.get("stocks_end")
+                and not feed.get("dwarves")
+                and not summary.get("decisions")):
+            _error(handler, 503, "DIARY_FAILED",
+                   "diary write failed: feed too thin — no stocks, "
+                   "no dwarves, no decisions")
+            return
         path = write_ai_entry(FreePiClient(),
                               feed, ctx.daemon.state_dir)
     except Exception as exc:  # noqa: BLE001 - best-effort

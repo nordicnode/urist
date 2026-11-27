@@ -379,6 +379,48 @@ class TestFeedSamples(unittest.TestCase):
                          if r["type"] == "deity")
         self.assertFalse(deity_rec["new_today"])
 
+    def test_wound_worsened_same_id_more_parts(self):
+        # The 04-01 äs case, verbatim: wound id 4, parts 0 -> 2.
+        # The old diff compared ids only, so this produced NO
+        # change and the entry never reported the wound getting
+        # worse. A persisting id with more parts is a worsening.
+        store = FakeStore()
+        for tick, parts in ((100800, 0), (101999, 2)):
+            store.add_unit(101, tick, name="Lor Mebzuthkin",
+                           profession="Miner", mood=-1,
+                           mood_name="none", stress_level=40000,
+                           stress_category=3, needs=[],
+                           wounds=[{"id": 4, "parts": parts}],
+                           job="", relations=[])
+        feed = diary.build_diary_feed(store, FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        lor = feed["dwarves"][0]
+        kinds = [c["kind"] for c in lor["changes"]]
+        self.assertIn("wound_worsened", kinds)
+        self.assertNotIn("wound_new", kinds)
+        self.assertNotIn("wound_healed", kinds)
+        text = next(c["text"] for c in lor["changes"]
+                    if c["kind"] == "wound_worsened")
+        self.assertIn("worse", text)
+
+    def test_wound_same_parts_is_not_worsened(self):
+        # Same id, same parts: a stable wound is not a change.
+        store = FakeStore()
+        for tick in (100800, 101999):
+            store.add_unit(101, tick, name="Lor Mebzuthkin",
+                           profession="Miner", mood=-1,
+                           mood_name="none", stress_level=40000,
+                           stress_category=3, needs=[],
+                           wounds=[{"id": 4, "parts": 2}],
+                           job="", relations=[])
+        feed = diary.build_diary_feed(store, FakeJournal(),
+                                      100800, "Erushtathtat", 125)
+        lor = feed["dwarves"][0]
+        kinds = [c["kind"] for c in lor["changes"]]
+        self.assertNotIn("wound_worsened", kinds)
+        self.assertNotIn("wound_new", kinds)
+        self.assertNotIn("wound_healed", kinds)
+
     def test_lite_curr_is_skipped(self):
         # A lite sample is the last one at or before the day end
         # (the daemon's poller keeps recording them). curr must
@@ -642,6 +684,319 @@ class TestValidateGroupClaims(unittest.TestCase):
         self.assertIn("Ral", body)
 
 
+# The exact 125-04-05 entry text, verbatim from diary.md (the
+# retry-path entry that got nearly every number wrong). Shared
+# with tests/test_server.py, which posts a retry-shaped body
+# carrying this text to the route to prove the retry path runs
+# the identical validation as the live path.
+EXACT_0405_ENTRY = (
+    "The 5th of Hematite, 125, Summer.\n\n"
+    "Seven dwarves and seven wounds. I counted them twice "
+    "because the first count seemed too tidy to be true, "
+    "and it held: every soul in this fort is carrying "
+    "exactly one mark of something, all of them stable, "
+    "none of them slowing down. One of them is out at the "
+    "water working the fish. The rest do whatever it is "
+    "they do when I am not watching, which is most of it. "
+    "Nobody has come to me about the wounds and I have "
+    "decided that is a kind of answer.\n\n"
+    "The brewing landed. Drink is back up to thirty-nine "
+    "from thirty-three, which means Mestthos's hands have "
+    "been busy at the still I put up, and the fort will "
+    "drink tomorrow without me doing arithmetic at "
+    "midnight. Food holds at thirty-two. Wood sits at a "
+    "hundred and twenty-four, patient as ever. Stone "
+    "remains a clean and honest nothing, and I have "
+    "stopped taking it personally.\n\n"
+    "I set one job going at one of the workshops today "
+    "and it actually came back finished, which around here "
+    "counts as an event worth writing down. Small "
+    "mercies.\n\n"
+    "So: a fort of the lightly damaged, all of them "
+    "upright, all of them working, and a still that "
+    "produces. I will take it.")
+
+
+class TestValidateNumbers(unittest.TestCase):
+    """_check_numbers: the 04-05 entry's numbers were wrong in
+    every line (drink 39 from 33 vs 68, food 32 vs 25, wood 124 vs
+    122, "seven wounds" vs 1, "one job" vs 9) and the old validator
+    checked none of them — it only understood all/none phrasings.
+    The numbers validator checks every stated number against the
+    feed (the same facts the model was shown). A number the feed
+    cannot verify is skipped, never guessed."""
+
+    def _feed(self, drink=(68, 68), food=(25, 25),
+              wood=(122, 121), stone=(0, 0), population=(7, 7),
+              wounded=1, idle=0, arrivals=0, decisions=()):
+        start = {}
+        end = {}
+        for metric, pair in (("drink", drink), ("food", food),
+                             ("wood", wood), ("stone", stone)):
+            if pair is not None:
+                start[metric], end[metric] = pair
+        start["population"], end["population"] = population
+        return {
+            "summary": {
+                "stocks_start": start, "stocks_end": end,
+                "arrivals": arrivals,
+                "decisions": list(decisions),
+            },
+            "group_counts": [
+                {"key": "wounded", "count": wounded, "total": 7,
+                 "names": ["Lor"] if wounded else [],
+                 "not_names": []},
+                {"key": "idle", "count": idle, "total": 7,
+                 "names": [], "not_names": []},
+            ],
+            "dwarves": [{"name": "Lor Medtobalod",
+                         "featured": True}],
+        }
+
+    def _body(self, text):
+        # Prose, long enough to pass the length check, naming the
+        # featured dwarf.
+        return (text + " Lor watched the fort from the doorway and "
+                "said nothing at all through the long evening, "
+                "while the dwarves went about their work in "
+                "silence.")
+
+    def _queue(self):
+        # The 04-05 run's queue: 4 queue actions, 9 jobs.
+        return [
+            {"action": "queue_job",
+             "decision": "queue make_barrel x2 at Carpenters "
+                         "workshop #7"},
+            {"action": "queue_job",
+             "decision": "queue brew x2 at Still #8"},
+            {"action": "queue_job",
+             "decision": "queue make_bed x2 at Carpenters "
+                         "workshop #7"},
+            {"action": "queue_job",
+             "decision": "queue make_bed x3 at Carpenters "
+                         "workshop #7"},
+        ]
+
+    def test_0405_numbers_rejected(self):
+        # The 04-05 entry's numbers, verbatim in shape: every one
+        # is an old entry's number, not the run's.
+        feed = self._feed()
+        bad = self._body(
+            "Drink is back up to thirty-nine from thirty-three. "
+            "Food holds at thirty-two. Wood sits at a hundred and "
+            "twenty-four.")
+        with self.assertRaises(ValueError) as ctx:
+            diary._validate_ai_entry(bad, feed)
+        self.assertIn("drink", str(ctx.exception))
+
+    def test_correct_numbers_accepted(self):
+        feed = self._feed()
+        good = self._body(
+            "Drink holds at sixty-eight. Food holds at twenty-five. "
+            "Wood sits at a hundred and twenty-one. Stone remains "
+            "a clean and honest nothing.")
+        body = diary._validate_ai_entry(good, feed)
+        self.assertIn("sixty-eight", body)
+
+    def test_from_to_end_off_by_one_rejected(self):
+        # 04-01: the entry said drink ended at 33; the run-end
+        # snapshot says 34. An off-by-one is still wrong.
+        feed = self._feed(drink=(38, 34))
+        bad = self._body(
+            "The drink stores went from thirty-eight down to "
+            "thirty-three.")
+        with self.assertRaises(ValueError) as ctx:
+            diary._validate_ai_entry(bad, feed)
+        self.assertIn("33", str(ctx.exception))
+        good = self._body(
+            "The drink stores went from thirty-eight down to "
+            "thirty-four.")
+        diary._validate_ai_entry(good, feed)
+
+    def test_digit_numbers_checked(self):
+        feed = self._feed()
+        bad = self._body("Drink holds at 39.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+        good = self._body("Drink holds at 68.")
+        diary._validate_ai_entry(good, feed)
+
+    def test_unverifiable_metric_skipped(self):
+        # No food value in the feed: the validator does not guess,
+        # so a food number it cannot check is accepted.
+        feed = self._feed(food=None)
+        body = self._body("Food holds at thirty-two.")
+        diary._validate_ai_entry(body, feed)
+
+    def test_bare_wound_count_rejected(self):
+        # "Seven dwarves and seven wounds" vs 1 wounded in the
+        # feed. The population claim (7) is right; the wound
+        # count is not.
+        feed = self._feed(wounded=1)
+        bad = self._body(
+            "Seven dwarves and seven wounds, every soul in this "
+            "fort carrying exactly one mark of something.")
+        with self.assertRaises(ValueError) as ctx:
+            diary._validate_ai_entry(bad, feed)
+        self.assertIn("wounded", str(ctx.exception))
+
+    def test_correct_bare_wound_count_accepted(self):
+        feed = self._feed(wounded=6)
+        good = self._body(
+            "Six of the dwarves wounded and Ral the only one "
+            "unmarked, and six wounds between them.")
+        diary._validate_ai_entry(good, feed)
+
+    def test_mark_synonym_all_claim_rejected(self):
+        # "mark" was not in the old wound keyword list, so the
+        # 04-05 "exactly one mark" phrasing sailed through.
+        feed = self._feed(wounded=1)
+        bad = self._body(
+            "Every soul in this fort is carrying exactly one mark "
+            "of something, all of them stable.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+
+    def test_one_apiece_not_a_count_claim(self):
+        # "one wound apiece" is per-dwarf, not a claim that one
+        # dwarf is wounded — the guard must keep accepting it.
+        feed = self._feed(wounded=6)
+        good = self._body(
+            "Every dwarf but Ral is carrying an injury today, one "
+            "wound apiece, and Ral is the only one unmarked.")
+        diary._validate_ai_entry(good, feed)
+
+    def test_job_total_rejected(self):
+        # 04-05: "one job ... came back finished" vs 9 queued.
+        feed = self._feed(decisions=self._queue())
+        bad = self._body(
+            "I set one job going at one of the workshops today and "
+            "it actually came back finished.")
+        with self.assertRaises(ValueError) as ctx:
+            diary._validate_ai_entry(bad, feed)
+        self.assertIn("9", str(ctx.exception))
+
+    def test_job_per_type_counts(self):
+        feed = self._feed(decisions=self._queue())
+        bad = self._body(
+            "Two beds and two barrels in the queue at the "
+            "carpenters, and the still waiting.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+        good = self._body(
+            "Five beds and two barrels in the queue at the "
+            "carpenters, and two brewings in the queue at the "
+            "still.")
+        diary._validate_ai_entry(good, feed)
+
+    def test_no_drink_zero_claim(self):
+        feed = self._feed(drink=(6, 0))
+        good = self._body(
+            "There is no drink left in the fort, and the barrels "
+            "stand empty.")
+        diary._validate_ai_entry(good, feed)
+        feed = self._feed(drink=(68, 68))
+        bad = self._body(
+            "There is no drink left in the fort, and the barrels "
+            "stand empty.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+
+    def test_population_checked(self):
+        feed = self._feed(population=(7, 7))
+        diary._validate_ai_entry(
+            self._body("Seven dwarves held the fort together."),
+            feed)
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(
+                self._body("Ten citizens held the fort together."),
+                feed)
+
+    def test_arrivals_checked(self):
+        feed = self._feed(arrivals=3)
+        diary._validate_ai_entry(
+            self._body("Three new citizens arrived today, "
+                       "strangers to us all."),
+            feed)
+        feed = self._feed(arrivals=0)
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(
+                self._body("Three new citizens arrived today, "
+                           "strangers to us all."),
+                feed)
+
+    def test_exact_0405_entry_rejected(self):
+        # THE bar for the validator (Mikey, 2026-11-27: "we really
+        # need to nail the diary stuff"): the exact 125-04-05
+        # entry text, verbatim from diary.md, against that day's
+        # feed (run stocks: drink 68, food 25, wood 122->121,
+        # 1 wounded of 7, 9 jobs queued). It must FAIL — drink
+        # "39 from 33", food 32, wood 124, "seven wounds", "one
+        # job" are all old entries' numbers, not the run's. If
+        # this test ever passes, the validator is not good enough.
+        feed = self._feed(decisions=self._queue())
+        feed["dwarves"] = [{"name": "Mestthos", "featured": True}]
+        with self.assertRaises(ValueError) as ctx:
+            diary._validate_ai_entry(EXACT_0405_ENTRY, feed)
+        self.assertIn("wounded", str(ctx.exception))
+
+    def test_partitive_total_is_not_a_count(self):
+        # The 04-01 probe false positive: "Six of the seven are
+        # carrying wounds" — the SEVEN is the total, not the
+        # count. The six is checked (6 == 6) and the seven is
+        # skipped. Same for "Five of the seven sat idle".
+        feed = self._feed(drink=(38, 37), wounded=6, idle=5)
+        good = self._body(
+            "Six of the seven are carrying wounds. Five of the "
+            "seven sat idle.")
+        diary._validate_ai_entry(good, feed)
+        # But a wrong count in the same construction still fails.
+        feed = self._feed(drink=(38, 37), wounded=5, idle=5)
+        bad = self._body(
+            "Six of the seven are carrying wounds. Five of the "
+            "seven sat idle.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+
+    def test_carried_wounds_is_a_group_count(self):
+        # "Six dwarves carried wounds" is a wound count, not a
+        # population claim — the group check owns it, and the
+        # population check must not fire on the same sentence.
+        feed = self._feed(wounded=6)
+        good = self._body("Six dwarves carried wounds through "
+                          "the long day.")
+        diary._validate_ai_entry(good, feed)
+        feed = self._feed(wounded=1)
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(good, feed)
+
+    def test_bare_population_still_checked(self):
+        # No condition word after the noun: "Six dwarves held
+        # the fort" IS a population claim, and 6 != 7 fails.
+        feed = self._feed(population=(7, 7))
+        bad = self._body("Six dwarves held the fort together "
+                         "through the day.")
+        with self.assertRaises(ValueError):
+            diary._validate_ai_entry(bad, feed)
+
+    def test_number_scanner(self):
+        self.assertEqual(
+            [v for v, _, _ in diary._find_numbers("thirty-nine")],
+            [39])
+        self.assertEqual(
+            [v for v, _, _ in
+             diary._find_numbers("a hundred and twenty-four")],
+            [124])
+        self.assertEqual(
+            [v for v, _, _ in diary._find_numbers("one and two")],
+            [1, 2])
+        self.assertEqual(
+            [v for v, _, _ in diary._find_numbers("drink 68")],
+            [68])
+        self.assertEqual(diary._find_numbers("a dwarf"), [])
+        self.assertEqual(diary._find_numbers("the first dwarf"), [])
+
+
 class TestAIWriter(unittest.TestCase):
     GOOD = ("Olon Medtobalod spent the day at the still, his hands "
             "shaking a little more with each hour that passed "
@@ -663,6 +1018,39 @@ class TestAIWriter(unittest.TestCase):
             self.assertIn("Olon Medtobalod", text)
             self.assertIn("shaking", text)
             self.assertIn("## 125-04-01", text)
+
+    def test_ledger_line_appended_and_round_trips(self):
+        # The stored AI entry carries the day's ledger line (the
+        # same line the template renderer writes), so a later
+        # rebuild recovers the numbers from the entry instead of
+        # the Store's stale trend sample.
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            feed = diary.build_diary_feed(
+                _olons(), FakeJournal(), 100800, "Erushtathtat",
+                125, state_dir=state)
+            path = diary.write_ai_entry(StubClient(self.GOOD),
+                                        feed, state)
+            body = path.read_text()
+            self.assertIn("Drink: 38 -> 35", body)
+            start, end = diary.ledger_stocks(body)
+            self.assertEqual(start["drink"], 38)
+            self.assertEqual(end["drink"], 35)
+
+    def test_no_ledger_line_without_stocks(self):
+        # A feed with no stocks at all gets no ledger line (an
+        # empty line would parse as nothing, and a made-up one
+        # would be worse).
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            feed = diary.build_diary_feed(
+                _olons(), FakeJournal(), 100800, "Erushtathtat",
+                125, state_dir=state)
+            feed["summary"]["stocks_start"] = {}
+            feed["summary"]["stocks_end"] = {}
+            path = diary.write_ai_entry(StubClient(self.GOOD),
+                                        feed, state)
+            self.assertNotIn("Drink:", path.read_text())
 
     def test_list_entry_is_rejected_not_stored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -713,6 +1101,60 @@ class TestAIWriter(unittest.TestCase):
                 125, state_dir=state)
             with self.assertRaises(RuntimeError):
                 diary.write_ai_entry(FailingClient(), feed, state)
+            self.assertFalse((state / "diary.md").exists())
+
+    def test_rejected_entry_is_retried_with_correction(self):
+        # The 04-05 class: the model writes a wrong number, the
+        # validator rejects it, the model is told exactly what
+        # was wrong and rewrites it. The day is written, not
+        # skipped.
+        class SequencedClient:
+            def __init__(self, texts):
+                self.texts = list(texts)
+                self.calls = []
+
+            def chat(self, messages):
+                self.calls.append(list(messages))
+                return self.texts.pop(0)
+
+        wrong = (self.GOOD + " Drink holds at ninety-nine.")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            feed = diary.build_diary_feed(
+                _olons(), FakeJournal(), 100800, "Erushtathtat",
+                125, state_dir=state)
+            client = SequencedClient([wrong, self.GOOD])
+            path = diary.write_ai_entry(client, feed, state)
+            self.assertIn("Olon Medtobalod", path.read_text())
+            self.assertEqual(len(client.calls), 2)
+            retry = client.calls[1]
+            self.assertTrue(any(
+                m.get("role") == "user"
+                and "rejected" in m.get("content", "")
+                for m in retry))
+
+    def test_rejected_entry_gives_up_after_max_attempts(self):
+        # A model that keeps writing wrong numbers does not loop
+        # forever: three attempts, then the day is skipped.
+        class SequencedClient:
+            def __init__(self, texts):
+                self.texts = list(texts)
+                self.calls = []
+
+            def chat(self, messages):
+                self.calls.append(list(messages))
+                return self.texts.pop(0)
+
+        wrong = (self.GOOD + " Drink holds at ninety-nine.")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            feed = diary.build_diary_feed(
+                _olons(), FakeJournal(), 100800, "Erushtathtat",
+                125, state_dir=state)
+            client = SequencedClient([wrong, wrong, wrong, wrong])
+            with self.assertRaises(ValueError):
+                diary.write_ai_entry(client, feed, state)
+            self.assertEqual(len(client.calls), 3)
             self.assertFalse((state / "diary.md").exists())
 
 

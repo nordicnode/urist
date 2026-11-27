@@ -464,6 +464,35 @@ class TestWriteEntry(unittest.TestCase):
             self.assertEqual(len(data), 1)
             self.assertIn("</script>", data[0]["body"])
 
+    def test_out_of_order_writes_are_sorted_chronologically(self):
+        # The 04-05/07-07 bug: the file was append-ordered, so a
+        # later day written before an earlier one landed out of
+        # order — and the HTML reader's "latest" is the last entry
+        # in the file, so it showed 04-05 when the latest date
+        # was 07-07. Every store sorts the file by date.
+        with tempfile.TemporaryDirectory() as tmp:
+            diary.write_entry(tmp, _day_summary(day_start=170400))
+            diary.write_entry(tmp, _day_summary(day_start=169200))
+            entries = diary.parse_entries(
+                diary.diary_md_path(tmp).read_text())
+            self.assertEqual(
+                [e["date"] for e in entries],
+                ["125-06-02", "125-06-03"])
+
+    def test_replace_keeps_chronological_order(self):
+        # Rewriting an earlier day after a later day was stored
+        # must not move it to the end of the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            diary.write_entry(tmp, _day_summary(day_start=169200))
+            diary.write_entry(tmp, _day_summary(day_start=170400))
+            diary.write_entry(tmp, _day_summary(day_start=169200))
+            entries = diary.parse_entries(
+                diary.diary_md_path(tmp).read_text())
+            self.assertEqual(
+                [e["date"] for e in entries],
+                ["125-06-02", "125-06-03"])
+            self.assertEqual(len(entries), 2)
+
 
 class TestRenderHtml(unittest.TestCase):
     def test_html_is_self_contained_and_navigable(self):
@@ -485,6 +514,26 @@ class TestRenderHtml(unittest.TestCase):
                 re.DOTALL).group(1))
             self.assertEqual(len(data), 2)
             self.assertEqual(data[0]["date"], "125-06-02")
+
+    def test_html_sorts_hand_written_out_of_order_file(self):
+        # Defensive: render_html sorts even when the file itself
+        # is out of order (hand-edited), so "latest" is the latest
+        # date, not the last line in the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            md = diary.diary_md_path(tmp)
+            md.write_text(
+                "# Diary of Erushtathtat\n\n"
+                "## 125-06-03 — 3rd Galena\n\nLater day.\n\n"
+                "## 125-06-02 — 2nd Galena\n\nEarlier day.\n")
+            diary.render_html(md, diary.diary_html_path(tmp),
+                              "Erushtathtat")
+            html_doc = diary.diary_html_path(tmp).read_text()
+            data = json.loads(re.search(
+                r"var ENTRIES = (\[.*?\]);", html_doc,
+                re.DOTALL).group(1))
+            self.assertEqual(
+                [e["date"] for e in data],
+                ["125-06-02", "125-06-03"])
 
 
 class TestValidateAiEntry(unittest.TestCase):

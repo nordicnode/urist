@@ -93,6 +93,21 @@ def _wound_ids(sample: dict[str, Any] | None) -> set[Any]:
     return out
 
 
+def _wound_parts(sample: dict[str, Any] | None
+                 ) -> dict[Any, int]:
+    """Wound id -> parts affected (0 when the record carries no
+    parts count). A wound record's id is stable per wound, but the
+    parts count moves as the wound worsens or heals."""
+    if not sample:
+        return {}
+    out: dict[Any, int] = {}
+    for w in sample.get("wounds") or []:
+        if isinstance(w, dict) and w.get("id") is not None:
+            parts = w.get("parts")
+            out[w["id"]] = parts if isinstance(parts, int) else 0
+    return out
+
+
 def _needs_by_name(sample: dict[str, Any] | None
                    ) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
@@ -189,6 +204,18 @@ def diff_unit_samples(prev: dict[str, Any] | None,
         n = len(healed_w)
         add("wound_healed",
             f"{n} wound{'s' if n > 1 else ''} healed", SIG_MINOR)
+    # A wound id that persists on both sides with MORE parts
+    # affected got worse. The old diff compared ids only, so the
+    # 04-01 äs case (wound id 4, parts 0 -> 2) produced NO change
+    # and the entry never reported it.
+    prev_parts, curr_parts = _wound_parts(prev), _wound_parts(curr)
+    worsened = [wid for wid in prev_w & curr_w
+                if curr_parts.get(wid, 0) > prev_parts.get(wid, 0)]
+    if worsened:
+        n = len(worsened)
+        add("wound_worsened",
+            "a wound got worse" if n == 1
+            else f"{n} wounds got worse", SIG_NOTABLE)
 
     # Needs: focus below zero reads as unmet. A need newly unmet
     # (crossed below zero, or fell hard) is notable; a need newly

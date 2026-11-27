@@ -8,6 +8,7 @@ is the honest answer with no game). No live game is needed.
 import http.client
 import json
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from dfagent_harness.events import EventBus, make_event  # noqa: E402
 from dfagent_harness.server import (  # noqa: E402
     _cursor_array, _req_float, _req_int, _req_seq, create_server)
+from test_diary_feed import EXACT_0405_ENTRY  # noqa: E402
 
 
 class TestServer(unittest.TestCase):
@@ -442,6 +444,147 @@ class TestSitesNoDaemon(_HttpCase):
         self.assertEqual(status, 503, raw)
         self.assertEqual(json.loads(raw)["error"]["code"],
                          "NO_DAEMON")
+
+
+class _EmptyStore:
+    """Store stand-in with nothing recorded: no trends, no deaths,
+    no citizens — the feed built from it has no facts at all."""
+
+    def trend_samples(self, metric):
+        return []
+
+    def deaths(self):
+        return []
+
+    def unit_ids(self):
+        return []
+
+    def unit_history(self, uid, limit=None):
+        return []
+
+
+class _EmptyJournal:
+    def recent_decisions(self, limit=100):
+        return []
+
+    def recent_events(self, limit=100):
+        return []
+
+
+class TestDiaryWriteThinFeed(_HttpCase):
+    """POST /v1/control/diary with a feed that has nothing in it
+    (no stocks, no dwarves, no decisions) must be refused 503
+    DIARY_FAILED "feed too thin" — the model must never be asked
+    to write a day from nothing. The 04-05 retry wrote its entry
+    from a feed the model then ignored; a feed with no facts at
+    all is the pure-invention case, and the route refuses it
+    before any model call is made."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        daemon = _FakeDaemon()
+        daemon.store = _EmptyStore()
+        daemon.journal = _EmptyJournal()
+        daemon.state_dir = self._tmp.name
+        self._start(daemon=daemon)
+
+    def tearDown(self):
+        super().tearDown()
+        self._tmp.cleanup()
+
+    def test_thin_feed_is_503(self):
+        status, raw = self._req("POST", "/v1/control/diary",
+                                {"day_start_tick": 100800,
+                                 "year": 125,
+                                 "fort_name": "Erushtathtat"})
+        self.assertEqual(status, 503, raw)
+        body = json.loads(raw)
+        self.assertEqual(body["error"]["code"], "DIARY_FAILED")
+        self.assertIn("feed too thin", body["error"]["message"])
+
+
+class TestDiaryWriteRetryValidation(_HttpCase):
+    """The retry path runs the IDENTICAL validation as the live
+    path — no separate code path, no weaker check. The 04-05
+    failure was a retry-path failure: the retry script posts its
+    reconstructed body to this same endpoint, and the endpoint
+    calls the same write_ai_entry (same _validate_ai_entry) the
+    live driver posts to. This test posts the retry's actual body
+    for run 063000 (verified against retry_diary.build_retry_body)
+    with a stub model returning the exact 04-05 entry text, and
+    asserts the route rejects it — 503 DIARY_FAILED, three model
+    calls (validation rejected, retried with correction, gave
+    up), nothing written. If the retry had its own weaker path,
+    this test would see a 200."""
+
+    # The retry's reconstructed body for logs/m1-20261127-063000.jsonl.
+    RETRY_BODY = {
+        "day_start_tick": 105600,
+        "year": 125,
+        "fort_name": "Erushtathtat",
+        "decisions": [
+            {"decision": "queue make_barrel x2 at building #7",
+             "reason": "Empty barrels are the bottleneck.",
+             "action": "queue_job", "ok": True, "result": None},
+            {"decision": "queue brew x2 at building #8",
+             "reason": "Use the 2 existing barrels.",
+             "action": "queue_job", "ok": True, "result": None},
+            {"decision": "queue make_bed x2 at building #7",
+             "reason": "Two dwarves are very tired.",
+             "action": "queue_job", "ok": True, "result": None},
+            {"decision": "queue make_bed x3 at building #7",
+             "reason": "Three citizens are exhausted.",
+             "action": "queue_job", "ok": True, "result": None},
+        ],
+        "stocks_start": {"drink": 68, "food": 25, "wood": 122,
+                         "stone": 0, "population": 7},
+        "stocks_end": {"drink": 68, "food": 25, "wood": 121,
+                       "stone": 0, "population": 7},
+        "citizens": [],
+        "citizens_start": [],
+        "tick_start": 106696,
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        daemon = _FakeDaemon()
+        daemon.store = _EmptyStore()
+        daemon.journal = _EmptyJournal()
+        daemon.state_dir = self._tmp.name
+        self._start(daemon=daemon)
+
+    def tearDown(self):
+        super().tearDown()
+        self._tmp.cleanup()
+
+    def test_retry_body_with_0405_entry_is_rejected(self):
+        calls: list[list] = []
+
+        class StubClient:
+            def chat(self, messages):
+                calls.append(list(messages))
+                return EXACT_0405_ENTRY
+
+        with mock.patch(
+                "dfagent_harness.freepi.FreePiClient", StubClient):
+            status, raw = self._req(
+                "POST", "/v1/control/diary", self.RETRY_BODY)
+        self.assertEqual(status, 503, raw)
+        body = json.loads(raw)
+        self.assertEqual(body["error"]["code"], "DIARY_FAILED")
+        self.assertIn("diary AI entry claims",
+                      body["error"]["message"])
+        self.assertIn("wounded", body["error"]["message"])
+        # Rejected, retried with a correction, rejected again,
+        # gave up after the third attempt — never written.
+        self.assertEqual(len(calls), 3)
+        retry = calls[1]
+        self.assertTrue(any(
+            m.get("role") == "user"
+            and "rejected" in m.get("content", "")
+            for m in retry))
+        self.assertFalse(
+            (Path(self._tmp.name) / "diary.md").exists())
 
 
 class TestPercentDecoding(_HttpCase):

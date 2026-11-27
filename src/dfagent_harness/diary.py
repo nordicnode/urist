@@ -449,6 +449,28 @@ def _stock_crisis_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _ledger_line(summary: dict[str, Any]) -> str:
+    """The machine-readable stock record for a day, in the format
+    ledger_stocks parses back: 'Drink: 38 -> 37 Food: 32 Wood:
+    124 Stone: 0 Citizens: 7.' One builder for the template
+    renderer and the AI writer — the two used to disagree (the
+    template entries carried the line, the AI entries did not),
+    so a rebuild over AI entries had no ledger to read and fell
+    back to the Store's single trend sample (04-01's drink 39),
+    which lies about a June day. Empty when the summary carries
+    no stocks at all."""
+    stock_bits = []
+    for metric, label in (("drink", "Drink"), ("food", "Food"),
+                          ("wood", "Wood"), ("stone", "Stone"),
+                          ("population", "Citizens")):
+        line = _stock_line(summary.get("stocks_start") or {},
+                           summary.get("stocks_end") or {},
+                           metric, label)
+        if line:
+            stock_bits.append(line)
+    return " ".join(stock_bits) + "." if stock_bits else ""
+
+
 def render_entry(summary: dict[str, Any]) -> str:
     """Render the daily summary as a diary entry (markdown body, no
     heading — write_entry adds the heading). Narrative prose in the
@@ -472,16 +494,9 @@ def render_entry(summary: dict[str, Any]) -> str:
     lines.append(f"The {date}, {season}.")
     lines.append("")
     # The ledger: the numbers stay, as a ledger line.
-    stock_bits = []
-    for metric, label in (("drink", "Drink"), ("food", "Food"),
-                          ("wood", "Wood"), ("stone", "Stone"),
-                          ("population", "Citizens")):
-        line = _stock_line(summary["stocks_start"],
-                           summary["stocks_end"], metric, label)
-        if line:
-            stock_bits.append(line)
-    if stock_bits:
-        lines.append(" ".join(stock_bits) + ".")
+    ledger = _ledger_line(summary)
+    if ledger:
+        lines.append(ledger)
         lines.append("")
     # The story: what happened, in the order it matters.
     story: list[str] = []
@@ -658,9 +673,81 @@ def _store_entry(state_dir: str | Path, summary: dict[str, Any],
         if not text.endswith("\n"):
             text += "\n"
         text += "\n" + entry
+    text = _sort_entries_chronologically(text)
     md_path.write_text(text)
     render_html(md_path, diary_html_path(state_dir), fort)
     return md_path
+
+
+def _date_key(date: str) -> tuple[int, int, int]:
+    """(year, month, day) ints for a YYYY-MM-DD date string. Dates
+    are zero-padded, so a string sort would agree — but parse
+    defensively, so a hand-written or gap-marker date that drops
+    a zero still sorts by the calendar, not the alphabet."""
+    parts = date.split("-")
+    try:
+        return (int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        return (0, 0, 0)
+
+
+def _sort_entries_chronologically(md_text: str) -> str:
+    """Re-emit diary.md with the entries in date order, keeping
+    the preamble verbatim. The file was append-ordered, so a
+    backfilled or retried entry (a later day written before an
+    earlier one) landed out of order — and the HTML reader's
+    "latest" is the last entry in the file, so it showed 04-05
+    when the latest date was 07-07. Sorting on every store keeps
+    the file chronological whatever order entries arrive in."""
+    idx = md_text.find("## ")
+    if idx == -1:
+        return md_text
+    preamble, rest = md_text[:idx], md_text[idx:]
+    entries = parse_entries(rest)
+    if len(entries) < 2:
+        return md_text
+    entries.sort(key=lambda e: _date_key(e["date"]))
+    return _emit_entries(preamble, entries)
+
+
+def _emit_entries(preamble: str,
+                  entries: list[dict[str, str]]) -> str:
+    """diary.md text from a preamble + parsed entries (in the
+    order given — callers sort first). One blank line between
+    entries, one trailing newline."""
+    out = preamble.rstrip("\n") + "\n\n"
+    for e in entries:
+        out += (f"## {e['date']} — {e['date_words']}\n\n"
+                + e["body"].rstrip("\n") + "\n\n")
+    return out.rstrip("\n") + "\n"
+
+
+def remove_entry(state_dir: str | Path, date: str) -> bool:
+    """Delete the entry for `date` from diary.md (and regenerate
+    diary.html). Returns True when an entry was removed. Used by
+    the rebuild's --drop-dates for entries with no grounding —
+    125-03-28 predates the fort's recorded existence, so its
+    entry is deleted, not rewritten."""
+    md_path = diary_md_path(state_dir)
+    if not md_path.exists():
+        return False
+    text = md_path.read_text()
+    idx = text.find("## ")
+    if idx == -1:
+        return False
+    preamble, rest = text[:idx], text[idx:]
+    entries = parse_entries(rest)
+    kept = [e for e in entries if e["date"] != date]
+    if len(kept) == len(entries):
+        return False
+    kept.sort(key=lambda e: _date_key(e["date"]))
+    md_path.write_text(_emit_entries(preamble, kept))
+    fort = ""
+    m = re.search(r"^# Diary of (.+)$", preamble, re.MULTILINE)
+    if m:
+        fort = m.group(1).strip()
+    render_html(md_path, diary_html_path(state_dir), fort)
+    return True
 
 
 # ----------------------------------------------------------------------
@@ -993,6 +1080,72 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
             stock_bits.append(line)
     if stock_bits:
         parts.append("Ledger: " + "; ".join(stock_bits) + ".")
+    if summary.get("stocks_source") == "ledger":
+        # The rebuild's ledger-carried days (the 06/07 entries):
+        # the numbers come from the previous entry's ledger, not
+        # from a fresh measurement — the model must not present
+        # them as if the store had samples for the day. The
+        # validator still checks the entry against them.
+        parts.append(
+            "Stocks are carried from the previous entry's ledger; "
+            "the store has no samples for this day — do not "
+            "present them as fresh measurements.")
+    if feed.get("no_per_dwarf_samples"):
+        # The rebuild sets this when the Store has no full
+        # per-dwarf samples for the day (04-05): the counts above
+        # are the day's own, from the run snapshots, but no
+        # individual dwarf's state was recorded. Naming a dwarf
+        # or describing one's state would be invention. When the
+        # last record is known (a lite sample from an earlier
+        # day, e.g. 06-02's is 04-02's), say so — the gap itself
+        # is a fact.
+        note = ("No per-dwarf record exists for this day: do not "
+                "name any dwarf or describe any dwarf's individual "
+                "state — write only about the fort's stocks, "
+                "decisions, and counts.")
+        last = feed.get("last_dwarf_record_date")
+        if last:
+            note += (f" The last per-dwarf record is from {last}; "
+                     f"do not present its states as today's.")
+        parts.append(note)
+    if feed.get("partial_dwarf_record"):
+        # The rebuild's partial-poll days (06-02): the day's own
+        # samples cover only a few citizens. The numbers are the
+        # poll's, not the fort's — say so, and claim nothing
+        # about the unrecorded dwarves.
+        part = feed["partial_dwarf_record"]
+        pop = (feed["summary"].get("stocks_end") or {}).get(
+            "population")
+        parts.append(
+            f"Only {part['sampled']} of the {pop} citizens were "
+            f"recorded today ({part['wounded']} wounded, "
+            f"{part['sampled'] - part['wounded']} unmarked); the "
+            f"rest have no record for today. Do not claim "
+            f"anything about the unrecorded dwarves.")
+    if feed.get("lite_dwarf_record_date"):
+        # The rebuild's lite-sample days (June/July): the
+        # per-dwarf record below is the most recent one, from an
+        # earlier day — the counts are that day's, not today's.
+        # The model must attribute them to their date, not
+        # present them as a fresh measurement.
+        parts.append(
+            f"The per-dwarf record below is from "
+            f"{feed['lite_dwarf_record_date']}, the last day with "
+            f"a per-dwarf sample — it is the most recent record, "
+            f"not today's measurement. Attribute its facts to "
+            f"that day; do not present them as today's.")
+    if feed.get("unnamed_citizens"):
+        # The rebuild's June/July days: migrants whose names were
+        # never recorded. They are in the counts (the total is
+        # the population) and appear in the lists below as "an
+        # unnamed migrant" — the model must not give them names.
+        n = feed["unnamed_citizens"]
+        parts.append(
+            f"{n} of the citizens {'is' if n == 1 else 'are'} "
+            f"migrants whose names were never recorded; "
+            f"{'it appears' if n == 1 else 'they appear'} in the "
+            f"lists below as 'an unnamed migrant'. Do not invent "
+            f"names for {'it' if n == 1 else 'them'}.")
     for crisis in _stock_crisis_lines(summary):
         parts.append("CRISIS: " + crisis)
     for death in summary["deaths"]:
@@ -1199,13 +1352,159 @@ def _dwarf_named(body: str, name: str,
 # to cross but/except/save. A fired check rejects the entry,
 # like every other validator rule.
 _GROUP_KEYWORDS = {
-    "wounded": r"(?:wound(?:s|ed)?|injur(?:y|ies|ed)?)",
+    # "mark" is a wound word too (the 04-05 entry said "seven
+    # dwarves and seven wounds" and "every soul ... carrying
+    # exactly one mark" — the old list missed "mark" entirely, so
+    # neither the all-check nor the bare-count check fired). "hurt"
+    # / "cut" / "bruise" are the same class: a dwarf the entry
+    # describes as hurt, cut, or bruised is a wounded dwarf. The
+    # patterns that use these keywords always require a linking
+    # verb or a number next to them, so "cut wood" or "mark the
+    # day" never fire.
+    "wounded": (r"(?:wound(?:s|ed|ing)?|injur(?:y|ies|ed|ing)?|"
+                r"marks?|hurt(?:s|ing)?|cut(?:s|ting)?|"
+                r"bruis(?:e|es|ed|ing)?)"),
     "idle": r"idle",
     "stressed": r"stress(?:ed|ful)?",
     "mood": r"mood",
     "thirsty": r"thirst(?:y|ier)?",
     "hungry": r"hungr(?:y|ier)?",
 }
+
+
+# Number words the diary AI writes ("seven", "thirty-nine", "a
+# hundred and twenty-four") — the validator must read numbers as
+# words, not just digits, because the 04-05 entry wrote every
+# number as words and the old validator only understood digits
+# (it understood no numbers at all — bare counts were never
+# checked). _find_numbers returns [(value, start, end)] over the
+# body text, where start/end are character offsets into the body
+# (lowered first by the caller when needed — the values are the
+# same either way).
+_NUMBER_ONES = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_NUMBER_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_NUMBER_WORD_RE = (
+    r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|"
+    r"ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+    r"seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|"
+    r"sixty|seventy|eighty|ninety|hundred|thousand|and|a|an)"
+)
+
+
+def _parse_number_run(tokens: list[str]) -> int | None:
+    """English number words to an int (0..9999). "a"/"an" count as
+    1 only before hundred/thousand ("a hundred" is 100; a lone
+    "a" is not a number and never reaches this function). "and"
+    is skipped. Returns None when the tokens are not a number
+    (e.g. a bare "and")."""
+    total = 0
+    current = 0
+    seen = False
+    for tok in tokens:
+        if tok in ("and",):
+            continue
+        if tok in ("a", "an"):
+            # "a hundred": 1 * 100. A lone "a" never starts a run
+            # (the scanner requires hundred/thousand after it).
+            current += 1
+            seen = True
+        elif tok in _NUMBER_ONES:
+            current += _NUMBER_ONES[tok]
+            seen = True
+        elif tok in _NUMBER_TENS:
+            current += _NUMBER_TENS[tok]
+            seen = True
+        elif tok == "hundred":
+            current = (current or 1) * 100
+            seen = True
+        elif tok == "thousand":
+            total += (current or 1) * 1000
+            current = 0
+            seen = True
+        else:
+            return None
+    if not seen:
+        return None
+    return total + current
+
+
+def _find_numbers(body: str) -> list[tuple[int, int, int]]:
+    """[(value, start, end)] for every number in the body: digit
+    runs, and runs of number words ("thirty-nine" tokenises to
+    thirty + nine; "a hundred and twenty-four" is one run).
+    A run starts on a digit or a number word; "a"/"an" start a run
+    only when the next token is hundred/thousand. Runs are maximal
+    — "thirty-nine from thirty-three" is two numbers, not one."""
+    lowered = body.lower()
+    tokens = [(m.group(0), m.start(), m.end())
+              for m in re.finditer(r"[a-z]+|\d+", lowered)]
+    out: list[tuple[int, int, int]] = []
+    i = 0
+    while i < len(tokens):
+        tok, start, _ = tokens[i]
+        if tok.isdigit():
+            out.append((int(tok), start, tokens[i][2]))
+            i += 1
+            continue
+        if tok not in _NUMBER_ONES and tok not in _NUMBER_TENS \
+                and tok not in ("hundred", "thousand", "a", "an"):
+            i += 1
+            continue
+        if tok in ("a", "an"):
+            # Only a number when hundred/thousand follows.
+            if i + 1 >= len(tokens) \
+                    or tokens[i + 1][0] not in ("hundred",
+                                                "thousand"):
+                i += 1
+                continue
+        # Consume the maximal run of number words. "and" joins a
+        # run only after hundred/thousand ("a hundred and
+        # twenty-four" is one number); "one and two" is two numbers,
+        # not three — the "and" there ends the run.
+        run = [tok]
+        end = tokens[i][2]
+        j = i + 1
+        while j < len(tokens):
+            t2 = tokens[j][0]
+            if t2 in _NUMBER_ONES or t2 in _NUMBER_TENS \
+                    or t2 in ("hundred", "thousand"):
+                run.append(t2)
+                end = tokens[j][2]
+                j += 1
+            elif t2 == "and" and run and run[-1] in (
+                    "hundred", "thousand"):
+                run.append(t2)
+                end = tokens[j][2]
+                j += 1
+            else:
+                break
+        value = _parse_number_run(run)
+        if value is not None:
+            out.append((value, start, end))
+        i = j
+    return out
+
+
+# Verbs that link a count to a condition ("six are wounded",
+# "six carried wounds", "five sat idle"). The list covers the
+# linking verbs and the past-tense/stance verbs the model uses
+# for the same claim — "Six dwarves carried wounds" is a wound
+# count, not a population count, and the 04-01 probe entry's
+# "Five of the seven sat idle" is an idle count. One constant
+# for the all-pattern and the bare-count pattern, so they cannot
+# drift apart again.
+_GROUP_VERBS = (r"(?:are|were|is|was|carrying|have|has|had|"
+                r"carried|bore|nursed|showed|suffered|sat|stood|"
+                r"lay)")
 
 
 def _check_group_claims(body: str, feed: dict[str, Any]) -> None:
@@ -1225,8 +1524,13 @@ def _check_group_claims(body: str, feed: dict[str, Any]) -> None:
         g = counts.get(key)
         if g is None:
             continue
-        verb = (r"(?:are|were|is|was|carrying|have|has|had)\s+"
-                r"(?:all\s+)?(?:carrying\s+|an?\s+)?")
+        verb = (rf"(?:{_GROUP_VERBS})\s+"
+                r"(?:all\s+)?(?:carrying\s+|an?\s+)?"
+                # "exactly one mark", "just one cut": an adverb
+                # and a number between the verb and the condition
+                # is still the same claim.
+                r"(?:exactly\s+|just\s+|only\s+|really\s+)?"
+                rf"(?:(?:{_NUMBER_WORD_RE})\s+)?")
         if g["count"] < g["total"]:
             pat = (rf"\b(all|every)\b{gap}\b{verb}"
                    rf"(?:{keyword})\b")
@@ -1242,6 +1546,312 @@ def _check_group_claims(body: str, feed: dict[str, Any]) -> None:
                 raise ValueError(
                     f"diary AI entry claims no dwarf is {key} "
                     f"but {g['count']} of {g['total']} are")
+    # Bare counts (the 04-05 gap): "seven wounds", "six wounded",
+    # "six of the dwarves wounded", "six of my seven dwarves are
+    # carrying wounds" — a number next to the condition, with no
+    # all/every/none quantifier. The number must equal the feed's
+    # count for that condition. The number comes from the scanner
+    # (_find_numbers), not a regex, because the entry writes
+    # numbers as words ("seven", "thirty-nine"). Guards: the
+    # number and the keyword must be in the same short clause (no
+    # sentence break, comma, semicolon, or "and" between them —
+    # "six dwarves ate, and one was wounded" is not a claim that
+    # six are wounded); a number followed by "apiece"/"each" is a
+    # per-dwarf distribution ("one wound apiece" means each dwarf
+    # has one, not that one dwarf is wounded) and is skipped.
+    for value, start, end in _find_numbers(body):
+        # Partitive guard (the 04-01 probe): in "Six of the seven
+        # are carrying wounds", the SEVEN is the total, not the
+        # count — the six before "of the" is the count, and it
+        # gets its own check. A number preceded by "<number> of
+        # the/my" is the total of a partitive, never a claim.
+        before = lowered[max(0, start - 16):start]
+        if re.search(rf"(?:{_NUMBER_WORD_RE})\s+of\s+"
+                     r"(?:the|my)\s+$", before):
+            continue
+        after = lowered[end:end + 60]
+        # The clause after the number, cut at the first sentence
+        # break, comma, semicolon, or "and".
+        cut = re.split(r"[.!?,\n;]|\band\b", after, maxsplit=1)[0]
+        for key, keyword in _GROUP_KEYWORDS.items():
+            g = counts.get(key)
+            if g is None:
+                continue
+            m = re.match(
+                rf"\s*(?:of\s+(?:the|my)\s+)?"
+                # The inner total ("six of the SEVEN are ...") —
+                # a bare number with no noun after it. It must be
+                # consumable on its own: the old form required a
+                # citizen noun after the inner number, so "seven
+                # are carrying" matched nothing and a wrong "six"
+                # in "Six of the seven are carrying wounds"
+                # sailed through unchecked.
+                rf"(?:(?:{_NUMBER_WORD_RE})\s+)?"
+                rf"(?:(?:dwarves?|souls?|citizens?)\s+)?"
+                rf"(?:(?:{_GROUP_VERBS})\s+"
+                rf"(?:all\s+)?(?:carrying\s+|an?\s+)?)?"
+                rf"(?:{keyword})\b", cut)
+            if not m:
+                continue
+            # "one wound apiece" / "two cuts each" is per-dwarf.
+            tail = cut[m.end():m.end() + 12]
+            if re.match(r"\s*(?:apiece|each)\b", tail):
+                continue
+            if value != g["count"]:
+                raise ValueError(
+                    f"diary AI entry claims {value} {key} but "
+                    f"the feed says {g['count']} of {g['total']} "
+                    f"are")
+    # Bare zero: "no wounds", "not a single wound".
+    for key, keyword in _GROUP_KEYWORDS.items():
+        g = counts.get(key)
+        if g is None or g["count"] == 0:
+            continue
+        if re.search(rf"\b(?:no|not a single)\s+(?:{keyword})\b",
+                     lowered):
+            raise ValueError(
+                f"diary AI entry claims no dwarf is {key} but "
+                f"{g['count']} of {g['total']} are")
+
+
+def _queued_job_totals(decisions: list[dict[str, Any]]
+                       ) -> tuple[dict[str, int], dict[str, int],
+                                  int]:
+    """Queued jobs from the feed's decisions: ({job: count},
+    {location: count}, grand total). Same source as the prompt's
+    "Queued at ..." rendering (same _QUEUE_PHRASE), so the
+    validator and the model agree on the numbers. A decision
+    whose phrase does not parse is not a queue_job the prompt
+    showed — it is skipped, never guessed."""
+    per_job: dict[str, int] = {}
+    per_loc: dict[str, int] = {}
+    total = 0
+    for dec in decisions or []:
+        if dec.get("action") != "queue_job":
+            continue
+        phrase = clean_diary_text(
+            dec.get("decision") or dec.get("action") or "")
+        m = _QUEUE_PHRASE.match(phrase)
+        if not m:
+            continue
+        job, n, loc = m.group(1), int(m.group(2)), m.group(3)
+        per_job[job] = per_job.get(job, 0) + n
+        per_loc[loc] = per_loc.get(loc, 0) + n
+        total += n
+    return per_job, per_loc, total
+
+
+# Job nouns the entry uses, mapped to the queue_job names the
+# feed carries. Only these three are checked: they are the ones
+# the 04-01 and 04-05 entries got wrong (beds, barrels, brews).
+# Any other job the entry names is not checked — the validator
+# does not guess a mapping it was not given.
+_JOB_NOUNS = {
+    "bed": "make_bed", "beds": "make_bed",
+    "barrel": "make_barrel", "barrels": "make_barrel",
+    "brew": "brew", "brews": "brew",
+    "brewing": "brew", "brewings": "brew",
+}
+
+_STOCK_WORDS = ("drink", "food", "wood", "stone")
+_CITIZEN_WORDS = ("dwarf", "dwarves", "citizen", "citizens",
+                  "soul", "souls")
+
+
+def _sentence_end(text: str, pos: int) -> int:
+    """Index just past the next sentence break at or after pos
+    (or pos + 120 when the sentence runs long — the job-context
+    check needs the whole sentence, and the number's own clause
+    can sit well before the word "queue")."""
+    ends = [i for i in (text.find(".", pos), text.find("!", pos),
+                        text.find("?", pos), text.find("\n", pos))
+            if i != -1]
+    end = min(ends) + 1 if ends else len(text)
+    return min(end, pos + 120)
+
+
+def _check_numbers(body: str, feed: dict[str, Any]) -> None:
+    """Raise ValueError when the entry states a number the feed
+    contradicts. The feed is the ground truth (the same facts the
+    model was shown): the ledger's start/end stocks, the group
+    counts (already covered by _check_group_claims — this function
+    does stocks, population, arrivals, and queued jobs), the
+    summary's arrivals, and the queued-job totals. A number the
+    feed cannot verify (no ledger value for that metric, no
+    queue_job decisions at all) is skipped, never guessed — the
+    validator checks stated numbers against given facts, and
+    silence where there are no facts. Numbers are read as words
+    as well as digits: the 04-05 entry wrote "thirty-nine",
+    "thirty-two", "a hundred and twenty-four", and every one of
+    them was an old entry's number, not the run's."""
+    summary = feed.get("summary") or {}
+    start = summary.get("stocks_start") or {}
+    end = summary.get("stocks_end") or {}
+    lowered = body.lower()
+
+    def _num(v: Any) -> int | None:
+        return v if isinstance(v, int) else None
+
+    # -- stocks: a number after a stock word in the same sentence.
+    # The marker between the stock word and the number says which
+    # end it is: "from" is the day's start, "to"/"at"/"up to" and
+    # the rest are the day's end, and a number hard against the
+    # stock word ("drink 68") is the end. A number with no marker
+    # in the gap is skipped — it may be a mid-day value the feed
+    # does not carry, and the validator does not guess.
+    for value, num_start, num_end in _find_numbers(body):
+        window = lowered[max(0, num_start - 160):num_start]
+        # The stock word must be in the same sentence as the
+        # number: a sentence break between them means the number
+        # belongs to another sentence's claim.
+        sent = max(window.rfind("."), window.rfind("!"),
+                   window.rfind("?"), window.rfind("\n"))
+        window = window[sent + 1:]
+        metric = None
+        metric_at = -1
+        for word in _STOCK_WORDS:
+            at = window.rfind(word)
+            if at > metric_at:
+                metric_at, metric = at, word
+        if metric is None:
+            continue
+        gap = window[metric_at + len(metric):]
+        # Last marker in the gap wins ("went from thirty-eight
+        # down to thirty-three": the 38 is "from", the 33 is "to").
+        markers = [(m.start(), m.group(0)) for m in re.finditer(
+            r"\b(from|to|at|holds?|sits?|stands?|remains?|now|"
+            r"left|around|about)\b", gap)]
+        if not markers:
+            if gap.strip(" :") == "":
+                # "drink 68": hard against the stock word.
+                which = "end"
+            else:
+                continue
+        else:
+            which = ("start" if markers[-1][1] == "from"
+                     else "end")
+        actual = _num((start if which == "start" else end)
+                      .get(metric))
+        if actual is None:
+            continue
+        if value != actual:
+            raise ValueError(
+                f"diary AI entry says {metric} {value} ({which}) "
+                f"but the feed says {metric} {actual}")
+    # -- stocks: zero claims ("no drink left", "drink ran out").
+    for m in re.finditer(
+            r"\bno\s+(drink|food|wood|stone)\b(?:\s+left)?"
+            r"|\b(drink|food|wood|stone)\s+ran out\b"
+            r"|\bran out of\s+(drink|food|wood|stone)\b"
+            r"|\bnot a drop of\s+(drink|food|wood|stone)\b",
+            lowered):
+        metric = next(g for g in m.groups() if g)
+        actual = _num(end.get(metric))
+        if actual is None:
+            continue
+        if actual != 0:
+            raise ValueError(
+                f"diary AI entry says no {metric} left but the "
+                f"feed says {metric} {actual}")
+    # -- population: a number hard against a citizen noun.
+    # Guard (the 04-01 probe): "Six dwarves carried wounds" is
+    # a wound count, not a population count — when a group
+    # condition word follows the noun in the same clause, the
+    # number belongs to the group check, not this one. Without
+    # the guard the population check fires first on a sentence
+    # the group check already accepts.
+    pop = _num(end.get("population"))
+    if pop is None:
+        pop = _num(start.get("population"))
+    if pop is not None:
+        for value, num_start, num_end in _find_numbers(body):
+            after = lowered[num_end:num_end + 14]
+            m = re.match(r"\s*(dwarf|dwarves|citizen|citizens|"
+                         r"soul|souls)\b", after)
+            if not m:
+                continue
+            rest = lowered[num_end + m.end():
+                           num_end + m.end() + 40]
+            clause = re.split(r"[.!?,\n;]|\band\b", rest,
+                              maxsplit=1)[0]
+            if any(re.search(rf"\b(?:{kw})\b", clause)
+                   for kw in _GROUP_KEYWORDS.values()):
+                continue
+            if value != pop:
+                raise ValueError(
+                    f"diary AI entry says {value} "
+                    f"{m.group(1)} but the feed says {pop} "
+                    f"citizens")
+    # -- arrivals: "three new citizens", "three migrants arrived".
+    arrivals = summary.get("arrivals")
+    if isinstance(arrivals, int):
+        for value, num_start, num_end in _find_numbers(body):
+            after = lowered[num_end:num_end + 30]
+            m = re.match(
+                r"\s*new\s+(?:dwarf|dwarves|citizen|citizens|"
+                r"soul|souls|migrant|migrants|newcomer|newcomers)\b"
+                r"|\s*(?:dwarf|dwarves|citizen|citizens|soul|souls|"
+                r"migrant|migrants|newcomer|newcomers)\s+"
+                r"(?:arrived|joined|came)\b", after)
+            if m and value != arrivals:
+                raise ValueError(
+                    f"diary AI entry says {value} new arrivals "
+                    f"but the feed says {arrivals}")
+    # -- queued jobs: "one job" in a queue context, and per-type
+    # counts ("two beds ... in the queue"). The totals are the
+    # feed's queue_job decisions (same source as the prompt's
+    # "Queued at ..." lines). No queue_job decisions in the feed
+    # means no ground truth — skip, do not guess.
+    per_job, per_loc, total = _queued_job_totals(
+        summary.get("decisions") or [])
+    if total:
+        for value, num_start, num_end in _find_numbers(body):
+            after = lowered[num_end:num_end + 16]
+            if not re.match(r"\s*jobs?\b", after):
+                continue
+            sent_start = max(lowered.rfind(".", 0, num_start),
+                             lowered.rfind("!", 0, num_start),
+                             lowered.rfind("?", 0, num_start),
+                             lowered.rfind("\n", 0, num_start))
+            sentence = lowered[sent_start + 1:
+                               _sentence_end(lowered, num_end)]
+            if not re.search(
+                    r"\b(set|put|queued?|started|going)\b",
+                    sentence):
+                continue
+            # A named workshop scopes the claim to that
+            # location's total; a generic "one of the workshops"
+            # is the grand total.
+            expect = total
+            for loc, n in per_loc.items():
+                if loc.lower() in sentence:
+                    expect = n
+                    break
+            if value != expect:
+                raise ValueError(
+                    f"diary AI entry says {value} "
+                    f"{'job' if value == 1 else 'jobs'} queued "
+                    f"but the feed says {expect}")
+        for value, num_start, num_end in _find_numbers(body):
+            after = lowered[num_end:num_end + 16]
+            m = re.match(r"\s*(bed|beds|barrel|barrels|brew|brews|"
+                         r"brewing|brewings)\b", after)
+            if not m:
+                continue
+            sent_start = max(lowered.rfind(".", 0, num_start),
+                             lowered.rfind("!", 0, num_start),
+                             lowered.rfind("?", 0, num_start),
+                             lowered.rfind("\n", 0, num_start))
+            sentence = lowered[sent_start + 1:
+                               _sentence_end(lowered, num_end)]
+            if not re.search(r"\bqueue", sentence):
+                continue
+            job = _JOB_NOUNS[m.group(1)]
+            expect = per_job.get(job, 0)
+            if value != expect:
+                raise ValueError(
+                    f"diary AI entry says {value} {m.group(1)} "
+                    f"queued but the feed says {job} x{expect}")
 
 
 def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
@@ -1282,19 +1892,55 @@ def _validate_ai_entry(text: str, feed: dict[str, Any]) -> str:
             raise ValueError(
                 "diary AI entry names none of the featured dwarves")
     _check_group_claims(body, feed)
+    _check_numbers(body, feed)
     return body
 
 
 def write_ai_entry(client: Any, feed: dict[str, Any],
-                   state_dir: str | Path) -> Path:
+                   state_dir: str | Path,
+                   max_attempts: int = 3) -> Path:
     """Write today's diary entry with the model. Builds the prompt
     from the feed, calls the model, validates the prose, stores it.
     Raises on model failure or bad output — the caller logs and
-    skips the day; a template list is never written instead."""
+    skips the day; a template list is never written instead.
+
+    A rejected entry is retried with a correction, not silently
+    dropped: the model is told exactly which number it got wrong
+    and is asked to rewrite it from the facts (the 04-05 entry's
+    numbers were wrong in every line, and a single attempt would
+    have left the day unwritten). At most max_attempts calls; after
+    the last rejection the day is skipped, as before.
+
+    The stored body carries the day's ledger line (the same line
+    the template renderer writes, from the same summary the
+    validator checked) — the machine-readable record, so a later
+    rebuild recovers the day's numbers from the entry instead of
+    the Store's stale trend sample. The gap marker goes through
+    write_ai_body directly and gets no ledger line: its summary's
+    stocks are not the day's.
+    """
     messages = diary_prompt(feed)
-    text = client.chat(messages)
-    body = _validate_ai_entry(text, feed)
-    return write_ai_body(state_dir, feed["summary"], body)
+    last_exc: Exception | None = None
+    for _attempt in range(max_attempts):
+        text = client.chat(messages)
+        try:
+            body = _validate_ai_entry(text, feed)
+        except ValueError as exc:
+            last_exc = exc
+            messages = messages + [
+                {"role": "assistant", "content": text},
+                {"role": "user",
+                 "content": (
+                     "Your entry was rejected: "
+                     f"{exc}. Rewrite it, keeping every number "
+                     "exactly as given in the facts above — do not "
+                     "copy numbers from the recent entries.")}]
+            continue
+        ledger = _ledger_line(feed["summary"])
+        if ledger:
+            body = body.rstrip() + "\n\n" + ledger
+        return write_ai_body(state_dir, feed["summary"], body)
+    raise last_exc  # type: ignore[misc]
 
 
 def parse_entries(md_text: str) -> list[dict[str, str]]:
@@ -1332,6 +1978,11 @@ def render_html(md_path: str | Path, html_path: str | Path,
     html_path = Path(html_path)
     entries = parse_entries(md_path.read_text()) if md_path.exists() \
         else []
+    # Defensive: the file should already be chronological (the
+    # store sorts on every write), but a hand-edited file may not
+    # be — and the reader's "latest" is the last entry in the
+    # list, so sort here too rather than trusting file order.
+    entries.sort(key=lambda e: _date_key(e["date"]))
     fort = fort_name or "the fort"
     # Escape "</" after json.dumps (2026-11-27, external review
     # Table 6 row 5): the entries are embedded raw inside a script

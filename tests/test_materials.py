@@ -211,7 +211,7 @@ class TestRequirementsForState(unittest.TestCase):
         self.assertIn("need 1 brewable plant + 1 empty barrel",
                       brew[0])
         self.assertIn("have 48 plants, 3 empty barrels", brew[0])
-        self.assertIn("enough for 3 brews", brew[0])
+        self.assertIn("enough for 3 more brews", brew[0])
 
     def test_still_and_no_empty_barrels_brew_line_names_make_barrel(
             self):

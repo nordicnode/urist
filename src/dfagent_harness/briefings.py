@@ -37,6 +37,27 @@ BRIEFINGS: dict[str, dict[str, str]] = {
                  "risks a dwarf being attacked. Ignoring a harmless "
                  "visitor costs nothing."),
     },
+    "cavern_creature": {
+        # A cavern dweller (demon, troll, troglodyte) deep below the
+        # fort — NOT a visitor. units.lua labels any non-citizen,
+        # non-hostile, non-animal humanoid a visitor; attention
+        # reclassifies deep ones here (run #12: demons labelled
+        # "visitor" with immigration/agent/war wiki refs).
+        "what": ("A creature from the deep caverns is on the map — "
+                 "a demon, troll, troglodyte, or other cavern "
+                 "dweller. It lives down there; it did not come "
+                 "to visit, trade, or petition."),
+        "matters": ("Whether it can reach your dwarves. A cavern "
+                    "creature 100+ levels below the fort is no "
+                    "threat unless your dwarves dig down to it; "
+                    "one near the fort's level is."),
+        "options": ("Leave it alone — it stays in the caverns. If "
+                    "it climbs toward the fort, seal the entrance "
+                    "or muster the military."),
+        "cost": ("Ignoring a distant cavern creature costs "
+                 "nothing. Ignoring one that reaches the fort "
+                 "risks dwarf deaths."),
+    },
     "citizen_new": {
         "what": ("New dwarves have arrived (a migrant wave). They "
                  "are citizens now and need food, drink, and a bed."),

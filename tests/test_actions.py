@@ -353,15 +353,22 @@ class FakeGame:
                                params["z"]],
                     "construction_stage": 0}
         if name == "act_job.lua":
-            # The real helper returns the new job ids; the game only
-            # assigns a real id on the next tick, so a fresh job
-            # carries -1 until then (observed live 2026-11-27) — the
-            # action layer verifies it by the -1 id's presence in
-            # the jobs list, exactly like the real game.
-            self.jobs.append({"id": -1, "type": "CustomReaction",
-                              "pos": [0, 0, 0]})
+            # The real helper (fixed 2026-11-27) calls
+            # linkIntoWorld(job, true), which assigns the next id
+            # from the game's counter immediately — a fresh job
+            # carries a real id, never -1. (-1 was the 1-arg
+            # linkIntoWorld no-op; a -1 id is corrupt and the
+            # action layer now rejects it.)
+            count = params.get("count", 1)
+            ids = []
+            for _ in range(count):
+                self.jobs.append({"id": self.next_job_id,
+                                  "type": "CustomReaction",
+                                  "pos": [0, 0, 0]})
+                ids.append(self.next_job_id)
+                self.next_job_id += 1
             return {"ok": True, "action": "queue-job",
-                    "job_ids": [-1], "count": params.get("count", 1)}
+                    "job_ids": ids, "count": count}
         if name == "act_labor.lua":
             target = None
             for c in self.citizens:
@@ -766,6 +773,21 @@ class TestQueueJobMaterials(unittest.TestCase):
         self.assertEqual(len(self._queued("act_job.lua")), 1)
         self.assertTrue(any(j["type"] == "CustomReaction"
                             for j in self.game.jobs))
+
+    def test_negative_job_id_is_rejected(self):
+        # 2026-11-27: the pre-fix helper returned [-1] (linkIntoWorld
+        # with one arg is a no-op, so no id was ever assigned) and
+        # the action layer reported ok — the game then crashed a few
+        # ticks later processing the corrupt job. A -1 id is now a
+        # verification failure, never "ok".
+        orig = self.game.next_job_id
+        self.game.next_job_id = -1
+        r = actions.act(self.client, "queue_job", building_id=8,
+                        job="brew", count=1)
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "verification")
+        self.assertIn("-1", r.reason)
+        self.game.next_job_id = orig
 
 
 class TestSiteFixHint(unittest.TestCase):

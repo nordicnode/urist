@@ -214,15 +214,36 @@ class TestBuildAttention(unittest.TestCase):
                       items[0]["text"])
 
     def test_visitor_outranks_far_wildlife(self):
+        # A genuine surface visitor (priority 2) outranks far
+        # wildlife (priority 3). The visitor is at the fort's level
+        # (z175): a "visitor" 52 levels down is reclassified as a
+        # cavern creature (priority 3), so a deep troll does not
+        # belong in this test — see test_deep_visitor_is_cavern.
         det = StubDetector([
             _arrival(7001, "wildlife", "ELK_BIRD", (150, 150, 178),
                      dist=80, tick=199000),
-            _arrival(5490, "visitor", "TROLL", (148, 65, 123),
+            _arrival(5490, "visitor", "TROLL", (148, 65, 175),
                      dist=120, tick=200000),
         ])
         items = at.build_attention(_state(), det, surface_z=175)
         self.assertEqual([it["priority"] for it in items], [2, 3])
         self.assertEqual(items[0]["unit_id"], 5490)
+
+    def test_deep_visitor_is_cavern(self):
+        # 2026-11-27 (run #12): demons, trolls and troglodytes in
+        # the caverns arrived labelled "visitor" with immigration
+        # wiki refs. A humanoid more than 40 levels below the fort
+        # is a cavern creature, not a visitor — priority 3 like
+        # far wildlife, and the cavern-creature briefing, not the
+        # visitor one.
+        det = StubDetector([
+            _arrival(5490, "visitor", "TROLL", (148, 65, 123),
+                     dist=120, tick=200000),
+        ])
+        items = at.build_attention(_state(), det, surface_z=175)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["priority"], 3)
+        self.assertIn("cavern creature", items[0]["text"])
 
     def test_arrival_drops_out_after_window(self):
         det = StubDetector([

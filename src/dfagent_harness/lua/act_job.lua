@@ -40,6 +40,14 @@ local ok, err = pcall(function()
     job.pos.z = b.z
     if reaction ~= nil then
       job.reaction_name = reaction.code
+      -- DFHack Lua vectors are 0-BASED (ipairs yields ri = 0, 1,
+      -- ... and reagents[0] is the first). Standard-Lua 1-based
+      -- thinking (`ri - 1`) puts -1 in the first job_item's
+      -- reagent_index — an out-of-bounds reagent lookup the game
+      -- hits when a dwarf gathers materials, crashing DF a few
+      -- ticks after the job is queued (verified live 2026-11-27:
+      -- every queued job died at tick 2-3; 20 advances with no
+      -- job survived). reagent_index is ri as yielded, no -1.
       for ri, rg in ipairs(reaction.reagents) do
         local ji = df.job_item:new()
         ji.item_type = rg.item_type
@@ -53,14 +61,24 @@ local ok, err = pcall(function()
         ji.min_dimension = rg.min_dimension
         ji.has_tool_use = rg.has_tool_use
         ji.reaction_id = reaction.index
-        ji.reagent_index = ri - 1
+        ji.reagent_index = ri
         ji.flags1:assign(rg.flags1)
         ji.flags2:assign(rg.flags2)
         ji.flags3:assign(rg.flags3)
         job.job_items:insert('#', ji)
       end
     end
-    dfhack.job.linkIntoWorld(job)
+    -- linkIntoWorld(job, true): the second arg is REQUIRED. With
+    -- one arg it is a no-op — it assigns no id and inserts nothing
+    -- (verified live 2026-11-27: id stays -1, world.jobs.list
+    -- unchanged). The job then lives only in the building's list
+    -- with id -1, a corrupt job: the game crashes a few ticks
+    -- later when it processes it (DFHack's own changelog confirms
+    -- corrupted jobs crash the game; runs #12a3/#13/#14 all died
+    -- at tick 3-4 after queueing [-1] jobs, while 20 advances
+    -- with no job survived). With `true` it assigns the next id
+    -- from the game's counter and inserts into world.jobs.list.
+    dfhack.job.linkIntoWorld(job, true)
     b.jobs:insert('#', job)
     table.insert(made, job.id)
   end

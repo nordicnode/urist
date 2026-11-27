@@ -17,6 +17,16 @@ local ok, err = pcall(function()
       list[#list+1] = {
         id = job.id,
         type = tname,
+        -- Numeric job_type + reaction_name, so the material
+        -- fail-fast can count jobs already queued (a brew is
+        -- CustomReaction + BREW_DRINK_FROM_PLANT; the name alone
+        -- cannot tell a brew from a MAKE WOODEN BED). Without
+        -- these the model queued 4 brews against 2 empty barrels
+        # (run #12): the Materials line said "enough for 2 brews"
+        # even after 2 were already queued.
+        job_type = job.job_type,
+        reaction = dfh_try(function() return job.reaction_name end,
+                           nil),
         pos = dfh_arr({job.pos.x, job.pos.y, job.pos.z}),
         suspend = dfh_try(function() return job.flags.suspend end, nil),
         repeat_ = dfh_try(function() return job.flags.repeat_ end, nil),

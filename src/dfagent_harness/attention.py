@@ -251,14 +251,34 @@ def _where(pos: tuple[int, int, int],
     return f"{base}, {gap}" if gap else base
 
 
+def _date_for_tick(tick: int, year: int) -> str:
+    """Calendar date (YYYY-MM-DD) for a year_tick: 1,200 ticks per
+    in-game day, 28 days per month. The snapshot tick IS the
+    year_tick (125-04-01 == 100800 == 3 months x 28 days x 1200)."""
+    day_of_year = max(0, tick) // 1200
+    month = day_of_year // 28 + 1
+    day = day_of_year % 28 + 1
+    return f"{year}-{month:02d}-{day:02d}"
+
+
 def describe_arrival(data: dict[str, Any],
-                     surface_z: Optional[int] = None) -> str:
+                     surface_z: Optional[int] = None,
+                     arrival_tick: Optional[int] = None,
+                     now_tick: Optional[int] = None,
+                     year: Optional[int] = None,
+                     count: int = 1) -> str:
     """One plain-words sentence for a new-arrival event's data.
 
     Carries the class, the position, and (for wildlife) the distance
     to the nearest dwarf, so the agent can judge the risk without
     another query. Says whether the unit just arrived or was already
-    here when monitoring started.
+    here when monitoring started — "just arrived" only when it
+    arrived since the last decision tick (age <= 300 game ticks);
+    an older arrival names its date, so a troglodyte that arrived
+    three ticks ago does not still read as just arrived on every
+    later tick (run #12: the same 8 troglodytes said "It just
+    arrived." on ticks 2, 3 and 4). ``count`` > 1 renders a cohort
+    ("8 troglodytes ... are ...") instead of one unit.
     """
     kind = data.get("kind") or "wildlife"
     role = data.get("role") or ""
@@ -268,8 +288,27 @@ def describe_arrival(data: dict[str, Any],
         noun = f"a {race} ({what})"
     elif kind == "livestock":
         noun = f"a {race} (pet)"
+    elif kind == "cavern_creature":
+        # A cavern dweller is not a visitor and not a surface wild
+        # animal: it lives in the caverns below the fort.
+        noun = f"a {race} (cavern creature)"
     else:
         noun = f"a {race} (wild animal)"
+    if count > 1:
+        # Plural cohort: "8 troglodytes (cavern creatures) are ..."
+        noun = noun.replace("a ", f"{count} ", 1)
+        if "(cavern creature)" in noun:
+            noun = noun.replace("(cavern creature)",
+                                "(cavern creatures)")
+        elif "(wild animal)" in noun:
+            noun = noun.replace("(wild animal)", "(wild animals)")
+        elif "(visitor)" in noun:
+            noun = noun.replace("(visitor)", "(visitors)")
+        if not noun.split()[1].endswith("s"):
+            noun = noun.replace(race, race + "s", 1)
+        verb = "are"
+    else:
+        verb = "is"
     pos = data.get("pos") or [None, None, None]
     where = _where((pos[0], pos[1], pos[2]), surface_z)
     at = f"at ({pos[0]}, {pos[1]}, z{pos[2]})"
@@ -279,9 +318,23 @@ def describe_arrival(data: dict[str, Any],
     if isinstance(dist, int):
         dist_txt = (f", {dist} tile{'s' if dist != 1 else ''} from "
                     f"the nearest dwarf")
-    timing = ("It was already here when monitoring started."
-              if data.get("at_baseline") else "It just arrived.")
-    return f"{noun} is {loc}{dist_txt}. {timing}"
+    if data.get("at_baseline"):
+        timing = "They were already here when monitoring started." \
+            if count > 1 else \
+            "It was already here when monitoring started."
+    elif (isinstance(arrival_tick, int)
+            and isinstance(now_tick, int)
+            and now_tick - arrival_tick > 300):
+        if isinstance(year, int):
+            timing = (f"{'They' if count > 1 else 'It'} arrived on "
+                      f"{_date_for_tick(arrival_tick, year)}.")
+        else:
+            timing = (f"{'They' if count > 1 else 'It'} arrived "
+                      f"earlier.")
+    else:
+        timing = ("They just arrived." if count > 1
+                  else "It just arrived.")
+    return f"{noun} {verb} {loc}{dist_txt}. {timing}"
 
 
 def build_attention(state: dict[str, Any],
@@ -366,6 +419,18 @@ def build_attention(state: dict[str, Any],
     # were already present at the first snapshot, and the agent's
     # first planner tick may come much later than the 1,200-tick
     # (one-day) window.
+    #
+    # A "visitor" deep underground is not a visitor at all: units.lua
+    # labels any non-citizen, non-hostile, non-animal humanoid a
+    # visitor, so demons, trolls and troglodytes in the caverns
+    # arrived as "visitors" with immigration/agent/war wiki refs
+    # (run #12). A humanoid more than 40 levels below the fort is
+    # reclassified here as a cavern creature — the right class, the
+    # right briefing, and the deep-demotion below applies to it.
+    # Same-tick cohorts of one race (a troglodyte pack arriving
+    # together) collapse into ONE item: eight verbatim entries filled
+    # the whole attention list every tick in run #12.
+    raw_arrivals = []
     for rec in (detector.arrivals if detector is not None else []):
         tick = rec.get("tick")
         window = (BASELINE_WINDOW_TICKS if rec.get("at_baseline")
@@ -373,7 +438,41 @@ def build_attention(state: dict[str, Any],
         if (isinstance(now_tick, int) and isinstance(tick, int)
                 and now_tick - tick > window):
             continue
-        data = rec.get("data") or {}
+        data = dict(rec.get("data") or {})
+        pos = data.get("pos") or [None, None, None]
+        if (data.get("kind") == "visitor"
+                and surface_z is not None
+                and isinstance(pos[2], int)
+                and surface_z - pos[2] > 40):
+            data["kind"] = "cavern_creature"
+        raw_arrivals.append((rec, data))
+    # Cohort grouping: same kind + race + tick + baseline flag, all
+    # within 25 tiles of the first, is one arrival event, not N.
+    groups: list[list[tuple[dict, dict]]] = []
+    for rec, data in raw_arrivals:
+        placed = False
+        for g in groups:
+            grec, gdata = g[0]
+            if (gdata.get("kind") != data.get("kind")
+                    or gdata.get("race") != data.get("race")
+                    or grec.get("tick") != rec.get("tick")
+                    or bool(grec.get("at_baseline"))
+                    != bool(rec.get("at_baseline"))):
+                continue
+            gpos = gdata.get("pos") or [None, None, None]
+            pos = data.get("pos") or [None, None, None]
+            if (isinstance(gpos[0], int) and isinstance(pos[0], int)
+                    and _cheb3((gpos[0], gpos[1], gpos[2]),
+                               (pos[0], pos[1], pos[2])) <= 25):
+                g.append((rec, data))
+                placed = True
+                break
+        if not placed:
+            groups.append([(rec, data)])
+    for group in groups:
+        rec, data = group[0]
+        tick = rec.get("tick")
+        year = (state.get("status") or {}).get("year")
         severity = "warning" if data.get("kind") == "visitor" else \
             ("warning" if isinstance(
                 data.get("dist_nearest_citizen"), int)
@@ -384,19 +483,31 @@ def build_attention(state: dict[str, Any],
         # in the horizontal plane. Demote it to info (P3) — the
         # level gap is now in its text, so the model can still see
         # it. Visitors are never demoted: they come to the fort.
+        # Cavern creatures are demoted the same way: they live
+        # down there, they are not coming to the fort.
         pos = data.get("pos") or [None, None, None]
         if (data.get("kind") != "visitor"
                 and surface_z is not None
                 and isinstance(pos[2], int)
                 and surface_z - pos[2] > 40):
             priority = 3
+        briefing_kind = ("cavern_creature"
+                         if data.get("kind") == "cavern_creature"
+                         else "new_arrival")
         items.append({
             "priority": priority, "kind": "new_arrival",
-            "text": describe_arrival(data, surface_z),
+            "text": describe_arrival(
+                data, surface_z,
+                arrival_tick=tick if isinstance(tick, int) else None,
+                now_tick=now_tick if isinstance(now_tick, int)
+                else None,
+                year=year if isinstance(year, int) else None,
+                count=len(group)),
             "unit_id": data.get("unit_id"), "pos": data.get("pos"),
+            "unit_ids": [d.get("unit_id") for _, d in group],
             "at_baseline": bool(rec.get("at_baseline")),
             "tick": tick,
-            "briefing": _briefing_for("new_arrival"),
+            "briefing": _briefing_for(briefing_kind),
         })
     # P0-first: priority ascending, most recent first within a
     # priority. (Python's sort is stable, so equal keys keep

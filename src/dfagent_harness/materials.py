@@ -215,23 +215,55 @@ def _fill_carpenter(text: str, buildings: Optional[dict[str, Any]]
 # Shortage checks
 # ----------------------------------------------------------------------
 
+def queued_count(jobs_section: Any, job_type: int,
+                 reaction_name: Optional[str] = None) -> int:
+    """Jobs of one kind already in the world job list (from the jobs
+    section's list): same numeric job_type, and — for reaction jobs
+    — the same reaction_name. A brew is CustomReaction (211) +
+    BREW_DRINK_FROM_PLANT; the type name alone cannot tell it from
+    a MAKE WOODEN BED. A missing/unreadable jobs section returns 0
+    (the fail-fast then behaves as before — a missing section must
+    not invent a shortage or block queueing); a present list that
+    holds none also returns 0."""
+    if not isinstance(jobs_section, dict):
+        return 0
+    n = 0
+    for j in jobs_section.get("list") or []:
+        if not isinstance(j, dict):
+            continue
+        if j.get("job_type") != job_type:
+            continue
+        if reaction_name is not None and \
+                j.get("reaction") != reaction_name:
+            continue
+        n += 1
+    return n
+
+
 def check_requirements(
         stocks: dict[str, Any],
         requirements: list[dict[str, Any]],
         count: int = 1,
         buildings: Optional[dict[str, Any]] = None,
+        already_queued: int = 0,
         ) -> list[dict[str, Any]]:
     """Shortages for one action: each requirement whose stock is
     short of ``per_job * count``. Returns a list of
     {need, have, label, fix}; empty when everything is covered or
     when the stocks section is missing a key (unknown, not short).
-    ``count`` is how many copies of the job/build are wanted."""
+    ``count`` is how many copies of the job/build are wanted;
+    ``already_queued`` is how many copies are already in the world
+    job list — they hold the same stock (a brew already queued
+    holds one empty barrel), so the need is per_job *
+    (count + already_queued). Without it the model queued 4 brews
+    against 2 empty barrels (run #12): each queue passed the
+    check because it only ever saw the fresh stock."""
     shortages: list[dict[str, Any]] = []
     for req in requirements:
         have = stock_count(stocks, req["stock"])
         if have is None:
             continue
-        need = int(req["per_job"]) * max(1, count)
+        need = int(req["per_job"]) * (max(1, count) + max(0, already_queued))
         if have < need:
             shortages.append({
                 "need": need,
@@ -244,15 +276,19 @@ def check_requirements(
 
 
 def check_job(job: str, stocks: dict[str, Any], count: int = 1,
-              buildings: Optional[dict[str, Any]] = None
+              buildings: Optional[dict[str, Any]] = None,
+              already_queued: int = 0,
               ) -> list[dict[str, Any]]:
     """Shortages for queueing ``count`` copies of a JOB_SPECS job.
-    Unknown job -> [] (the caller validates the name itself)."""
+    Unknown job -> [] (the caller validates the name itself).
+    ``already_queued`` counts copies already in the world job list
+    (see :func:`queued_count`) — they hold the same materials."""
     reqs = JOB_MATERIALS.get(job)
     if reqs is None:
         return []
     return check_requirements(stocks, reqs, count=count,
-                              buildings=buildings)
+                              buildings=buildings,
+                              already_queued=already_queued)
 
 
 def check_workshop(kind: str, stocks: dict[str, Any],
@@ -393,8 +429,19 @@ def requirements_for_state(state: dict[str, Any]) -> list[str]:
                 f"{_n(stone)}, wood {_n(wood)} (enough)")
         # else: both counts unknown — no honest line to emit.
     else:
+        # Brews already queued hold the same stock (one empty
+        # barrel + one plant each), so the "enough for N" number
+        # and the fail-fast both subtract them — run #12 queued 4
+        # brews against 2 empty barrels because the line still
+        # said "enough for 2 brews" after 2 were already queued.
+        queued_brews = (
+            queued_count(state.get("jobs"), 211,
+                         "BREW_DRINK_FROM_PLANT")
+            + queued_count(state.get("jobs"), 211,
+                           "BREW_DRINK_FROM_PLANT_GROWTH"))
         brew_short = check_job("brew", stocks, count=1,
-                               buildings=buildings)
+                               buildings=buildings,
+                               already_queued=queued_brews)
         if brew_short:
             for s in brew_short:
                 lines.append("Brew: " + format_shortage(s))
@@ -402,12 +449,26 @@ def requirements_for_state(state: dict[str, Any]) -> list[str]:
             plants = stock_count(stocks, "brewable_plants")
             empty = stock_count(stocks, "empty_barrels")
             if isinstance(plants, int) and isinstance(empty, int):
-                n = min(plants, empty)
-                lines.append(
-                    "Brew: need 1 brewable plant + 1 empty barrel "
-                    "per drink — have "
-                    f"{plants} plants, {empty} empty barrels "
-                    f"(enough for {n} brew{'s' if n != 1 else ''})")
+                n = min(plants, empty) - queued_brews
+                if n <= 0:
+                    lines.append(
+                        "Brew: need 1 brewable plant + 1 empty "
+                        "barrel per drink — have "
+                        f"{plants} plants, {empty} empty barrels "
+                        f"({queued_brews} already committed to "
+                        f"queued brews — enough for 0 more; make "
+                        f"more barrels or wait for the queued "
+                        f"brews to finish)")
+                else:
+                    queued_txt = (
+                        f"; {queued_brews} already queued"
+                        if queued_brews else "")
+                    lines.append(
+                        "Brew: need 1 brewable plant + 1 empty "
+                        "barrel per drink — have "
+                        f"{plants} plants, {empty} empty barrels "
+                        f"(enough for {n} more brew"
+                        f"{'s' if n != 1 else ''}{queued_txt})")
             # else: a count is unknown — no honest line to emit.
     beds = item_count(items, "BED") if isinstance(items, dict) else None
     if beds is not None and beds == 0:

@@ -130,6 +130,7 @@ def prefetch_for_event(event_kind: str, detail: str = "") -> list[dict[str, Any]
         "citizen_new": "migrant wave",
         "unit_death": "dwarf death cause",
         "new_arrival": "migrant visitor",
+        "cavern_creature": "cavern creature demon troll",
     }
     query = queries.get(event_kind)
     if not query:

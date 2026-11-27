@@ -1350,9 +1350,16 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     # stocks read is a transport failure, never a false shortage.
     from . import materials as _materials
     stocks = _read_section(client, "stocks", timeout=timeout)
+    # Already-queued copies hold the same stock (run #12: 4 brews
+    # queued against 2 empty barrels — each queue passed because
+    # the check only ever saw the fresh stock). Read the jobs list
+    # first and count them, so the fail-fast names the real limit.
+    jobs_before = _read_section(client, "jobs", timeout=timeout)
+    already_queued = _materials.queued_count(
+        jobs_before, spec["job_type"], spec["reaction_name"])
     shortages = _materials.check_job(
         job, stocks, count=count,
-        buildings=before)
+        buildings=before, already_queued=already_queued)
     if shortages:
         detail = "; ".join(_materials.format_shortage(s)
                            for s in shortages)
@@ -1368,11 +1375,31 @@ def queue_job(client: DFHackClient, building_id: int, job: str,
     after = _read_section(client, "jobs", timeout=timeout)
     took_ms = round((time.monotonic() - started) * 1000)
     listed = {j.get("id") for j in after.get("list") or []}
-    missing = [jid for jid in out.get("job_ids") or []
-               if jid not in listed]
     base = {"building_id": building_id, "job": job, "count": count,
             "job_ids": out.get("job_ids"),
             "reaction_name": spec["reaction_name"]}
+    # A job id < 0 is corrupt, not a real job: it means the job was
+    # never linked into the world job list (2026-11-27: linkIntoWorld
+    # with one arg is a no-op, so every queued job came back -1 and
+    # the game crashed a few ticks later processing it). The id being
+    # present in the re-read list is NOT enough — a -1 can appear
+    # there via the building's list. Reject it loudly instead of
+    # reporting ok and letting the game die.
+    ids = out.get("job_ids") or []
+    bad = [jid for jid in ids
+           if not isinstance(jid, int) or jid < 0]
+    if bad:
+        return ActionResult(
+            ok=False, action="queue_job",
+            before={"job_count": before.get("count")},
+            after={"job_count": after.get("count")},
+            reason=(f"queued {job} x{count} on building #{building_id} "
+                    f"but the game returned invalid job ids {bad} — "
+                    f"a job id < 0 means it was never linked into "
+                    f"the world job list"),
+            error_kind="verification", took_ms=took_ms, detail=base)
+    missing = [jid for jid in ids
+               if jid not in listed]
     if missing:
         return ActionResult(
             ok=False, action="queue_job",

@@ -296,5 +296,33 @@ class TestPlannerUsesDerivedSite(unittest.TestCase):
         self.assertEqual(digs[0].kwargs["mode"], "down-stair")
 
 
+class TestProbeDigStateJobWalk(unittest.TestCase):
+    # Source-level regression guard for the probe_dig_state job
+    # count (2026-11-27): probe_dig_state.lua once read the jobs
+    # with `ipairs(df.global.world.jobs.list)`. world.jobs.list is
+    # a LINKED list, not a vector — ipairs over it yields nothing,
+    # so n_jobs was always 0 and dig_jobs always empty, and
+    # verify_dig's job read was blind. The same ipairs pattern in
+    # the scratch farm watch scripts read 0 PlantSeeds jobs that
+    # were in fact present, which briefly misled the farm-mystery
+    # investigation into a "building-jobs-list" theory that was
+    # wrong (jobs.lua's while-walk sees them). The helper itself
+    # is exercised by test_digging_live.py; this pins the walk so
+    # the mistake cannot silently return.
+    def test_jobs_are_walked_as_a_linked_list(self):
+        src = (Path(__file__).resolve().parent.parent / "src"
+               / "dfagent_harness" / "lua"
+               / "probe_dig_state.lua").read_text()
+        self.assertIn("local node = df.global.world.jobs.list", src)
+        self.assertIn("while node ~= nil", src)
+        self.assertIn("node = node.next", src)
+        self.assertNotIn("ipairs(df.global.world.jobs.list)", src)
+        # The worker comes from dfhack.job.getWorker (the pattern
+        # probe_postings.lua / watch.lua use): the job struct has no
+        # usable .worker field, so `j.worker` always read nil.
+        self.assertIn("dfhack.job.getWorker", src)
+        self.assertNotIn("j.worker", src)
+
+
 if __name__ == "__main__":
     unittest.main()

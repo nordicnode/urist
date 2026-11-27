@@ -1183,8 +1183,33 @@ class Daemon:
             # NOTE: jobs.lua puts the NAME in "type" and the numeric
             # id in "job_type" — matching "job_type" against the
             # string "PlantSeeds" never matches.
-            return [j for j in (cur.get("jobs") or {}).get("list") or []
-                    if j.get("type") == "PlantSeeds"]
+            # Scoped to THIS plot's tiles: other plots' PlantSeeds
+            # jobs must neither satisfy the appear wait nor block
+            # the finish wait. Verified live 2026-11-27: plot #2's
+            # summer jobs kept the finish wait alive for 350+ s
+            # after plot #5's own job had finished, and jobs already
+            # pending on plot #2 satisfied the appear wait before
+            # plot #5 had any job at all. A job with no pos cannot
+            # be placed, so it counts — fail toward waiting, never
+            # toward a false appear or finish.
+            out = []
+            for j in (cur.get("jobs") or {}).get("list") or []:
+                if j.get("type") != "PlantSeeds":
+                    continue
+                # Only a well-formed numeric 3-pos outside the rect
+                # excludes a job: anything else (no pos, wrong shape,
+                # non-numeric) counts, so a malformed entry can never
+                # fake an appear or a finish.
+                pos = j.get("pos")
+                if (isinstance(pos, list) and len(pos) == 3
+                        and all(isinstance(v, (int, float))
+                                for v in pos)
+                        and not (x1 <= pos[0] <= x1 + width - 1
+                                 and y1 <= pos[1] <= y1 + height - 1
+                                 and pos[2] == z)):
+                    continue
+                out.append(j)
+            return out
 
         appear_wait = min(wait, 60.0)
         appeared = _wait_for_paused(

@@ -18,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from dfagent_harness import actions  # noqa: E402
-from dfhack_rpc import DFHackError  # noqa: E402
+from dfhack_rpc import DFHackError, RemoteError, TransportError  # noqa: E402
 
 
 # -- a tiny Lua-table parser for the PARAMS block --------------------------
@@ -942,6 +942,46 @@ class TestActEntryPoint(unittest.TestCase):
         r = actions.act(self.client, "designate_dig",
                         box=(90, 90, 41, 91, 91, 41), mode="dig")
         json.dumps(r.to_dict())
+
+
+class TestWaitForPausedTransport(unittest.TestCase):
+    # _wait_for_paused tolerates transient transport failures
+    # (2026-11-27): a farm task's finish wait died on a single 5 s
+    # handshake timeout after ~350 s of healthy bursts, while the
+    # game + RPC answered fine immediately after. Up to 3 consecutive
+    # TransportErrors are retried with a 1 s backoff; a 4th — or a
+    # RemoteError, which is a real answer from the server, not a
+    # hiccup — propagates.
+    def _run(self, failures, predicate_values, error=None):
+        client = mock.Mock()
+        calls = {"set": 0}
+
+        def fake_set(c, paused):
+            calls["set"] += 1
+            if calls["set"] <= failures:
+                raise (error or TransportError("boom"))
+
+        values = list(predicate_values)
+        with mock.patch.object(actions, "get_paused",
+                               return_value=True), \
+            mock.patch.object(actions, "set_paused",
+                              side_effect=fake_set):
+            return actions._wait_for_paused(
+                client, lambda: values.pop(0) if values else None,
+                timeout=30.0, burst=0.01)
+
+    def test_two_transport_failures_then_success(self):
+        self.assertEqual(
+            self._run(2, [None, None, "done"]), "done")
+
+    def test_three_transport_failures_raise(self):
+        with self.assertRaises(TransportError):
+            self._run(3, [None, None, None, None])
+
+    def test_remote_error_is_not_retried(self):
+        with self.assertRaises(RemoteError):
+            self._run(1, [None, "done"],
+                      error=RemoteError(-1, "refused"))
 
 
 if __name__ == "__main__":

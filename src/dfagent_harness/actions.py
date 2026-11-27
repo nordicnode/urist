@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from dfhack_rpc import DFHackClient, DFHackError
+from dfhack_rpc import DFHackClient, DFHackError, TransportError
 from dfhack_rpc.proto import CoreProtocol_pb2 as core
 from dfhack_rpc.proto import RemoteFortressReader_pb2 as rfr
 
@@ -422,23 +422,46 @@ def _wait_for_paused(client: DFHackClient, predicate: Callable[[], Any],
     catch a freed struct (one run ended "free(): double free detected
     in tcache 2"). No retries of the underlying mutation — only
     re-reads.
+
+    A transient RPC transport failure (one slow handshake, one
+    dropped socket) must not kill a minutes-long wait: the RPC
+    server recovers on its own (verified live 2026-11-27 — a farm
+    task's finish wait died on a single 5 s handshake timeout after
+    ~350 s of healthy bursts, and the game + RPC answered fine
+    immediately after). Up to 3 consecutive TransportErrors are
+    tolerated with a 1 s backoff; the client reconnects lazily on
+    the next call, and the next iteration re-verifies the pause
+    before reading. Past 3, or past the deadline, the error
+    propagates — a dead game must still fail the wait, never hang
+    it. Only transport errors are tolerated: a RemoteError (the
+    server answered and refused) is a real answer, not a hiccup.
     """
     was_paused = get_paused(client)
     deadline = time.monotonic() + timeout
+    transport_failures = 0
     try:
         while True:
-            # Read while paused (pause first if the game was running).
-            if not get_paused(client):
+            try:
+                # Read while paused (pause first if the game was running).
+                if not get_paused(client):
+                    set_paused(client, True)
+                value = predicate()
+                if value:
+                    return value
+                if time.monotonic() >= deadline:
+                    return None
+                # Burst: let the game tick, then loop back to the paused read.
+                set_paused(client, False)
+                time.sleep(min(burst, max(0.0, deadline - time.monotonic())))
                 set_paused(client, True)
-            value = predicate()
-            if value:
-                return value
-            if time.monotonic() >= deadline:
-                return None
-            # Burst: let the game tick, then loop back to the paused read.
-            set_paused(client, False)
-            time.sleep(min(burst, max(0.0, deadline - time.monotonic())))
-            set_paused(client, True)
+            except TransportError:
+                transport_failures += 1
+                if (transport_failures >= 3
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(1.0)
+                continue
+            transport_failures = 0
     finally:
         if get_paused(client) != was_paused:
             set_paused(client, was_paused)

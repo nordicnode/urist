@@ -67,8 +67,9 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   `scratch/m2-embark/df`). **Never use bare `pkill -9 -x
   Dwarf_Fortress`** — it matches by process name and kills every DF
   at once (it killed the main fort while targeting the scratch DF on
-  2026-11-27). `reload_fort.py` has the same flaw (line 229) and is
-  owed a PID-based fix.
+  2026-11-27). `reload_fort.py` kills by PID after confirming the
+  cwd and sets the deblibs LD_LIBRARY_PATH itself (fixed 2026-11-27,
+  cb47dcc).
 - **The daemon:** `.venv/bin/python scripts/dfh.py start|stop|status`.
   HTTP API on `127.0.0.1:8765`, bearer token in
   `~/.config/df-agent-harness/token` (0600). `/v1/health` needs no auth.
@@ -136,6 +137,21 @@ drink), but it is still the workflow for every live run.
 
 - Only committed, verified work. Fetch first. **Never force-push.**
   Never discard commits. Commit with tests.
+- **Pre-push self-review gate (standing rule, Mikey 2026-11-27).**
+  Before ANY push, the authoring agent must re-read the full diff
+  as a critic — not as the author — and check: every function taking
+  untrusted input (model replies, HTTP bodies, Lua JSON) validates
+  types; every error path ends the right thing (tick vs run, 400 vs
+  502); no duplicated blocks; no stale comments or docs; every new
+  public endpoint has an OFFLINE test that hits it, not only a live
+  test. Log the gate in the coordinator log for each push
+  ("pre-push review done, no issues" or the findings). A push
+  without the gate logged is a process violation.
+- **Malformed-input test rule (standing rule, Mikey 2026-11-27).**
+  Any function parsing untrusted input gets a malformed-input test
+  table (parse_model_reply was the first: non-dict kwargs, non-list
+  actions, prose-wrapped JSON, fenced blocks). Apply the same rule
+  to HTTP body coercions and Lua JSON consumers as they are touched.
 - The daemon owns the clock; the agent owns decisions. Agent tools never
   include pause/unpause.
 - The no-stop mandate: do not stop at a milestone, commit, or handoff.

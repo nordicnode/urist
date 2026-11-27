@@ -84,10 +84,12 @@ class TestFarmTaskOffline(unittest.TestCase):
         return daemon
 
     def _run(self, state, site=None, seeds=None, crops=None,
-             jobs_present=True):
+             jobs_present=True, jobs_sequence=None):
         """Run _run_farm_task with stubbed helpers. ``jobs_present``
         True: PlantSeeds jobs appear, then leave (the planting was
-        worked). False: no job ever appears (the diagnosis path)."""
+        worked). False: no job ever appears (the diagnosis path).
+        ``jobs_sequence`` overrides: the per-collect job lists
+        (appear wait reads [0], finish wait reads [1], clamped)."""
         site = site if site is not None else {
             "ok": True,
             "farm": {"soil_tiles": 9, "stone_tiles": 0,
@@ -121,6 +123,9 @@ class TestFarmTaskOffline(unittest.TestCase):
 
         def fake_collect(client, sections=None):
             jobs_calls["n"] += 1
+            if jobs_sequence is not None:
+                idx = min(jobs_calls["n"] - 1, len(jobs_sequence) - 1)
+                return {"jobs": {"list": jobs_sequence[idx]}}
             if not jobs_present:
                 return {"jobs": {"list": []}}
             # First read: the jobs are there; later reads: worked.
@@ -180,6 +185,57 @@ class TestFarmTaskOffline(unittest.TestCase):
         self.assertEqual(calls["act"][0][1]["plant"],
                          "MUSHROOM_HELMET_PLUMP")
         self.assertIn("5 of 9 tiles", res["reason"])
+
+    def test_other_plot_jobs_do_not_satisfy_appear(self):
+        # Scoping (2026-11-27): a PlantSeeds job on another plot's
+        # tiles must not satisfy this task's appear wait — live, jobs
+        # already pending on plot #2 satisfied the appear wait before
+        # plot #5 had any job at all. The plot here is (82-84, 82-84,
+        # z49); the job is at (100, 100, 49).
+        res, _ = self._run(
+            self._plot_state(),
+            jobs_sequence=[[{"id": 301, "type": "PlantSeeds",
+                             "pos": [100, 100, 49]}]])
+        self.assertFalse(res["ok"])
+        self.assertIn("no PlantSeeds job appeared", res["reason"])
+
+    def test_other_plot_jobs_do_not_block_finish(self):
+        # Scoping (2026-11-27): a PlantSeeds job on another plot's
+        # tiles must not block this task's finish wait — live, plot
+        # #2's summer jobs kept the finish wait alive for 350+ s
+        # after plot #5's own job had finished.
+        res, _ = self._run(
+            self._plot_state(),
+            jobs_sequence=[
+                [{"id": 302, "type": "PlantSeeds",
+                  "pos": [83, 83, 49]}],
+                [{"id": 303, "type": "PlantSeeds",
+                  "pos": [100, 100, 49]}]])
+        self.assertTrue(res["ok"], res)
+
+    def test_job_without_pos_counts(self):
+        # A job with no pos cannot be placed, so it counts — fail
+        # toward waiting, never toward a false appear or finish.
+        res, _ = self._run(
+            self._plot_state(),
+            jobs_sequence=[[{"id": 304, "type": "PlantSeeds"}], []])
+        self.assertTrue(res["ok"], res)
+
+    def test_malformed_pos_counts(self):
+        # A job whose pos is not a numeric 3-list (dict, wrong
+        # length, non-numeric) cannot be placed, so it counts — a
+        # malformed entry must never fake an appear or a finish.
+        res, _ = self._run(
+            self._plot_state(),
+            jobs_sequence=[
+                [{"id": 305, "type": "PlantSeeds",
+                  "pos": {"x": 100, "y": 100, "z": 49}},
+                 {"id": 306, "type": "PlantSeeds",
+                  "pos": [100, 100]},
+                 {"id": 307, "type": "PlantSeeds",
+                  "pos": ["a", "b", "c"]}],
+                []])
+        self.assertTrue(res["ok"], res)
 
     def test_light_plot_picks_most_seeds(self):
         site = {"ok": True, "farm": {

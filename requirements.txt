@@ -1,8 +1,13 @@
 # Runtime dependency (the client itself needs only this)
-# Pinned to major 5 (2026-11-27, external review Table 11 row 12):
-# protobuf 6 changed the runtime version check and the generated
-# stubs; an unbounded >=5 would silently upgrade into it.
-protobuf>=5,<6
+# Floor is the generated stubs' gencode version (2026-11-27):
+# every *_pb2.py was generated with grpcio-tools 1.85.4 and
+# demands runtime >= 7.35.1 (ValidateProtobufRuntimeVersion).
+# A lower pin breaks every import with VersionError — the first
+# attempt at this pin (>=5,<6) did exactly that on CI, so the
+# floor is the gencode, not the major the review guessed.
+# If the stubs are ever regenerated with newer grpcio-tools,
+# raise this floor to the new gencode.
+protobuf>=7.35.1,<8
 
 # Dev-only: regenerating the protobuf stubs (scripts/generate_protos.py)
 grpcio-tools>=1.60

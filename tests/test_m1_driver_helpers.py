@@ -282,12 +282,38 @@ class TestSnapshotCitizens(unittest.TestCase):
 class _StubDaemon:
     """Stands in for DaemonClient: post() captures the diary body,
     units_citizens() returns canned fresh records (or raises, to
-    exercise the fallback)."""
+    exercise the fallback). get() answers the pause read;
+    stocks_fresh() returns canned fresh stocks (or raises);
+    daemon_control() answers the loop state. status() raises: the
+    pre-flight must never read the /v1/status lite cache (stale
+    after a daemon restart — the run #17 false refusal)."""
 
-    def __init__(self, fresh=None, fail_fresh=False):
+    def __init__(self, fresh=None, fail_fresh=False, *, paused=True,
+                 drink=38, loop_paused=True, fail_stocks=False):
         self.fresh = fresh or []
         self.fail_fresh = fail_fresh
         self.posted = []
+        self.paused = paused
+        self.drink = drink
+        self.loop_paused = loop_paused
+        self.fail_stocks = fail_stocks
+
+    def get(self, path, timeout=120):
+        if path == "/v1/pause":
+            return {"paused": self.paused}
+        raise AssertionError(f"unexpected GET {path}")
+
+    def stocks_fresh(self):
+        if self.fail_stocks:
+            raise RuntimeError("fresh stocks collect failed")
+        return {"drink_units": self.drink}
+
+    def daemon_control(self):
+        return {"loop_paused": self.loop_paused}
+
+    def status(self):
+        raise AssertionError(
+            "/v1/status must not be called by pre-flight (stale cache)")
 
     def units_citizens(self):
         if self.fail_fresh:
@@ -383,6 +409,84 @@ class TestWriteDiaryFreshCitizens(unittest.TestCase):
         self.assertEqual([c["id"] for c in body["citizens"]], [1, 2])
         self.assertEqual([c["id"] for c in body["citizens_start"]],
                          [1])
+
+
+class TestPreflight(unittest.TestCase):
+    """GUARD 3 decides on FRESH collects, never the snapshot text
+    or the /v1/status lite cache. Run #17 (2026-11-27) was refused
+    on a healthy fort ("drink 0 < 10 floor" + "citizens 0")
+    because snap0 was assembled against stale store baselines from
+    the previous daemon instance and the fallback to /v1/status
+    returned the poller's lite zeros — the fort was actually drink
+    38, 7 citizens, paused."""
+
+    def _driver(self, daemon):
+        drv = m1_driver.M1Driver.__new__(m1_driver.M1Driver)
+        drv.args = SimpleNamespace(mock=True)
+        drv.daemon = daemon
+        drv.tick_no = 0
+        drv.citizens_start_fresh = None
+        self._tmp = tempfile.TemporaryDirectory()
+        drv.out = Path(self._tmp.name) / "log.jsonl"
+        return drv
+
+    def tearDown(self):
+        if hasattr(self, "_tmp"):
+            self._tmp.cleanup()
+
+    def _healthy(self, **kw):
+        kw.setdefault("fresh", [_fresh_citizen(i, f"D{i}")
+                                for i in range(7)])
+        return _StubDaemon(**kw)
+
+    def test_healthy_fort_passes_with_empty_snapshot(self):
+        # The snapshot text is not consulted at all: an empty snap
+        # passes on the fresh reads alone, and the fresh citizen
+        # list is stashed for the diary's run-start sample.
+        drv = self._driver(self._healthy())
+        self.assertEqual(drv._preflight({}), [])
+        self.assertEqual(len(drv.citizens_start_fresh), 7)
+
+    def test_stale_zero_snapshot_passes_when_fresh_is_healthy(self):
+        # The run #17 case: snap0's stale baselines say drink 0
+        # and 0 citizens; the fresh collects say 38 and 7. Pass.
+        snap = {"sections": {
+            "stocks": "Stocks: drink 0, food 25, wood 121, stone 0",
+            "status": "Population: 0 citizens (0 idle, 0 wounded), "
+                      "0 animals, 0 hostiles",
+        }}
+        drv = self._driver(self._healthy())
+        self.assertEqual(drv._preflight(snap), [])
+
+    def test_genuinely_low_drink_refused_on_fresh_value(self):
+        drv = self._driver(self._healthy(drink=5))
+        failures = drv._preflight({})
+        self.assertEqual(len(failures), 1)
+        self.assertIn("drink 5 < 10", failures[0])
+        self.assertIn("fresh collect", failures[0])
+
+    def test_zero_citizens_refused_on_fresh_value(self):
+        drv = self._driver(self._healthy(fresh=[]))
+        failures = drv._preflight({})
+        self.assertTrue(any("citizens 0" in f for f in failures))
+
+    def test_fresh_collect_failure_is_unreadable_not_floor(self):
+        # A failed fresh collect is reported as unreadable — never
+        # as a floor failure on stale data.
+        drv = self._driver(self._healthy(fail_stocks=True))
+        failures = drv._preflight({})
+        self.assertTrue(any("unreadable" in f for f in failures))
+        self.assertFalse(any("floor" in f for f in failures))
+
+    def test_unpaused_game_refused(self):
+        drv = self._driver(self._healthy(paused=False))
+        failures = drv._preflight({})
+        self.assertTrue(any("not paused" in f for f in failures))
+
+    def test_loop_running_refused(self):
+        drv = self._driver(self._healthy(loop_paused=False))
+        failures = drv._preflight({})
+        self.assertTrue(any("loop not paused" in f for f in failures))
 
 
 if __name__ == "__main__":

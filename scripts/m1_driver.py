@@ -154,6 +154,13 @@ class DaemonClient:
         signal. See lua/wealth.lua for the definition."""
         return self.get("/v1/wealth", timeout=120)
 
+    def stocks_fresh(self) -> dict:
+        """Stocks from a fresh collect (GET /v1/stocks). The
+        poller's cached stocks (via /v1/status) go stale after a
+        daemon restart (lite zeros) — a gate that decides whether
+        a run starts must never read them. See _preflight."""
+        return self.get("/v1/stocks", timeout=120)
+
     def status(self) -> dict:
         return self.get("/v1/status", timeout=15)
 
@@ -670,10 +677,22 @@ class M1Driver:
         game paused, drink >= MIN_DRINK, citizens > 0, daemon loop
         paused. Returns the list of failures (empty = pass). A run
         must never start on a drink-0 or running fort (2026-11-26:
-        the game ran free unpaused on drink 0 with no driver)."""
+        the game ran free unpaused on drink 0 with no driver).
+
+        Drink and citizens are decided on FRESH collects, never on
+        the snapshot text or the /v1/status lite cache. Run #17
+        (2026-11-27) was refused on a healthy fort ("drink 0 < 10
+        floor" + "citizens 0") because snap0 was assembled against
+        stale store baselines from the previous daemon instance and
+        the fallback to /v1/status returned the poller's lite zeros
+        — the fort was actually drink 38, 7 citizens, paused. A
+        gate that decides whether a run starts must read fresh
+        state; a fresh collect that fails is reported as
+        "unreadable", never as a floor failure on stale data. The
+        fresh citizen list is stashed as the diary's run-start
+        sample (run() reuses it instead of collecting twice).
+        """
         failures: list[str] = []
-        status = snap.get("sections") or {}
-        status_text = status.get("status", "")
         # Paused: fresh RPC read via GET /v1/pause. The snapshot
         # cannot answer this — paused_read restores the entry pause
         # state after the collect — and /v1/status is the poller's
@@ -687,33 +706,36 @@ class M1Driver:
             paused = None
         if paused is not True:
             failures.append(f"game not paused (paused={paused})")
-        # Drink and citizens come from the snapshot sections. The
-        # stocks section is rendered text; parse the drink units out
-        # of it, and the citizen count out of the status text.
-        import re as _re
-        stocks_text = status.get("stocks", "")
-        m = _re.search(r"drink[^0-9]*(\d+)", stocks_text, _re.I)
-        drink = int(m.group(1)) if m else None
+        # Drink: fresh stocks collect (GET /v1/stocks).
+        drink: int | None = None
+        drink_error: str | None = None
+        try:
+            drink = self.daemon.stocks_fresh().get("drink_units")
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            drink_error = str(exc)[:200]
         if drink is None:
-            # Fall back to the status route's drink figure.
-            try:
-                drink = self.daemon.status().get("drink")
-            except Exception:
-                drink = None
-        if drink is None:
-            failures.append("drink unreadable")
+            failures.append("drink unreadable (fresh stocks collect "
+                            f"failed: {drink_error})")
         elif drink < MIN_DRINK:
             failures.append(
-                f"drink {drink} < {MIN_DRINK} floor")
-        m = _re.search(r"(\d+) citizens", status_text)
-        citizens = int(m.group(1)) if m else None
+                f"drink {drink} < {MIN_DRINK} floor (fresh collect)")
+        # Citizens: fresh full units collect.
+        citizens: int | None = None
+        citizens_error: str | None = None
+        try:
+            fresh = self.daemon.units_citizens()
+            citizens = len(fresh)
+            self.citizens_start_fresh = fresh
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            citizens_error = str(exc)[:200]
         if citizens is None:
-            try:
-                citizens = self.daemon.status().get("population")
-            except Exception:
-                citizens = None
-        if not citizens:
-            failures.append(f"citizens {citizens} (fort dead/empty)")
+            failures.append("citizens unreadable (fresh units collect "
+                            f"failed: {citizens_error})")
+        elif citizens == 0:
+            failures.append("citizens 0 (fort dead/empty; fresh collect)")
+        if not failures:
+            self._log("preflight_fresh", drink=drink,
+                      citizens=citizens)
         try:
             loop_paused = self.daemon.daemon_control().get("loop_paused")
         except Exception as exc:
@@ -872,10 +894,13 @@ class M1Driver:
         # units collect now, while the game is paused at the run's
         # start tick. (The snapshot's units section is diffed away
         # by run end, and snap0's can be stale — neither is a
-        # reliable sample. See _write_diary.)
+        # reliable sample. See _write_diary.) _preflight already
+        # fetched it (the fresh collect that gates the run); reuse
+        # it instead of collecting twice.
         if not self.args.mock:
-            self.citizens_start_fresh = self._fetch_fresh_citizens(
-                "start")
+            if self.citizens_start_fresh is None:
+                self.citizens_start_fresh = self._fetch_fresh_citizens(
+                    "start")
             # The scoring system's run-start fortress value: a fresh
             # collect now, while the game is paused at the run's
             # start tick (same moment as the citizen sample).

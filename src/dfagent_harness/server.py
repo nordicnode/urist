@@ -18,6 +18,9 @@ Routes:
 * ``GET /v1/units``, ``/v1/unit/{id}``, ``/v1/buildings``,
   ``/v1/jobs``, ``/v1/items``, ``/v1/reports``, ``/v1/map``,
   ``/v1/wealth``, ``/v1/cursor`` — read-only state queries.
+  ``GET /v1/stocks`` is a fresh stocks collect (drink/food/wood
+  units), not the poller's cached state — it is the pre-flight
+  gate's source of truth for drink (see below).
   ``/v1/wealth`` is on-demand only (a per-run measurement, not a
   per-tick signal): fortress value as the sum of item values over
   the fort's own items — see lua/wealth.lua and docs/SCORING.md
@@ -495,6 +498,12 @@ def create_server(
                 self._unit(path, get_state)
             elif path == "/v1/buildings":
                 self._section("buildings", collect_section)
+            elif path == "/v1/stocks":
+                # Fresh stocks collect (not the poller's cached
+                # state): the M1 driver's GUARD 3 pre-flight decides
+                # on fresh drink/food/wood, never the stale lite
+                # cache (run #17 false refusal, 2026-11-27).
+                self._section("stocks", collect_section)
             elif path == "/v1/jobs":
                 self._section("jobs", collect_section)
             elif path == "/v1/items":

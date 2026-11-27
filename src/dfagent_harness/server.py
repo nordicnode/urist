@@ -193,6 +193,26 @@ def _action_envelope(result: Any) -> dict[str, Any]:
     return result.to_dict()
 
 
+# -- route matchers -------------------------------------------------
+# The route table (built in create_server) matches the request's
+# normalized path (trailing "/" stripped) against these predicates,
+# in table order. Exact routes and prefix routes are disjoint by
+# construction ("/v1/wiki" does not start with "/v1/wiki/"), so
+# order only matters where a pattern is a prefix of another
+# pattern's match — the table keeps the elif chains' order, so
+# precedence is identical by construction.
+def _exact(path: str) -> Callable[[str], bool]:
+    return lambda p: p == path
+
+
+def _prefix(prefix: str) -> Callable[[str], bool]:
+    return lambda p: p.startswith(prefix)
+
+
+def _prefix_suffix(prefix: str, suffix: str) -> Callable[[str], bool]:
+    return lambda p: p.startswith(prefix) and p.endswith(suffix)
+
+
 def create_server(
         bus: EventBus,
         host: str = "127.0.0.1",
@@ -448,6 +468,121 @@ def create_server(
         spatial_cache["survey"] = built
         return built
 
+    # -- route table --------------------------------------------------
+    # (method, path matcher, handler). Each handler is a small
+    # callable (handler, query, path, body) -> None that invokes
+    # one of the Handler's _xxx methods with the callables it
+    # needs. The table is the router: do_GET/do_POST/do_DELETE
+    # only parse, authenticate, and dispatch through it — the
+    # 49-elif chain it replaces is gone, and the route list is
+    # data (introspectable, testable) instead of control flow.
+    # Order is the elif chains' order, so precedence is identical
+    # by construction. A route's handler is named after the
+    # resource it serves (_units, _diary_read, _task_run, ...).
+    _ROUTES: list[tuple[str, Callable[[str], bool],
+                        Callable[..., None]]] = [
+        ("GET", _exact("/v1/health"),
+         lambda h, q, p, b: h._health()),
+        ("GET", _exact("/v1/state"),
+         lambda h, q, p, b: h._state(get_state)),
+        ("GET", _exact("/v1/status"),
+         lambda h, q, p, b: h._status(get_state)),
+        ("GET", _exact("/v1/units"),
+         lambda h, q, p, b: h._units(q, get_state, collect_section)),
+        ("GET", _prefix("/v1/unit/"),
+         lambda h, q, p, b: h._unit(p, get_state)),
+        ("GET", _exact("/v1/buildings"),
+         lambda h, q, p, b: h._section("buildings", collect_section)),
+        ("GET", _exact("/v1/stocks"),
+         lambda h, q, p, b: h._section("stocks", collect_section)),
+        ("GET", _exact("/v1/jobs"),
+         lambda h, q, p, b: h._section("jobs", collect_section)),
+        ("GET", _exact("/v1/items"),
+         lambda h, q, p, b: h._section("items", collect_section)),
+        ("GET", _exact("/v1/reports"),
+         lambda h, q, p, b: h._section("reports", collect_section)),
+        ("GET", _exact("/v1/map"),
+         lambda h, q, p, b: h._section("map", collect_section)),
+        ("GET", _exact("/v1/wealth"),
+         lambda h, q, p, b: h._section("wealth", collect_section)),
+        ("GET", _exact("/v1/slice"),
+         lambda h, q, p, b: h._slice(q, get_slice)),
+        ("GET", _exact("/v1/column"),
+         lambda h, q, p, b: h._column(q, get_column)),
+        ("GET", _exact("/v1/overview"),
+         lambda h, q, p, b: h._overview(get_overview)),
+        ("GET", _exact("/v1/areas"),
+         lambda h, q, p, b: h._areas(q, get_areas)),
+        ("GET", _prefix("/v1/area/"),
+         lambda h, q, p, b: h._area(p, q, get_areas, get_slice)),
+        ("GET", _exact("/v1/path"),
+         lambda h, q, p, b: h._path(q, get_areas)),
+        ("GET", _exact("/v1/survey"),
+         lambda h, q, p, b: h._survey(q, get_survey)),
+        ("GET", _exact("/v1/sites"),
+         lambda h, q, p, b: h._sites(q)),
+        ("GET", _exact("/v1/attention"),
+         lambda h, q, p, b: h._attention()),
+        ("GET", _exact("/v1/snapshot"),
+         lambda h, q, p, b: h._snapshot()),
+        ("GET", _exact("/v1/pause"),
+         lambda h, q, p, b: h._pause()),
+        ("GET", _exact("/v1/cursor"),
+         lambda h, q, p, b: h._cursor()),
+        ("GET", _exact("/v1/events"),
+         lambda h, q, p, b: h._events(q)),
+        ("GET", _exact("/v1/control/daemon"),
+         lambda h, q, p, b: h._daemon_control()),
+        ("GET", _exact("/v1/journal"),
+         lambda h, q, p, b: h._journal(q)),
+        ("GET", _exact("/v1/diary"),
+         lambda h, q, p, b: h._diary_read()),
+        ("GET", _exact("/v1/diary.html"),
+         lambda h, q, p, b: h._diary_html()),
+        ("GET", _prefix("/v1/memory/why/"),
+         lambda h, q, p, b: h._memory_why(p)),
+        ("GET", _exact("/v1/memory/summary"),
+         lambda h, q, p, b: h._memory_summary()),
+        ("GET", _exact("/v1/wiki"),
+         lambda h, q, p, b: h._wiki(q)),
+        ("GET", _prefix("/v1/wiki/"),
+         lambda h, q, p, b: h._wiki_page(p)),
+        ("GET", _exact("/v1/catalog"),
+         lambda h, q, p, b: h._catalog()),
+        ("GET", _prefix("/v1/catalog/"),
+         lambda h, q, p, b: h._catalog_one(p)),
+        ("GET", _exact("/v1/goals"),
+         lambda h, q, p, b: h._goals_list()),
+        ("GET", _prefix("/v1/goals/"),
+         lambda h, q, p, b: h._goal_get(p)),
+        ("GET", _exact("/v1/tasks"),
+         lambda h, q, p, b: h._tasks_list()),
+        ("GET", _prefix_suffix("/v1/tasks/", "/plan"),
+         lambda h, q, p, b: h._task_plan(p)),
+        ("POST", _prefix("/v1/actions/"),
+         lambda h, q, p, b: h._action(p[len("/v1/actions/"):], b)),
+        ("POST", _prefix("/v1/tasks/"),
+         lambda h, q, p, b: h._task_run(p, b)),
+        ("POST", _exact("/v1/goals"),
+         lambda h, q, p, b: h._goal_create(b)),
+        ("POST", _prefix_suffix("/v1/goals/", "/done"),
+         lambda h, q, p, b: h._goal_done(p)),
+        ("POST", _exact("/v1/control/quicksave"),
+         lambda h, q, p, b: h._quicksave()),
+        ("POST", _exact("/v1/control/advance"),
+         lambda h, q, p, b: h._advance()),
+        ("POST", _exact("/v1/control/advance-clock"),
+         lambda h, q, p, b: h._advance_clock(b)),
+        ("POST", _exact("/v1/control/diary"),
+         lambda h, q, p, b: h._diary_write(b)),
+        ("POST", _exact("/v1/control/daemon/pause"),
+         lambda h, q, p, b: h._daemon_pause(True)),
+        ("POST", _exact("/v1/control/daemon/resume"),
+         lambda h, q, p, b: h._daemon_pause(False)),
+        ("DELETE", _prefix("/v1/goals/"),
+         lambda h, q, p, b: h._goal_delete(p)),
+    ]
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -478,6 +613,19 @@ def create_server(
                 return None, False
             return body, True
 
+        def _dispatch(self, method: str, path: str,
+                      query: dict[str, list[str]],
+                      body: Optional[dict[str, Any]]) -> bool:
+            """Route (method, path) through the route table. The
+            first matching route's handler writes the response.
+            Returns True when a route matched, False when no route
+            matched (the caller answers 404)."""
+            for route_method, match, fn in _ROUTES:
+                if route_method == method and match(path):
+                    fn(self, query, path, body)
+                    return True
+            return False
+
         def do_GET(self) -> None:  # noqa: N802 - http.server naming
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -486,102 +634,7 @@ def create_server(
                 _error(self, 401, "UNAUTHORIZED",
                        "missing or wrong bearer token")
                 return
-            if path == HEALTH_PATH:
-                self._health()
-            elif path == "/v1/state":
-                self._state(get_state)
-            elif path == "/v1/status":
-                self._status(get_state)
-            elif path == "/v1/units":
-                self._units(query, get_state, collect_section)
-            elif path.startswith("/v1/unit/"):
-                self._unit(path, get_state)
-            elif path == "/v1/buildings":
-                self._section("buildings", collect_section)
-            elif path == "/v1/stocks":
-                # Fresh stocks collect (not the poller's cached
-                # state): the M1 driver's GUARD 3 pre-flight decides
-                # on fresh drink/food/wood, never the stale lite
-                # cache (run #17 false refusal, 2026-11-27).
-                self._section("stocks", collect_section)
-            elif path == "/v1/jobs":
-                self._section("jobs", collect_section)
-            elif path == "/v1/items":
-                self._section("items", collect_section)
-            elif path == "/v1/reports":
-                self._section("reports", collect_section)
-            elif path == "/v1/map":
-                self._section("map", collect_section)
-            elif path == "/v1/wealth":
-                self._section("wealth", collect_section)
-            elif path == "/v1/slice":
-                self._slice(query, get_slice)
-            elif path == "/v1/column":
-                self._column(query, get_column)
-            elif path == "/v1/overview":
-                self._overview(get_overview)
-            elif path == "/v1/areas":
-                self._areas(query, get_areas)
-            elif path.startswith("/v1/area/"):
-                self._area(path, query, get_areas, get_slice)
-            elif path == "/v1/path":
-                self._path(query, get_areas)
-            elif path == "/v1/survey":
-                self._survey(query, get_survey)
-            elif path == "/v1/sites":
-                self._sites(query)
-            elif path == "/v1/attention":
-                self._attention()
-            elif path == "/v1/snapshot":
-                self._snapshot()
-            elif path == "/v1/pause":
-                # Fresh RPC read of the pause flag (not the poller's
-                # cached state, which only updates while paused).
-                # Used by run-script pre-flight checks.
-                if client is None:
-                    _error(self, 503, "GAME_NOT_RUNNING",
-                           "no DFHack client")
-                else:
-                    try:
-                        with rpc_lock:
-                            paused = get_paused(client)
-                        _json(self, 200, {"paused": paused})
-                    except Exception as exc:  # noqa: BLE001
-                        _error(self, 503, "RPC_ERROR",
-                               f"pause read failed: {exc}")
-            elif path == "/v1/cursor":
-                self._cursor()
-            elif path == "/v1/events":
-                self._events(query)
-            elif path == "/v1/control/daemon":
-                self._daemon_control()
-            elif path == "/v1/journal":
-                self._journal(query)
-            elif path == "/v1/diary":
-                self._diary()
-            elif path == "/v1/diary.html":
-                self._diary_html()
-            elif path.startswith("/v1/memory/why/"):
-                self._memory_why(path)
-            elif path == "/v1/memory/summary":
-                self._memory_summary()
-            elif path == "/v1/wiki":
-                self._wiki(query)
-            elif path.startswith("/v1/wiki/"):
-                self._wiki_page(path)
-            elif path == "/v1/catalog":
-                self._catalog()
-            elif path.startswith("/v1/catalog/"):
-                self._catalog_one(path)
-            elif path == "/v1/goals":
-                self._goals_list()
-            elif path.startswith("/v1/goals/"):
-                self._goal_get(path)
-            elif path == "/v1/tasks":
-                self._tasks_list()
-            elif path.startswith("/v1/tasks/") and path.endswith("/plan"):
-                self._task_plan(path)
-            else:
+            if not self._dispatch("GET", path, query, None):
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
@@ -596,27 +649,7 @@ def create_server(
             if not ok:
                 return
             assert body is not None
-            if path.startswith("/v1/actions/"):
-                self._action(path[len("/v1/actions/"):], body)
-            elif path.startswith("/v1/tasks/"):
-                self._task_run(path, body)
-            elif path == "/v1/goals":
-                self._goal_create(body)
-            elif path.startswith("/v1/goals/") and path.endswith("/done"):
-                self._goal_done(path)
-            elif path == "/v1/control/quicksave":
-                self._quicksave()
-            elif path == "/v1/control/advance":
-                self._advance()
-            elif path == "/v1/control/advance-clock":
-                self._advance_clock(body)
-            elif path == "/v1/control/diary":
-                self._diary(body)
-            elif path == "/v1/control/daemon/pause":
-                self._daemon_pause(True)
-            elif path == "/v1/control/daemon/resume":
-                self._daemon_pause(False)
-            else:
+            if not self._dispatch("POST", path, {}, body):
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
@@ -627,9 +660,7 @@ def create_server(
                 _error(self, 401, "UNAUTHORIZED",
                        "missing or wrong bearer token")
                 return
-            if path.startswith("/v1/goals/"):
-                self._goal_delete(path)
-            else:
+            if not self._dispatch("DELETE", path, {}, None):
                 _error(self, 404, "NOT_FOUND",
                        f"unknown endpoint: {path}")
 
@@ -654,6 +685,22 @@ def create_server(
                 "df_reachable": reachable,
                 "version": version,
             })
+
+        def _pause(self) -> None:
+            # Fresh RPC read of the pause flag (not the poller's
+            # cached state, which only updates while paused).
+            # Used by run-script pre-flight checks.
+            if client is None:
+                _error(self, 503, "GAME_NOT_RUNNING",
+                       "no DFHack client")
+                return
+            try:
+                with rpc_lock:
+                    paused = get_paused(client)
+                _json(self, 200, {"paused": paused})
+            except Exception as exc:  # noqa: BLE001
+                _error(self, 503, "RPC_ERROR",
+                       f"pause read failed: {exc}")
 
         def _state(self, get_state_fn: Callable[[], dict[str, Any]]
                    ) -> None:
@@ -1332,7 +1379,7 @@ def create_server(
                               "counts": daemon.journal.decision_counts()})
 
         # -- diary + memory (GOAL.md step 4) --------------------------
-        def _diary(self) -> None:
+        def _diary_read(self) -> None:
             # The diary: entries parsed from diary.md in the daemon
             # state dir. No game read.
             from .daemon import default_state_dir
@@ -2036,7 +2083,7 @@ def create_server(
                 "sleep_s": sleep_s,
                 "unpaused_s": round(unpaused_s, 3)})
 
-        def _diary(self, body: dict[str, Any]) -> None:
+        def _diary_write(self, body: dict[str, Any]) -> None:
             # POST /v1/control/diary — write the diary entry for a
             # completed M1 day. The daemon's planner loop is paused
             # during M1 runs, so its day-boundary trigger never

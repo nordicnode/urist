@@ -62,6 +62,20 @@ class TestServer(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(json.loads(body)["error"]["code"], "NOT_FOUND")
 
+    def test_diary_route_returns_entries(self):
+        # GET /v1/diary reads diary.md from the state dir — no
+        # game read. This caught a real bug: the POST _diary(body)
+        # shadowed the GET _diary() in the same class, so GET
+        # /v1/diary raised TypeError and dropped the connection
+        # (the live test_diary_route failed the same way). The
+        # two are now _diary_read / _diary_write.
+        status, _headers, body = self._get("/v1/diary")
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertIn("entries", data)
+        self.assertIn("count", data)
+        self.assertEqual(data["count"], len(data["entries"]))
+
     def test_events_json_array(self):
         status, _headers, body = self._get("/v1/events?limit=2")
         self.assertEqual(status, 200)

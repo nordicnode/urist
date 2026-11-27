@@ -31,6 +31,10 @@ scripts/               CLIs: dfh (daemon), dfh-observe, dfh-act,
 docs/                  OBSERVE.md, ACTIONS.md, EVENTS.md, DAEMON.md,
                        PLANNER.md, PROTOCOL.md, ACCEPTANCE.md,
                        DIALOGS.md, ADVANCED_MECHANICS.md, SETUP.md
+assets/                logo.png + headings/*.png (Kruggsmash tileset
+                       glyphs), kruggsmash-tileset.png (source),
+                       build-logo.py + build-readme-images.py
+                       (generators — run with system python3)
 tests/                 unit tests plus live tests against a running fort
 third_party/df_47_05/  DF + DFHack install (gitignored)
 third_party/downloads/ original tarballs (kept, never re-download)

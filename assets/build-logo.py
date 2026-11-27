@@ -19,7 +19,9 @@ import urllib.request
 from PIL import Image
 import numpy as np
 
-SRC = "/tmp/kruggsmash-tileset.png"
+# The tileset lives in the repo now (committed with the README
+# glyphs, 2026-11-27); fetch from the URL only if it is missing.
+SRC = Path(__file__).resolve().parent / "kruggsmash-tileset.png"
 SRC_URL = "https://i.imgur.com/SVAmWwD.png"
 OUT = Path(__file__).resolve().parent / "logo.png"
 

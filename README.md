@@ -13,9 +13,9 @@
   digging, building, brewing, and keeping everyone alive, with no human at the keyboard.
 </p>
 
----
+<p align="center"><img src="assets/headings/divider.png" alt="Dwarf Fortress divider" width="710"></p>
 
-## What it is
+## <img src="assets/headings/what-it-is.png" alt="What it is" width="352">
 
 Urist is a harness that lets any AI play Dwarf Fortress fortress mode autonomously.
 It sits between the game and the AI: it reads the full state of the fort, turns it
@@ -29,7 +29,7 @@ depends on one particular AI, its memory, or its tooling.
 It is pinned to **Dwarf Fortress 0.47.05** with **DFHack 0.47.05-r8**. That version
 is a deliberate choice, not a limitation.
 
-## Status
+## <img src="assets/headings/status.png" alt="Status" width="222">
 
 In active development. The foundation is built and verified against a live game,
 and **M1 is done**: the AI played a full in-game day, built a still, and brewed
@@ -51,7 +51,7 @@ drink that completed and raised the fort's drink stock.
 Urist does not yet play a fort end to end with no intervention. That is the goal
 it is being built toward.
 
-## How it works
+## <img src="assets/headings/how-it-works.png" alt="How it works" width="417">
 
 Four layers, each verified live before the next is built:
 
@@ -65,7 +65,7 @@ Four layers, each verified live before the next is built:
 The AI never touches the game directly. It has no vision and no keystrokes:
 everything goes through the harness API.
 
-## The diary
+## <img src="assets/headings/the-diary.png" alt="The diary" width="320">
 
 At the end of every in-game day, the AI writes one entry about the fort —
 a story, not a list. It reads like a Boatmurdered chronicle: what happened,
@@ -100,7 +100,7 @@ needs sharpening so the AI counts carefully instead of generalizing
 ("name exactly which dwarves are wounded; do not claim all of them are
 unless the facts say all of them are").
 
-## More systems
+## <img src="assets/headings/more-systems.png" alt="More systems" width="417">
 
 - **Placement.** The harness computes verified-free build sites — occupancy,
   shrubs and plants, units, terrain, and whether a dwarf can actually reach
@@ -124,7 +124,7 @@ Planned, not built: a scoring system that benchmarks models on the same
 start save and tick budget (survival, lives, wealth, needs, growth,
 competence, threats, milestones), with a leaderboard.
 
-## Design principles
+## <img src="assets/headings/design-principles.png" alt="Design principles" width="580">
 
 - **AI-agnostic.** Any model, any provider. The protocol is the interface.
 - **Everything through the API.** No screenshots, no simulated keystrokes for
@@ -142,7 +142,7 @@ competence, threats, milestones), with a leaderboard.
   snapshot each tick; the AI pulls full detail on demand. Nothing assumes a
   large context window.
 
-## Quickstart
+## <img src="assets/headings/quickstart.png" alt="Quickstart" width="352">
 
 Requirements: Linux, Python 3.12, Dwarf Fortress 0.47.05, DFHack 0.47.05-r8,
 and Xvfb. Full setup, with exact download URLs and checksums, is in
@@ -169,7 +169,7 @@ Put a DF 0.47.05 install with DFHack r8 in `third_party/df_47_05/`
 .venv/bin/python scripts/dfh.py status
 ```
 
-## The agent protocol
+## <img src="assets/headings/the-agent-protocol.png" alt="The agent protocol" width="612">
 
 The daemon serves HTTP on `127.0.0.1:8765`:
 
@@ -182,7 +182,7 @@ The daemon serves HTTP on `127.0.0.1:8765`:
 The per-tick snapshot is an index into the full state: it always names what
 exists, with ids, and the AI pulls full detail for anything it needs.
 
-## Project layout
+## <img src="assets/headings/project-layout.png" alt="Project layout" width="482">
 
 ```
 src/dfagent_harness/   the harness: observe, actions, events, planner, daemon, server
@@ -193,7 +193,7 @@ docs/                  OBSERVE.md, ACTIONS.md, EVENTS.md, SETUP.md
 tests/                 unit tests plus live tests against a running fort
 ```
 
-## Roadmap
+## <img src="assets/headings/roadmap.png" alt="Roadmap" width="255">
 
 1. ~~Planner and daemon live on a real fort, keeping it alive through a full
    in-game day.~~ **Done (M1):** a full in-game day with a brew that completed
@@ -207,7 +207,7 @@ tests/                 unit tests plus live tests against a running fort
 5. An MCP server over the same API, so a Freebuff agent gets Urist as native
    tools instead of shelling out to the CLI.
 
-## Set it up with your AI
+## <img src="assets/headings/set-it-up-with-your-ai.png" alt="Set it up with your AI" width="742">
 
 Copy the block below and paste it to your AI. It will set up the whole
 project for you. No further input from you is needed unless a step fails —
@@ -330,11 +330,11 @@ skipping them. When in doubt, read docs/SETUP.md and
 scripts/recover.sh — they are the sources of truth for this setup.
 ```
 
-## License
+## <img src="assets/headings/license.png" alt="License" width="255">
 
 MIT. See [LICENSE](LICENSE).
 
-## Links
+## <img src="assets/headings/links.png" alt="Links" width="190">
 
 - [Dwarf Fortress](https://www.bay12games.com/dwarves/) — the game, by Bay 12 Games
 - [DFHack](https://github.com/DFHack/dfhack) — the modding API this harness drives

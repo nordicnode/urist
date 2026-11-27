@@ -369,10 +369,11 @@ class TestDiffDetectorJobsReportsStocks(unittest.TestCase):
         self.assertEqual(found[0]["severity"], "warning")
 
     def test_manager_order_disappearance(self):
+        # A vanished order with nothing left was fulfilled.
         s1 = copy.deepcopy(self.base)
         s1["jobs"]["manager_orders"] = [{
             "id": 1, "job_type": 123, "job_type_name": "MakeBarrel",
-            "amount_left": 5, "amount_total": 5}]
+            "amount_left": 0, "amount_total": 5}]
         s1["jobs"]["manager_order_count"] = 1
         self.det.detect(s1)
         found = self.det.detect(copy.deepcopy(self.base))
@@ -380,6 +381,47 @@ class TestDiffDetectorJobsReportsStocks(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0]["data"]["manager_order_id"], 1)
         self.assertEqual(completed[0]["data"]["job_type"], "MakeBarrel")
+
+    def test_manager_order_removed_with_work_left(self):
+        # Table 6 row 2: an order that vanishes with work remaining
+        # was removed, not completed — it must not be reported as a
+        # completion. (The old test encoded the bug: amount_left 5
+        # expected job_completed.)
+        s1 = copy.deepcopy(self.base)
+        s1["jobs"]["manager_orders"] = [{
+            "id": 1, "job_type": 123, "job_type_name": "MakeBarrel",
+            "amount_left": 5, "amount_total": 5}]
+        s1["jobs"]["manager_order_count"] = 1
+        self.det.detect(s1)
+        found = self.det.detect(copy.deepcopy(self.base))
+        self.assertEqual(by_type(found, "job_completed"), [])
+        removed = by_type(found, "order_removed")
+        self.assertEqual(len(removed), 1)
+        self.assertEqual(removed[0]["data"]["manager_order_id"], 1)
+        self.assertEqual(removed[0]["data"]["amount_left"], 5)
+
+    def test_lingering_cancel_does_not_suppress_later_completion(self):
+        # H9: a 'cancels' report lingering in the last-20 tail used
+        # to suppress every job_completed each poll until it scrolled
+        # out. Only cancels that arrived in THIS batch count.
+        s1 = copy.deepcopy(self.base)
+        s1["jobs"]["list"] = [{"id": 7, "type": "FellTree",
+                               "pos": [110, 98, 32]}]
+        s1["jobs"]["count"] = 1
+        s1["reports"]["announcements"] = list(
+            self.base["reports"]["announcements"]) + [{
+                "text": "Udil cancels Fell Tree: Needs logs",
+                "year": 306, "time": 94000, "pos": [110, 98, 32]}]
+        self.det.detect(s1)
+        # Same cancel still in the tail, but the job is now gone:
+        # the cancel is old, so the disappearance is a completion.
+        s2 = copy.deepcopy(s1)
+        s2["jobs"]["list"] = []
+        s2["jobs"]["count"] = 0
+        found = self.det.detect(s2)
+        completed = by_type(found, "job_completed")
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["data"]["job_id"], 7)
 
     def test_new_report_and_no_refire(self):
         self.det.detect(self.base)
@@ -445,6 +487,24 @@ class TestEventBus(unittest.TestCase):
             self.assertEqual(stamped["seq"], i + 1)
             self.assertEqual(stamped["id"], f"evt-{i + 1}")
         self.assertEqual([e["seq"] for e in seen], [1, 2, 3])
+
+    def test_hostile_threat_and_spawn_share_dedup_key(self):
+        # Table 6 row 1: the same hostile emitted 'threat' (poll)
+        # and 'hostile_spawn' (eventful) under different keys, so
+        # the bus never collapsed them and the agent saw two
+        # critical events for one creature. Both now use threat:{uid}.
+        bus = ev.EventBus()
+        threat = ev.make_event("threat", "critical",
+                               {"unit_id": 42, "name": "Troll",
+                                "race": "TROLL", "pos": [1, 2, 3]},
+                               dedup_key="threat:42")
+        self.assertIsNotNone(bus.publish(threat))
+        spawn = ev.watcher_record_to_event({
+            "kind": "UNIT_NEW_ACTIVE", "hostile": True,
+            "unit_id": 42, "name": "Troll", "race": "TROLL",
+            "pos": [1, 2, 3]})
+        self.assertEqual(spawn["dedup_key"], "threat:42")
+        self.assertIsNone(bus.publish(spawn))
 
     def test_dedup_and_ring_eviction(self):
         bus = ev.EventBus(maxlen=3)

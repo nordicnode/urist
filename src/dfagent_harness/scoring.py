@@ -567,9 +567,15 @@ def compute_score(run_log: str | Path,
         beds_built = 1
 
     # -- threats: 'threat' / 'hostile_spawn' events in the run window.
+    # Counted per distinct creature (unit_id), not per event: the
+    # same hostile used to emit both a 'threat' (poll diff) and a
+    # 'hostile_spawn' (eventful) event, double-counting one creature
+    # (2026-11-27, external review Table 6 row 1). Events without a
+    # unit_id cannot be deduped and count individually.
     threats_faced = 0
     if events_path is not None:
         try:
+            seen_units: set[Any] = set()
             with open(events_path, encoding="utf-8") as f:
                 for line in f:
                     try:
@@ -580,7 +586,12 @@ def compute_score(run_log: str | Path,
                     if (t is not None and start_tick <= t <= last_tick
                             and ev.get("type") in ("threat",
                                                    "hostile_spawn")):
-                        threats_faced += 1
+                        uid = (ev.get("data") or {}).get("unit_id")
+                        if uid is not None:
+                            seen_units.add(uid)
+                        else:
+                            threats_faced += 1
+            threats_faced += len(seen_units)
         except OSError:
             threats_faced = 0
 

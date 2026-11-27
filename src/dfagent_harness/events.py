@@ -618,6 +618,22 @@ class DiffDetector:
         po, co = _orders(prev), _orders(state)
         for oid, o in po.items():
             if oid not in co:
+                left = o.get("amount_left")
+                if left is not None and left > 0:
+                    # Removed with work remaining — not a
+                    # completion. An explicit manager_order_remove
+                    # by the harness lands here too (2026-11-27,
+                    # external review Table 6 row 2).
+                    events.append(make_event(
+                        "order_removed", "notice",
+                        {"manager_order_id": oid,
+                         "job_type": o.get("job_type_name")
+                         or o.get("job_type"),
+                         "amount_left": left,
+                         "amount_total": o.get("amount_total")},
+                        tick=tick, year=year,
+                        dedup_key=f"order_removed:{oid}"))
+                    continue
                 events.append(make_event(
                     "job_completed", "info",
                     {"manager_order_id": oid,
@@ -628,11 +644,22 @@ class DiffDetector:
         return events
 
     def _cancels_in(self, state: dict[str, Any]) -> bool:
+        # Only cancels among reports NOT already seen count: the
+        # tail holds the last 20 reports, so a lingering 'X cancels
+        # Y' used to suppress every job_completed each poll until
+        # it scrolled out — and a cancel that scrolled out yielded
+        # a false completion (2026-11-27, external review H9).
+        # _diff_reports runs after _diff_jobs, so _seen_reports
+        # holds exactly the previous polls' reports: a cancel is
+        # "new" here iff it arrived in this batch.
         reports = state.get("reports") or {}
         for key in ("announcements", "reports"):
             for e in reports.get(key) or []:
-                if isinstance(e, dict) and "cancels" in \
-                        str(e.get("text") or "").lower():
+                if not isinstance(e, dict):
+                    continue
+                if _report_key(e) in self._seen_reports:
+                    continue
+                if "cancels" in str(e.get("text") or "").lower():
                     return True
         return False
 
@@ -927,12 +954,18 @@ def watcher_record_to_event(
         if not record.get("hostile"):
             return None
         uid = record.get("unit_id")
+        # The dedup key is shared with the poll diff's 'threat'
+        # event (threat:{uid}): the same hostile used to emit both
+        # under different keys, so the bus's cross-source dedup
+        # never collapsed them and the agent saw two critical
+        # events for one creature (2026-11-27, external review
+        # Table 6 row 1). Whichever publishes first wins.
         return make_event(
             "hostile_spawn", "critical",
             {"unit_id": uid, "name": record.get("name"),
              "race": record.get("race"), "pos": record.get("pos")},
             source="eventful", tick=tick, year=year,
-            dedup_key=(f"hostile_spawn:{uid}"
+            dedup_key=(f"threat:{uid}"
                        if uid is not None else None))
     return None
 

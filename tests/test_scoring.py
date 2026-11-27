@@ -393,6 +393,28 @@ class TestComputeScore(unittest.TestCase):
             self.assertEqual(score.dimensions["needs"], 100.0)
 
 
+class TestThreatsFacedDistinct(unittest.TestCase):
+    def test_same_creature_twice_counts_once(self):
+        # Table 6 row 1: one hostile emitted both a 'threat' (poll)
+        # and a 'hostile_spawn' (eventful) event; threats_faced
+        # counted the creature twice. It counts distinct unit_ids.
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            log = _synthetic_log(tmp)
+            events = tmp / "events.jsonl"
+            events.write_text("\n".join([
+                json.dumps({"type": "threat", "tick": 101500,
+                            "data": {"unit_id": 42}}),
+                json.dumps({"type": "hostile_spawn", "tick": 101600,
+                            "data": {"unit_id": 42}}),
+                json.dumps({"type": "threat", "tick": 101700,
+                            "data": {"unit_id": 43}}),
+            ]) + "\n")
+            score = scoring.compute_score(log, store=None,
+                                          events_path=events)
+            self.assertEqual(score.evidence["threats_faced"], 2)
+
+
 class TestLeaderboard(unittest.TestCase):
     def test_record_and_list(self):
         with tempfile.TemporaryDirectory() as d:

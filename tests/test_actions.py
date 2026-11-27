@@ -679,6 +679,9 @@ class TestSiteFixHint(unittest.TestCase):
             ["tile 96,95 is SHRUB; plant at 96,95"])
         self.assertIn("designate_gather", hint)
         self.assertIn("96,95", hint)
+        # M1 run #7 tick 4 retried the build before the gather
+        # finished: the hint must say to wait for it.
+        self.assertIn("wait for the gather to finish", hint)
 
     def test_unit_blocker_names_wait_or_move(self):
         hint = actions._site_fix_hint(["tile 97,95 has a unit"])

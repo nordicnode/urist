@@ -306,7 +306,30 @@ class TestSuggest(unittest.TestCase):
         self.assertIn("build_workshop kind=still at 96, 105, 175", out)
 
     def test_nothing_urgent_no_suggestion(self):
-        self.assertIsNone(suggest(_state(), []))
+        # No attention items, a still present, drink plentiful:
+        # nothing urgent, so no suggestion. (A no-still state
+        # with finite drink DOES get the proactive still-build
+        # suggestion even with no attention items.)
+        st = _state(buildings={
+            "summary": [{"type": "Workshop", "count": 1}],
+            "list": [{"id": 1, "type": "Workshop",
+                      "subtype": "Still"}]})
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["drink_units"] = 120
+        self.assertIsNone(suggest(st, []))
+
+    def test_proactive_still_suggestion_without_drink_item(self):
+        # M1 run #7 tick 1: drink 32 is above the attention warn
+        # threshold (20), so no drink item fired and the model got
+        # no suggestion and no site coordinate. The fallback fires
+        # the still build proactively when there is no still and
+        # drink is finite (< 50).
+        st = _state()
+        st["stocks"] = dict(st["stocks"])
+        st["stocks"]["drink_units"] = 32
+        out = suggest(st, [])
+        self.assertIn("NO STILL EXISTS", out)
+        self.assertIn("build_workshop kind=still", out)
 
 
 class TestBuildingsAndStocksVisibility(unittest.TestCase):
@@ -322,11 +345,17 @@ class TestBuildingsAndStocksVisibility(unittest.TestCase):
             "list": [{"id": 7, "type": "Workshop",
                       "subtype": "Carpenters",
                       "construction_stage": 3}]})
-        text, _short = _buildings(st)
+        text, short = _buildings(st)
         self.assertIn("Carpenters (built)", text)
         self.assertIn("Still: none", text)
         self.assertIn("Bed x10", text)
         self.assertNotIn("Workshop x", text)
+        # The short form is the diffed one-liner ("buildings:
+        # unchanged (SHORT)"). It must carry the subtypes too:
+        # M1 run #7 tick 6 re-asked what the building was because
+        # the one-liner said only "1 buildings".
+        self.assertIn("Carpenters (built)", short)
+        self.assertIn("Still: none", short)
 
     def test_buildings_names_still_when_present(self):
         st = _state(buildings={

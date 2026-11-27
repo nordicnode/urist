@@ -385,7 +385,13 @@ def _buildings(state: dict[str, Any]) -> tuple[str, str]:
     for e in [e for e in summary if e.get("type") != "Workshop"][:12]:
         parts.append(f"{e.get('type')} x{e.get('count')}")
     lines = ["Buildings: " + ", ".join(parts) + "."]
-    return "\n".join(lines), f"{len(lst)} buildings"
+    # The short form is what the diffed one-liner shows when the
+    # section is unchanged ("buildings: unchanged (SHORT)"). It
+    # must carry the workshop subtypes, not just a count: M1 run
+    # #7 tick 6 regressed to asking "what the one existing building
+    # is" because the one-liner said only "1 buildings" and the
+    # model had lost the subtype.
+    return "\\n".join(lines), ", ".join(parts)
 
 
 def _brewable_plants(stocks: dict[str, Any]) -> int:
@@ -546,6 +552,23 @@ def _free_workshop_site(
     return None
 
 
+def _still_build_suggestion(
+        sites: Optional[dict[str, Any]]) -> str:
+    """The still-build suggestion text (shared by the low-drink
+    branch and the proactive fallback). Names a concrete free site
+    when one is known."""
+    site = _free_workshop_site(sites)
+    at = (f" at {site[0]}, {site[1]}, {site[2]}"
+          if site else "")
+    return ("Suggested action: NO STILL EXISTS, so "
+            "brewing is impossible until you build one. "
+            "Build a still FIRST: build_workshop "
+            f"kind=still{at} (a probe-verified free 3x3 "
+            "site). If the build reports 'site not free', "
+            "gather the blocking plant or use the next "
+            "free site. Only then run the brew task.")
+
+
 def suggest(state: dict[str, Any],
             attention_items: list[dict[str, Any]],
             sites: Optional[dict[str, Any]] = None) -> Optional[str]:
@@ -568,9 +591,7 @@ def suggest(state: dict[str, Any],
     M1 run #6, "the observation gives no free ground
     coordinates".
     """
-    if not attention_items:
-        return None
-    for item in attention_items:
+    for item in attention_items or []:
         kind = item.get("kind")
         text = item.get("text", "")
         # A hostile is the most urgent problem: look at it first.
@@ -587,22 +608,26 @@ def suggest(state: dict[str, Any],
         # itself, first, and only then the brew task.
         if "drink" in text.lower() or "thirst" in text.lower():
             if not _has_workshop(state, "Still"):
-                site = _free_workshop_site(sites)
-                at = (f" at {site[0]}, {site[1]}, {site[2]}"
-                      if site else "")
-                return ("Suggested action: NO STILL EXISTS, so "
-                        "brewing is impossible until you build one. "
-                        "Build a still FIRST: build_workshop "
-                        f"kind=still{at} (a probe-verified free 3x3 "
-                        "site). If the build reports 'site not free', "
-                        "gather the blocking plant or use the next "
-                        "free site. Only then run the brew task.")
+                return _still_build_suggestion(sites)
             return ("Suggested action: run the brew task "
                     "(POST /v1/tasks/brew) — the fort is short on "
                     "drink and brewing turns plants into drink.")
         if "food" in text.lower() or "hunger" in text.lower():
             return ("Suggested action: run the cook task "
                     "(POST /v1/tasks/cook) — the fort is short on food.")
+    # Proactive fallback: no attention item fired, but there is no
+    # still and drink is finite. A fort with no still can never
+    # make more drink, so building one is the top priority well
+    # before drink hits the attention warn threshold (20): M1 run
+    # #7 tick 1 stalled at drink 32 with no suggestion and no site
+    # coordinate. The 50 bound is ~10 days at the measured ~5/day
+    # burn — enough lead time to build + gather + brew before
+    # drink runs out. Threats and low-drink/food items above take
+    # precedence; this only fires when nothing else did.
+    if not _has_workshop(state, "Still"):
+        drink = (state.get("stocks") or {}).get("drink_units")
+        if isinstance(drink, int) and drink < 50:
+            return _still_build_suggestion(sites)
     return None
 
 

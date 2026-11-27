@@ -973,6 +973,7 @@ def _site_fix_hint(problems: list[str]) -> str:
     if "shrub" in lower or "plant" in lower:
         return ("Fix: gather the blocking plant(s) first "
                 f"(designate_gather on a small box covering{tile}), "
+                "wait for the gather to finish (advance the clock), "
                 "then retry the build — or pick a different free "
                 "3x3 site.")
     if "unit" in lower:

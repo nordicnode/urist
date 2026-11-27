@@ -52,10 +52,15 @@ SECTIONS = (
     "reports",
     "map",
     "designations",
+    "wealth",
 )
 
-#: Sections collected by default (``all`` minus the slow block scan).
-FAST_SECTIONS = tuple(s for s in SECTIONS if s != "designations")
+#: Sections collected by default (``all`` minus the slow block scan and
+#: the on-demand-only sections). ``wealth`` is on-demand only: it is a
+#: per-run measurement (run start / run end), not a per-tick signal,
+#: and the item-value pass is too slow to run every tick.
+FAST_SECTIONS = tuple(s for s in SECTIONS
+                      if s not in ("designations", "wealth"))
 
 #: Lua file that backs each section. ``stocks`` and ``items`` share one.
 _SECTION_LUA: dict[str, str] = {
@@ -68,6 +73,7 @@ _SECTION_LUA: dict[str, str] = {
     "reports": "reports.lua",
     "map": "map.lua",
     "designations": "designations.lua",
+    "wealth": "wealth.lua",
 }
 
 #: Which top-level keys each Lua file's JSON provides.
@@ -81,6 +87,7 @@ _LUA_PROVIDES: dict[str, tuple[str, ...]] = {
     "reports.lua": ("reports",),
     "map.lua": ("map",),
     "designations.lua": ("designations",),
+    "wealth.lua": ("wealth",),
 }
 
 _LUA_DIR = Path(__file__).resolve().parent / "lua"

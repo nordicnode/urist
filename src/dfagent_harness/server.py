@@ -17,7 +17,11 @@ Routes:
 * ``GET /v1/status`` — compact status (population, stocks, threats).
 * ``GET /v1/units``, ``/v1/unit/{id}``, ``/v1/buildings``,
   ``/v1/jobs``, ``/v1/items``, ``/v1/reports``, ``/v1/map``,
-  ``/v1/cursor`` — read-only state queries.
+  ``/v1/wealth``, ``/v1/cursor`` — read-only state queries.
+  ``/v1/wealth`` is on-demand only (a per-run measurement, not a
+  per-tick signal): fortress value as the sum of item values over
+  the fort's own items — see lua/wealth.lua and docs/SCORING.md
+  for the exact definition and what it is not.
 * ``GET /v1/slice?x0&y0&z&x1&y1&layer`` — one ASCII slice
   (world-model design §3.4; max 64x64, ``&full=1`` for a full
   z-level, flagged expensive). Coordinate rulers, the fort-centre
@@ -499,6 +503,8 @@ def create_server(
                 self._section("reports", collect_section)
             elif path == "/v1/map":
                 self._section("map", collect_section)
+            elif path == "/v1/wealth":
+                self._section("wealth", collect_section)
             elif path == "/v1/slice":
                 self._slice(query, get_slice)
             elif path == "/v1/column":

@@ -386,6 +386,26 @@ def test_placement_anchor_falls_back_to_areas():
     assert from_pos == (95, 95, 175)
 
 
+def test_placement_anchor_no_citizens_returns_none_from_pos():
+    # H6 (2026-11-27, external review): with buildings but no
+    # citizen positions, the from-point was centres[0] — a building
+    # centre, occupied ground the docstring says must never be the
+    # from-point. canWalkBetween from it fails for every candidate,
+    # so all sites came back unreachable. It is now None, and
+    # find_sites reports "reachability_unchecked" instead.
+    state = {
+        "buildings": {"list": [
+            {"center": [93, 105, 175]},
+            {"center": [95, 105, 175]},
+        ]},
+        "units": {"citizens": []},
+    }
+    centre, surface_z, from_pos = placement.placement_anchor(state)
+    assert centre == (94, 105)
+    assert surface_z == 175
+    assert from_pos is None
+
+
 def test_placement_anchor_raises_with_nothing():
     with pytest.raises(ValueError):
         placement.placement_anchor(

@@ -107,11 +107,17 @@ def _hazard_at(col: dict[str, Any], z: int) -> Optional[str]:
 
 
 def _open_above(col: dict[str, Any], z: int) -> bool:
-    """True when the level above z is open (air / open sky / floor
-    the dwarf stands on is not open — the level above must be open
-    space for the dwarf to be there)."""
+    """True when the level above z is open space — air, passage,
+    open space, cavern space, or open sky. A FLOOR above is NOT
+    open: it is a slab (a second story, or the surface floor over
+    a dug room), so the tile below is not on the surface and its
+    reachability must be proven by the areas check instead. The
+    old code counted 'floor' as open, so every buried floor under
+    another floor was declared 'surface / reachable' with no
+    verification at all (found live 2026-11-27 on the scratch
+    fort's farm-room floor at (82,82,49))."""
     cls = _class_at(col, z + 1)
-    return cls in ("air", "floor", "passage", "open space",
+    return cls in ("air", "passage", "open space",
                    "cavern space", "open sky")
 
 
@@ -257,13 +263,24 @@ def check_dig_box(client: DFHackClient,
     the box check reads the neighbours too). Returns the same shape
     as check_dig_site, with the first failing tile named."""
     x0, y0, z0, x1, y1, z1 = box
+    if z0 != z1:
+        # A dig box is one layer (H8, 2026-11-27): the Lua helpers
+        # only touch z0, so a multi-z box would check every layer
+        # here and designate only one. Refuse at the boundary.
+        return {"ok": False, "reachable": None, "hazards": [],
+                "reason": (f"box {list(box)} spans z{z0}..z{z1}: dig "
+                           "boxes are one layer (z0 must equal z1)"),
+                "detail": {}}
     all_hazards: list[str] = []
+    seen_unknown = False
     for x in range(x0, x1 + 1):
         for y in range(y0, y1 + 1):
             for z in range(z0, z1 + 1):
                 one = check_dig_site(client, x, y, z, mode,
                                      areas=areas, surface_z=surface_z)
                 all_hazards.extend(one["hazards"])
+                if one["reachable"] is None:
+                    seen_unknown = True
                 if not one["ok"]:
                     return {"ok": False,
                             "reachable": one["reachable"],
@@ -288,6 +305,17 @@ def check_dig_box(client: DFHackClient,
                 "reason": (f"no dwarf can reach box {list(box)} to "
                            f"dig {mode} — no open tile beside it at "
                            f"the same level"),
+                "detail": {}}
+    if seen_unknown:
+        # A tile whose reachability could not be determined (no
+        # areas, not on the surface) must not be reported as
+        # verified-reachable — the old code returned a literal
+        # True here (2026-11-27, external review H5). The dig
+        # still proceeds (ok=True): the job wait is the proof.
+        return {"ok": True, "reachable": None, "hazards": all_hazards,
+                "reason": (f"box {list(box)} {mode}: reachability "
+                           "unknown — no areas data and not on the "
+                           "surface"),
                 "detail": {}}
     return {"ok": True, "reachable": True, "hazards": all_hazards,
             "reason": f"box {list(box)} {mode}: reachable, no hazard",
@@ -328,6 +356,12 @@ def verify_dig(client: DFHackClient, box: tuple[int, ...],
         raise ValueError(
             f"verify_dig: unknown dig mode {mode!r} "
             f"(want one of {sorted(EXPECTED_DIG_CLASS)})")
+    if z0 != z1:
+        # A dig box is one layer (H8, 2026-11-27): the probe only
+        # reads z0, so a multi-z box could never verify honestly.
+        raise ValueError(
+            f"verify_dig: box {list(box)} spans z{z0}..z{z1} — dig "
+            f"boxes are one layer (z0 must equal z1)")
     probe = _run_helper(
         client, "probe_dig.lua",
         {"x0": x0, "y0": y0, "z0": z0, "x1": x1, "y1": y1, "z1": z1})

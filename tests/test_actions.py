@@ -497,6 +497,30 @@ class TestDig(unittest.TestCase):
         self.assertEqual(r2.after["dig_total"], 0)
         self.assertEqual(self.game.dig, {})
 
+    def test_dig_to_completion_clear_is_precondition(self):
+        # H7 (2026-11-27, external review): mode='clear' has no
+        # job type, and the bare DIG_JOB_TYPES index raised
+        # KeyError — which act() does not catch — killing the
+        # caller instead of failing the action. Clearing is
+        # designate_dig's job.
+        r = actions.act(self.client, "dig_to_completion",
+                        box=(90, 90, 41, 91, 91, 41), mode="clear")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertIn("clear", r.reason)
+
+    def test_dig_multi_z_box_is_precondition(self):
+        # H8 (2026-11-27, external review): the Lua helpers only
+        # touch z0, so a multi-z box designated one layer while
+        # the Python side verified the whole box. Boxes are one
+        # layer; a multi-z box is refused before anything is
+        # designated.
+        r = actions.act(self.client, "designate_dig",
+                        box=(90, 90, 41, 92, 92, 42), mode="dig")
+        self.assertFalse(r.ok)
+        self.assertEqual(r.error_kind, "precondition")
+        self.assertEqual(self.game.dig, {})
+
     def test_dig_refuses_floor_tiles_and_writes_nothing(self):
         box = (90, 90, 42, 91, 91, 42)  # z=42 is floor in the fake
         r = actions.act(self.client, "designate_dig", box=box, mode="dig")

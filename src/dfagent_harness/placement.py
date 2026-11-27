@@ -297,7 +297,7 @@ def verify_site(client: DFHackClient,
 def placement_anchor(state: dict[str, Any],
                      areas: Optional[dict[str, Any]] = None
                      ) -> tuple[tuple[int, int], int,
-                                tuple[int, int, int]]:
+                                Optional[tuple[int, int, int]]]:
     """A robust anchor for the placement search: (centre, surface_z,
     from_pos).
 
@@ -317,7 +317,9 @@ def placement_anchor(state: dict[str, Any],
        level (buildings sit on the ground), and the first citizen's
        position is the from-point (a dwarf stands on walkable
        ground by definition — a building centre is occupied, not
-       walkable, so it must never be the from-point).
+       walkable, so it must never be the from-point; with no
+       citizen positions the from-point is None and reachability
+       is unchecked).
     2. Citizens: the first citizen's position (walkable ground)
        as both the search centre and the from-point, its z as the
        ground level.
@@ -354,7 +356,15 @@ def placement_anchor(state: dict[str, Any],
                 citizen_pos,
                 key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
         else:
-            from_pos = centres[0]
+            # No citizen positions: there is no walkable origin to
+            # check reachability from. A building centre is occupied,
+            # not walkable — using it as the from-point made
+            # canWalkBetween fail for every candidate, so all sites
+            # came back unreachable (2026-11-27, external review
+            # H6). Return None: find_sites reports
+            # "reachability_unchecked" instead of verifying
+            # anything.
+            from_pos = None
         return (cx, cy), surface_z, from_pos
     if citizen_pos:
         from_pos = citizen_pos[0]

@@ -514,6 +514,15 @@ def _check_box(client: DFHackClient, box: tuple[int, ...],
     x0, y0, z0, x1, y1, z1 = box
     if not (x0 <= x1 and y0 <= y1 and z0 <= z1):
         raise _Fail("precondition", f"box corners out of order: {box!r}")
+    if z0 != z1:
+        # A dig/plant box is one layer: the Lua helpers only touch
+        # z0 (act_dig, probe_dig, act_plants, probe_plants), so a
+        # multi-z box designated one layer while the Python side
+        # verified and reported the whole box (2026-11-27, external
+        # review H8). Multi-z work is one box per layer.
+        raise _Fail("precondition",
+                    f"box {box!r} spans z{z0}..z{z1}: dig boxes are "
+                    f"one layer (z0 must equal z1)")
     mx, my, mz = _map_size(client)
     if not (0 <= x0 and x1 < mx and 0 <= y0 and y1 < my
             and 0 <= z0 and z1 < mz):
@@ -618,6 +627,17 @@ def dig_to_completion(client: DFHackClient, box: tuple[int, ...],
     """
     from . import digging
     started = time.monotonic()
+    if mode not in DIG_JOB_TYPES:
+        # 'clear' (and any unknown mode) has no job type: there is
+        # nothing to wait for, and the bare DIG_JOB_TYPES index
+        # below used to raise KeyError — which act() does not catch
+        # — killing the caller instead of failing the action
+        # (2026-11-27, external review H7). Clearing designations
+        # is designate_dig's job, not this loop's.
+        raise _Fail("precondition",
+                    f"dig_to_completion has no job for mode {mode!r} "
+                    f"(choose from {', '.join(sorted(DIG_JOB_TYPES))}); "
+                    f"use designate_dig to clear designations")
     # 1. Site check (paused read): reachable + no hazard.
     check = digging.check_dig_box(client, box, mode)
     if not check["ok"]:

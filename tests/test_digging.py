@@ -104,6 +104,23 @@ class TestCheckDigSite(unittest.TestCase):
         self.assertIsNone(out["reachable"])
         self.assertIn("unknown", out["reason"])
 
+    def test_down_stair_buried_floor_under_floor_is_unknown(self):
+        # A floor with another floor above it (a dug room under
+        # the surface floor, a second story) is NOT on the surface:
+        # the old _open_above counted 'floor' as open, so the tile
+        # was declared reachable with no verification (found live
+        # 2026-11-27 on the scratch fort's farm-room floor at
+        # (82,82,49)). Without areas it is unknown, not reachable.
+        col = _col(97, 97, [
+            {"z0": 176, "z1": 176, "class": "floor"},
+            {"z0": 175, "z1": 175, "class": "floor"},
+            {"z0": 174, "z1": 174, "class": "soil"},
+            {"z0": 0, "z1": 173, "class": "stone"},
+        ])
+        out = self._check(col)
+        self.assertIsNone(out["reachable"])
+        self.assertIn("unknown", out["reason"])
+
     def test_down_stair_in_reachable_area_is_ok(self):
         # Underground floor, but the block is in the Surface area
         # (a dug room connected to the fort).
@@ -390,6 +407,58 @@ class TestProbeDigStateJobWalk(unittest.TestCase):
         # usable .worker field, so `j.worker` always read nil.
         self.assertIn("dfhack.job.getWorker", src)
         self.assertNotIn("j.worker", src)
+
+
+class TestCheckDigBoxReachableUnknown(unittest.TestCase):
+    """H5 (2026-11-27, external review): a box whose tiles only
+    said 'unknown' (reachable None) was reported reachable True.
+    The per-tile verdict must propagate."""
+
+    def setUp(self):
+        self.client = mock.Mock()
+
+    def _box(self, col, box=(97, 97, 175, 97, 97, 175),
+             mode="down-stair"):
+        with mock.patch.object(digging.column_mod, "read_column",
+                               return_value=col):
+            return digging.check_dig_box(self.client, box, mode)
+
+    def test_unknown_stays_unknown(self):
+        # Buried floor, no open sky, no areas: the per-tile check
+        # says reachable None (see
+        # test_down_stair_on_buried_soil_is_unreachable).
+        col = _col(97, 97, [
+            {"z0": 175, "z1": 175, "class": "floor"},
+            {"z0": 174, "z1": 174, "class": "soil"},
+            {"z0": 0, "z1": 173, "class": "stone"},
+        ])
+        out = self._box(col)
+        self.assertTrue(out["ok"], out["reason"])
+        self.assertIsNone(out["reachable"])
+        self.assertIn("unknown", out["reason"])
+
+    def test_verified_stays_verified(self):
+        out = self._box(_surface_col())
+        self.assertTrue(out["ok"], out["reason"])
+        self.assertTrue(out["reachable"])
+
+
+class TestMultiZBoxes(unittest.TestCase):
+    """H8 (2026-11-27, external review): the Lua helpers only
+    touch z0, so a multi-z box designated one layer while the
+    Python side verified and reported the whole box. Boxes are
+    one layer; a multi-z box is refused at the boundary."""
+
+    def test_check_dig_box_refuses_multi_z(self):
+        out = digging.check_dig_box(
+            mock.Mock(), (97, 97, 175, 98, 98, 176), "dig")
+        self.assertFalse(out["ok"])
+        self.assertIn("one layer", out["reason"])
+
+    def test_verify_dig_refuses_multi_z(self):
+        with self.assertRaises(ValueError):
+            digging.verify_dig(
+                mock.Mock(), (97, 97, 175, 98, 98, 176), "dig")
 
 
 if __name__ == "__main__":

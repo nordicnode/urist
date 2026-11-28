@@ -469,6 +469,53 @@ class TestLeaderboard(unittest.TestCase):
             lb.close()
 
 
+class TestModelCallsAttempted(unittest.TestCase):
+    def test_counts_model_call_records_directly(self):
+        # The flagged case: a max_ticks run with 2 real model_call
+        # records but only 1 snapshot-based attempt.
+        run = {
+            "records": [
+                {"kind": "model_call", "tick_no": 1},
+                {"kind": "model_call", "tick_no": 2},
+                {"kind": "model_retry", "tick_no": 2},
+            ],
+            "snapshots": [{"tick_no": 1}],
+            "final_snapshot_tick_no": 1,
+        }
+        self.assertEqual(scoring.model_calls_attempted(run), 2)
+
+    def test_retries_have_their_own_record(self):
+        # A parse retry is a second model_call, not an extra count
+        # on top of the model_retry record.
+        run = {
+            "records": [
+                {"kind": "model_call", "tick_no": 1},
+                {"kind": "model_retry", "tick_no": 1},
+                {"kind": "model_call", "tick_no": 1},
+            ],
+            "snapshots": [{"tick_no": 1}],
+            "final_snapshot_tick_no": 1,
+        }
+        self.assertEqual(scoring.model_calls_attempted(run), 2)
+
+    def test_old_logs_fall_back_to_snapshot_estimate(self):
+        # Pre-emission-spec logs carry no model_call records: one
+        # per decision tick (final snapshot excluded) plus retries.
+        run = {
+            "records": [{"kind": "model_retry", "tick_no": 2}],
+            "snapshots": [{"tick_no": 1}, {"tick_no": 2},
+                          {"tick_no": 3}],
+            "final_snapshot_tick_no": 3,
+        }
+        self.assertEqual(scoring.model_calls_attempted(run), 3)
+
+    def test_empty_run_is_zero(self):
+        self.assertEqual(
+            scoring.model_calls_attempted(
+                {"records": [], "snapshots": [],
+                 "final_snapshot_tick_no": None}), 0)
+
+
 class TestWealthSectionRegistered(unittest.TestCase):
     def test_wealth_section(self):
         from dfagent_harness.observe import (

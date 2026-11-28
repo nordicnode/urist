@@ -311,14 +311,27 @@ def failure_taxonomy(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def model_calls_attempted(run: dict[str, Any]) -> int:
-    """Model call attempts in one parsed run log: one per decision
-    tick (one snapshot per tick, except the final snapshot the run
-    ends on before calling the model) plus in-tick retries."""
+    """Model call attempts in one parsed run log.
+
+    Preferred: count the driver's `model_call` records directly —
+    one per real invocation, retries included (a parse retry is a
+    second call with its own record). Older logs predate the driver
+    emission spec and carry no model_call records; for those,
+    estimate one per decision tick (one snapshot per tick, except
+    the final snapshot the run ends on before calling the model)
+    plus in-tick retries. A transport error leaves no model_call
+    record, so it is not counted here; the failure taxonomy still
+    captures it via the model_failure record.
+    """
+    records = run.get("records") or []
+    calls = [r for r in records if r.get("kind") == "model_call"]
+    if calls:
+        return len(calls)
     snapshots = run.get("snapshots") or []
     final_tick = run.get("final_snapshot_tick_no")
     attempts = sum(1 for s in snapshots
                    if s.get("tick_no") != final_tick)
-    attempts += sum(1 for r in (run.get("records") or [])
+    attempts += sum(1 for r in records
                     if r.get("kind") == "model_retry")
     return attempts
 

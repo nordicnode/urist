@@ -22,7 +22,14 @@ Description=Urist main DF (Erushtathtat, region2-00125-04-12)
 Requires=urist-xvfb-main.service
 After=urist-xvfb-main.service
 PartOf=urist-stack.target
-StartLimitBurst=5
+# Start limit: restarts are a NORMAL part of eval operation (the
+# suite runner restarts this unit once per repeat to load the S0
+# anchor — about 5 restarts per 30 min on a 10-repeat day tier),
+# so the burst is 20, not 5: 5 tripped mid-suite on 2026-11-28
+# (manual test + crash test + 2 baselines + tier repeat 1 inside
+# one 30-min window) and aborted the day tier. A genuine crash
+# loop still trips it (a restart every ~15-90 s hits 20 fast).
+StartLimitBurst=20
 StartLimitIntervalSec=1800
 
 [Service]

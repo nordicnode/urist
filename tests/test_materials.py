@@ -329,6 +329,38 @@ class TestRequirementsForState(unittest.TestCase):
         self.assertEqual(materials.requirements_for_state({}), [])
 
 
+class TestFormatShortage(unittest.TestCase):
+    def test_single_copy_uses_label_count_once(self):
+        # The label already carries its count ("1 brewable plant"):
+        # the old text doubled it ("need 1 1 brewable plant",
+        # observed live in P0-1 run 3's fail-fast message).
+        out = materials.format_shortage({
+            "need": 1, "per_job": 1, "have": 0,
+            "label": "1 brewable plant",
+            "fix": "gather plants first"})
+        self.assertEqual(
+            out, "need 1 brewable plant, have 0 — "
+                 "gather plants first")
+
+    def test_multi_copy_names_total_and_each(self):
+        out = materials.format_shortage({
+            "need": 3, "per_job": 1, "have": 2,
+            "label": "1 empty barrel",
+            "fix": "queue make_barrel at the carpenter #7"})
+        self.assertEqual(
+            out, "need 3 in total (1 empty barrel each), have 2 — "
+                 "queue make_barrel at the carpenter #7")
+
+    def test_multi_copy_per_job_two(self):
+        out = materials.format_shortage({
+            "need": 4, "per_job": 2, "have": 0,
+            "label": "2 distinct food stacks",
+            "fix": "gather plants first"})
+        self.assertEqual(
+            out, "need 4 in total (2 distinct food stacks each), "
+                 "have 0 — gather plants first")
+
+
 class TestAssemblerMaterials(unittest.TestCase):
     def test_materials_section_lists_have_need(self):
         text, short = _materials(_state())

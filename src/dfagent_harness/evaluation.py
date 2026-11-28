@@ -178,9 +178,10 @@ def build_manifest(run_log: str | Path,
         gaps.append("harness_commit (not recorded in the log; the "
                     "current git commit is not the run's commit)")
 
-    # Model call attempts: one per decision tick (one snapshot per
-    # tick, except the final snapshot the run ends on before calling
-    # the model) plus in-tick retries (scoring.model_calls_attempted).
+    # Model call attempts: the driver's model_call records when
+    # the log has them (scoring.model_calls_attempted counts them
+    # directly); older logs estimate one per decision tick plus
+    # in-tick retries.
     attempts = model_calls_attempted(run)
 
     wall_s = _wall_clock_s(records)

@@ -346,12 +346,15 @@ def check_workshop(kind: str, stocks: dict[str, Any],
 
 def format_shortage(shortage: dict[str, Any]) -> str:
     """One shortage as the model sees it: need / have / exact fix.
-    The label is the per-job requirement ("1 empty barrel"), so a
+    The label already carries its own count ("1 empty barrel"), so
+    a single-copy shortage reads "need 1 empty barrel", not the
+    doubled "need 1 1 empty barrel" the old text produced; a
     multi-copy shortage reads "need 5 in total (1 empty barrel
-    each)" instead of the confusing "need 5 1 empty barrel"."""
+    each)".
+    """
     need = shortage["need"]
     if need == shortage.get("per_job", need):
-        need_txt = f"need {need} {shortage['label']}"
+        need_txt = f"need {shortage['label']}"
     else:
         need_txt = (f"need {need} in total "
                     f"({shortage['label']} each)")

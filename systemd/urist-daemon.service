@@ -12,7 +12,10 @@ Description=Urist harness daemon
 Requires=urist-df-main.service
 After=urist-df-main.service
 PartOf=urist-stack.target
-StartLimitBurst=5
+# Start limit: the daemon restarts once per DF restart (Requires=),
+# so it shares the DF unit's cadence — see urist-df-main.service
+# for why the burst is 20, not 5.
+StartLimitBurst=20
 StartLimitIntervalSec=1800
 
 [Service]

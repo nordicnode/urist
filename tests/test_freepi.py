@@ -108,6 +108,49 @@ class TestFreePiRetry(unittest.TestCase):
                 side_effect=[urllib.error.URLError("reset"), ok]):
             self.assertEqual(self._chat(), "hello")
 
+    def test_incomplete_read_retries(self):
+        # IncompleteRead comes from resp.read(), outside urlopen,
+        # so it is not wrapped in URLError — it used to escape
+        # with no retry at all (the 04-02 diary rewrite failed 8
+        # straight times on it). A response whose first read()
+        # raises and whose second read succeeds must be retried.
+        import http.client
+        ok = _Resp({"choices": [{"message": {"content": "hello"}}]})
+
+        class _FlakyResp(_Resp):
+            def read(self):
+                raise http.client.IncompleteRead(b"", 100)
+
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                side_effect=[_FlakyResp({}), ok]) as urlopen:
+            self.assertEqual(self._chat(), "hello")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_remote_disconnected_retries(self):
+        import http.client
+        ok = _Resp({"choices": [{"message": {"content": "hello"}}]})
+
+        class _DroppedResp(_Resp):
+            def read(self):
+                raise http.client.RemoteDisconnected(
+                    "Remote end closed connection without response")
+
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                side_effect=[_DroppedResp({}), ok]):
+            self.assertEqual(self._chat(), "hello")
+
+    def test_persistent_incomplete_read_gives_up(self):
+        import http.client
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                side_effect=http.client.IncompleteRead(
+                    b"", 100)) as urlopen:
+            with self.assertRaises(RuntimeError):
+                self._chat()
+        self.assertEqual(urlopen.call_count, freepi.MAX_ATTEMPTS)
+
     def test_401_raises_at_once_without_retry(self):
         with mock.patch.object(
                 freepi.urllib.request, "urlopen",

@@ -243,126 +243,13 @@ def _snapshot_group_counts(
     return by_date
 
 
-def _day_has_full_samples(store, day_start: int) -> bool:
-    """True when any citizen has a full per-dwarf sample inside
-    the day starting at day_start. The feed's curr is the last
-    full sample at or before the day end; when no full sample
-    falls inside the day, curr is an older day's sample and the
-    feed's per-dwarf record is stale for this day (04-05: the
-    last full samples are 101999, from 04-01; the June/July days:
-    the last full is 101999 for the originals, and the migrants
-    never had one)."""
-    day_end = day_start + diary.TICKS_PER_DAY - 1
-    for uid in store.unit_ids():
-        for s in store.unit_history(uid):
-            tick = s.get("tick")
-            if (isinstance(tick, int)
-                    and day_start <= tick <= day_end
-                    and diary._is_full_sample(s)):
-                return True
-    return False
-
-
-# The drink threshold the review itself used for Olon's distress
-# (thirst counter past ~20000). The lite feed below derives a
-# drink need from it — the game's need report is not in lite
-# samples, so the counter is the signal.
-_THIRST_THRESHOLD = 20000
-# A lite record older than this before the day end is not the
-# day's record at all (06-02's last sample is 04-02's, 54 days
-# back) — the day gets no per-dwarf record. Up to this old, the
-# record is used with its date attached, so the model attributes
-# it instead of presenting it as today's. The line is a judgment
-# call, flagged for the re-review.
-_LITE_STALE_TICKS = 10 * diary.TICKS_PER_DAY
-
-
-def _lite_dwarf_feed(store, day_start: int, population: int,
-                     year: int):
-    """The day's per-dwarf record from LITE samples — the only
-    per-dwarf data the June/July days have. For each citizen, the
-    latest sample (full or lite) at or before the day end: wounds
-    from its wounds list (presence only — the lite sampler's wound
-    ids are suspect: at tick 103996 all six wounded dwarves carry
-    the identical wound id 4, parts 2, so only the count is used,
-    never the id), job from its job column, and a drink need
-    derived from its thirst counter (past _THIRST_THRESHOLD).
-    Names come from the citizen's last FULL sample; a citizen with
-    no full sample ever (the three migrants) has no name and
-    appears as "an unnamed migrant" — the prompt names the gap
-    instead of inventing one. Returns a dict — records,
-    group_counts, record_tick (the latest sample tick used),
-    unnamed (citizens in the records with no recorded name),
-    sampled (citizens with any sample at or before the day end),
-    span_ticks (the spread of the per-citizen latest-sample ticks
-    — 0 when every record is from one sample round),
-    in_day_sampled / in_day_wounded (citizens whose latest sample
-    falls inside the day, and how many of them are wounded) — or
-    None when no citizen has any sample at or before the day
-    end."""
-    from dfagent_harness.dwarves import dwarf_record
-
-    day_end = day_start + diary.TICKS_PER_DAY - 1
-    records: list[dict] = []
-    record_tick = None
-    unnamed = 0
-    sampled = 0
-    in_day_sampled = 0
-    in_day_wounded = 0
-    latest_ticks: list[int] = []
-    for uid in store.unit_ids():
-        samples = store.unit_history(uid)
-        latest = None
-        for s in samples:
-            tick = s.get("tick")
-            if isinstance(tick, int) and tick <= day_end:
-                if latest is None or tick > latest["tick"]:
-                    latest = s
-        if latest is None:
-            continue
-        sampled += 1
-        tick = latest.get("tick")
-        if isinstance(tick, int):
-            latest_ticks.append(tick)
-            if day_start <= tick <= day_end:
-                in_day_sampled += 1
-                if latest.get("wounds"):
-                    in_day_wounded += 1
-        full = [s for s in samples if diary._is_full_sample(s)]
-        name = full[-1].get("name") if full else ""
-        if not name:
-            unnamed += 1
-        rec = dwarf_record(latest, changes=[], related_states={},
-                           prev_relations=None)
-        rec["name"] = name or "an unnamed migrant"
-        rec["profession"] = (full[-1].get("profession") or ""
-                             if full else "")
-        rec["needs"] = []
-        thirst = latest.get("thirst")
-        if isinstance(thirst, int) and thirst > _THIRST_THRESHOLD:
-            # Derived, not game-reported: the lite sample carries
-            # the counter but not the need. Marked by the comment
-            # and by the rebuild's log line, not hidden.
-            rec["needs"] = [{"need": "drink", "focus": -1,
-                             "level": 1}]
-        rec["featured"] = False
-        rec["significance"] = 0
-        records.append(rec)
-        if isinstance(tick, int) and (record_tick is None
-                                      or tick > record_tick):
-            record_tick = tick
-    if not records and unnamed == 0:
-        return None
-    counts = diary._group_counts(records)
-    for g in counts:
-        g["total"] = population
-    span = (max(latest_ticks) - min(latest_ticks)
-            if latest_ticks else 0)
-    return {"records": records, "counts": counts,
-            "record_tick": record_tick, "unnamed": unnamed,
-            "sampled": sampled, "span_ticks": span,
-            "in_day_sampled": in_day_sampled,
-            "in_day_wounded": in_day_wounded}
+# Staleness machinery lives in diary.py now (2026-11-27, audit
+# R1: the live paths use the same fallback the rebuild does).
+# These aliases keep the existing tests importing them from here.
+_day_has_full_samples = diary._day_has_full_samples
+_lite_dwarf_feed = diary._lite_dwarf_feed
+_THIRST_THRESHOLD = diary._THIRST_THRESHOLD
+_LITE_STALE_TICKS = diary._LITE_STALE_TICKS
 
 
 def _run_stocks_by_date(log_dir: Path) -> dict[str, dict[str, dict]]:
@@ -620,56 +507,49 @@ def rebuild(state_dir: Path, log_dir: Path,
                 # the old entry in place (logged, never fatal to the
                 # rebuild); the template render is never written
                 # instead.
+                # AI rewrite: the feed is built from the same
+                # summary + the Store's per-dwarf samples (the feed
+                # builder re-derives the ledger from the summary, so
+                # the merged decisions/stocks above carry over), and
+                # the model writes the entry. A failed write leaves
+                # the old entry in place (logged, never fatal to the
+                # rebuild); the template render is never written
+                # instead. Staleness is handled inside
+                # build_diary_feed now (audit R1) — the lite
+                # fallback, the no-record flags, the record date
+                # and the unknown window — and threads are the
+                # day's (open_threads derives them from the
+                # day-end samples, audit R4), so the rebuild no
+                # longer clears them.
+                pop_end = summary["stocks_end"].get("population")
+                pop = pop_end if isinstance(pop_end, int) else None
+                # The raw watch log (the primary source for job
+                # completions — the bus misses nearly all of
+                # them) and the run logs (the workshop map) are
+                # repo files, passed explicitly so the feed stays
+                # hermetic in the offline tests (build_diary_feed
+                # never auto-resolves them).
+                repo_root = Path(__file__).resolve().parent.parent
                 feed = diary.build_diary_feed(
                     store, journal, day_start, "Erushtathtat", year,
-                    state_dir=state_dir)
+                    state_dir=state_dir, population=pop,
+                    watch_log_path=(repo_root / "third_party"
+                                    / "df_47_05" / "dfh-events.jsonl"),
+                    run_logs_dir=log_dir)
                 feed["summary"] = summary
-                # Open threads are the STORE's latest state, not
-                # the day's: open_threads takes the last sample
-                # per dwarf whatever the day, so for a rebuild of
-                # an old day it would list July's threads (nobody
-                # wounded, everybody thirsty) on an April day.
-                # A rebuild cannot reconstruct the day's threads,
-                # so it claims none — the dwarf changes and the
-                # recent entries carry the continuity instead.
-                feed["threads"] = []
-                # Stale per-dwarf record. When no full sample
-                # falls inside the day, the feed's dwarves and
-                # group counts are an older day's (04-05: six
-                # wounded from 04-01; the June/July days: the
-                # same six, plus 04-01's needs). The day's own
-                # numbers come from the run snapshots first
-                # (Population lines — the day's own data), else
-                # from the lite samples. A snapshot override that
-                # changes the counts also clears the named dwarves
-                # (their states are not the day's) and drops the
-                # other groups (stressed/mood/needs from the stale
-                # day have no record here); the lite override
-                # keeps its groups, all lite-derived.
-                stale = not _day_has_full_samples(store, day_start)
+                # Rebuild-only: the run snapshots' own counts are
+                # the day's own data (Population lines), so they
+                # override the feed's counts when they differ
+                # (04-05: snapshots say 2 wounded, the stale full
+                # samples say 6). The live paths have no run logs
+                # to read them from.
+                stale = not diary._day_has_full_samples(
+                    store, day_start)
                 snap = snap_counts.get(date) if stale else None
                 if snap:
                     end = snap.get("end") or {}
-                    changed = False
-                    new_counts = []
-                    for g in feed.get("group_counts") or []:
-                        if g["key"] in ("wounded", "idle") \
-                                and g["key"] in end:
-                            if (g["count"] != end[g["key"]]
-                                    or g["total"]
-                                    != end["population"]):
-                                changed = True
-                            new_counts.append({
-                                "key": g["key"],
-                                "label": g["label"],
-                                "complement": g["complement"],
-                                "count": end[g["key"]],
-                                "total": end["population"],
-                                "names": [], "not_names": []})
+                    changed = diary.apply_snapshot_counts(feed, end)
                     if changed:
-                        feed["group_counts"] = new_counts
-                        feed["dwarves"] = []
-                        feed["no_per_dwarf_samples"] = True
                         print(f"{date}: per-dwarf record stale — "
                               f"group counts from run snapshots "
                               f"(wounded {end.get('wounded')}, "
@@ -682,81 +562,44 @@ def rebuild(state_dir: Path, log_dir: Path,
                               f"idle {end.get('idle')}) — dwarves "
                               f"kept")
                 elif stale:
-                    pop_end = summary["stocks_end"].get("population")
-                    pop = pop_end if isinstance(pop_end, int) else 7
-                    lite = _lite_dwarf_feed(store, day_start, pop,
-                                            year)
-                    if lite is None:
-                        feed["dwarves"] = []
-                        feed["group_counts"] = []
-                        feed["no_per_dwarf_samples"] = True
+                    lite_date = feed.get("lite_dwarf_record_date")
+                    if lite_date:
+                        w = next((g["count"]
+                                  for g in feed.get("group_counts")
+                                  or []
+                                  if g["key"] == "wounded"),
+                                 "?")
+                        print(f"{date}: per-dwarf record from "
+                              f"lite samples dated {lite_date} "
+                              f"(wounded {w} of {pop}, "
+                              f"{feed.get('unnamed_citizens')} "
+                              f"unnamed)")
+                    elif feed.get("dwarves"):
+                        # In-day lite record: the record IS today's
+                        # date, so no lite_dwarf_record_date key is
+                        # set — but it is still a lite record, not
+                        # a full one (feed_fresh False). Do not
+                        # mistake it for no record at all.
+                        w = next((g["count"]
+                                  for g in feed.get("group_counts")
+                                  or []
+                                  if g["key"] == "wounded"),
+                                 "?")
+                        print(f"{date}: per-dwarf record from "
+                              f"lite samples dated {date} "
+                              f"(in-day, wounded {w} of {pop}, "
+                              f"{feed.get('unnamed_citizens')} "
+                              f"unnamed)")
+                    elif feed.get("partial_dwarf_record"):
+                        part = feed["partial_dwarf_record"]
+                        print(f"{date}: lite record spans too far "
+                              f"(partial poll: "
+                              f"{part['sampled']} sampled today, "
+                              f"{part['wounded']} wounded) "
+                              f"— dwarves and counts cleared")
+                    else:
                         print(f"{date}: no per-dwarf record at "
                               f"all — dwarves and counts cleared")
-                    else:
-                        day_end = (day_start
-                                   + diary.TICKS_PER_DAY - 1)
-                        rec_tick = lite["record_tick"]
-                        rec_date = diary.date_str(rec_tick, year)
-                        # Citizens with no sample at all (the
-                        # migrants on 06-02: first sampled 06-03)
-                        # are unnamed too, on top of the ones in
-                        # the records as "an unnamed migrant".
-                        no_record = pop - lite["sampled"]
-                        unnamed = lite["unnamed"] + max(0, no_record)
-                        if lite["span_ticks"] > _LITE_STALE_TICKS:
-                            # Partial record: the per-citizen
-                            # latest samples span weeks (06-02:
-                            # two dwarves sampled today, the rest
-                            # from 04-03). No single date owns the
-                            # record, so no count is attributable
-                            # to the day — clear it, and name the
-                            # partial poll instead of hiding it.
-                            feed["dwarves"] = []
-                            feed["group_counts"] = []
-                            feed["no_per_dwarf_samples"] = True
-                            feed["last_dwarf_record_date"] = (
-                                diary.date_str(
-                                    rec_tick - lite["span_ticks"],
-                                    year))
-                            feed["partial_dwarf_record"] = {
-                                "sampled": lite["in_day_sampled"],
-                                "wounded": lite["in_day_wounded"]}
-                            if unnamed:
-                                feed["unnamed_citizens"] = unnamed
-                            print(f"{date}: lite record spans "
-                                  f"{lite['span_ticks']} ticks "
-                                  f"(partial poll: "
-                                  f"{lite['in_day_sampled']} sampled "
-                                  f"today, "
-                                  f"{lite['in_day_wounded']} wounded) "
-                                  f"— dwarves and counts cleared")
-                        elif day_end - rec_tick > _LITE_STALE_TICKS:
-                            feed["dwarves"] = []
-                            feed["group_counts"] = []
-                            feed["no_per_dwarf_samples"] = True
-                            feed["last_dwarf_record_date"] = rec_date
-                            if unnamed:
-                                feed["unnamed_citizens"] = unnamed
-                            print(f"{date}: lite record from "
-                                  f"{rec_date} is too old "
-                                  f"({day_end - rec_tick} ticks) — "
-                                  f"dwarves and counts cleared")
-                        else:
-                            feed["dwarves"] = lite["records"]
-                            feed["group_counts"] = lite["counts"]
-                            if unnamed:
-                                feed["unnamed_citizens"] = unnamed
-                            if rec_date != date:
-                                feed["lite_dwarf_record_date"] = (
-                                    rec_date)
-                            w = next((g["count"]
-                                      for g in lite["counts"]
-                                      if g["key"] == "wounded"),
-                                     "?")
-                            print(f"{date}: per-dwarf record from "
-                                  f"lite samples dated {rec_date} "
-                                  f"(wounded {w} of {pop}, "
-                                  f"{unnamed} unnamed)")
                 try:
                     if dry_run:
                         # Preview the feed the model would get

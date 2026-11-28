@@ -274,14 +274,20 @@ class TestDiaryQuality(unittest.TestCase):
     def test_stock_zero_is_not_quiet(self):
         # The 125-06-20 defect: drink 6 -> 0, no events, and the
         # entry called it a quiet day. A stock hitting zero is
-        # significant even when no event record fired.
+        # significant even when no event record fired. The
+        # crossing is a ledger interval, not a same-day event:
+        # the stock_low event dates the zero to 06-21, so the
+        # crisis line states the interval, never "today".
         store = FakeStore()
         store.add_trend("drink", 169200, 6.0)
         store.add_trend("drink", 170400, 0.0)
         s = _day_summary(store=store)
         entry = diary.render_entry(s)
         self.assertNotIn("quiet day", entry.lower())
-        self.assertIn("The last of the drink ran out today.", entry)
+        self.assertIn("The last of the drink ran out during this "
+                      "record (6 at the start, none at the end).",
+                      entry)
+        self.assertNotIn("ran out today", entry)
 
     def test_stock_at_zero_stays_significant(self):
         store = FakeStore()

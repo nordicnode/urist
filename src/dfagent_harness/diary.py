@@ -30,7 +30,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .dwarves import FEATURE_THRESHOLD, diff_unit_samples, dwarf_record
+from .day_events import read_day_events, read_workshop_map
+from .dwarves import (FEATURE_THRESHOLD, JOB_VERBS,
+                      diff_unit_samples, dwarf_record, job_words,
+                      recent_emotions, salient_traits, social_ties)
+from .materials import JOB_MATERIALS
 
 # DF calendar: 12 months of 28 days, 1,200 ticks/day, 33,600
 # ticks/month, 403,200 ticks/year. Year 1 starts at tick 0.
@@ -165,6 +169,26 @@ _DISTRESS_RE = re.compile(
 _NEED_RE = re.compile(r"^(.+?) \(([^)]+)\)$")
 
 
+def parse_distress_pairs(reason: Any) -> list[tuple[str, str]]:
+    """A planner distress diagnostic as (dwarf name, need) pairs.
+    "1 citizen(s) past a distress line: Olon Medtobalod (thirsty),
+    ... — <advice>; <note>" -> [("Olon Medtobalod", "thirsty")].
+    The advice and the internal note after the dash are planner
+    guidance, not story, and are dropped. [] when the reason is
+    not a distress diagnostic."""
+    if not isinstance(reason, str):
+        return []
+    m = _DISTRESS_RE.search(reason)
+    if not m:
+        return []
+    pairs = []
+    for part in m.group(2).split(", "):
+        nm = _NEED_RE.match(part.strip())
+        if nm:
+            pairs.append((nm.group(1), nm.group(2)))
+    return pairs
+
+
 def parse_distress(reason: Any) -> str | None:
     """A planner distress diagnostic as an overseer's observation.
     "15 citizen(s) past a distress line: Udil (thirsty), ... —
@@ -172,16 +196,7 @@ def parse_distress(reason: Any) -> str | None:
     The advice and the internal note after the dash are planner
     guidance, not story, and are dropped. Returns None when the
     reason is not a distress diagnostic."""
-    if not isinstance(reason, str):
-        return None
-    m = _DISTRESS_RE.search(reason)
-    if not m:
-        return None
-    pairs = []
-    for part in m.group(2).split(", "):
-        nm = _NEED_RE.match(part.strip())
-        if nm:
-            pairs.append((nm.group(1), nm.group(2)))
+    pairs = parse_distress_pairs(reason)
     if not pairs:
         return None
     needs = sorted({need for _, need in pairs})
@@ -199,6 +214,190 @@ def parse_distress(reason: Any) -> str | None:
 # (workshop, job) instead of deduping them, so two x1 queues are
 # two jobs, not one story beat.
 _QUEUE_PHRASE = re.compile(r"^queue (\S+) x(\d+) at (.+)$")
+
+# A queue-job token as a gerund, for what a completion at a
+# workshop reads as: "brew" -> "brewing", "make_bed" -> "making
+# a bed". The queue tokens are snake_case reaction/job names;
+# the gerund is what the model needs — job_words alone says
+# "working a reaction" for a CustomReaction, which is how the
+# 04-02 entry ended up claiming "the beds want stone".
+_QUEUE_GERUND = {
+    "brew": "brewing",
+    "cook": "cooking",
+}
+
+
+def _queue_job_phrase(job: str) -> str:
+    """A queue-job token as a gerund phrase ("brewing",
+    "making a bed"). Unknown tokens fall back to job_words."""
+    if job in _QUEUE_GERUND:
+        return _QUEUE_GERUND[job]
+    if job.startswith("make_"):
+        return "making a " + job[5:].replace("_", " ")
+    return job_words(job) or job
+
+
+def _workshop_display(kind: str) -> str:
+    """A workshop kind as the prompt names it ("the still",
+    "the carpenter's workshop")."""
+    if kind == "still":
+        return "the still"
+    if kind == "carpenter":
+        return "the carpenter's workshop"
+    return f"the {kind} workshop"
+
+
+def _completion_phrase(job: str, pos, workshop_map,
+                       queue_kinds) -> str:
+    """What a completion reads as in the prompt.
+
+    job_words alone says "finished working a reaction" for a
+    CustomReaction and "finished constructing a building" for a
+    ConstructBuilding — true, but the model cannot tell brewing
+    from bed-making. The position joins the workshop map
+    (run-log build actions) and the day's queue:
+      CustomReaction at a mapped workshop, one queued kind
+        -> the gerund ("brewing", "making a bed")
+      CustomReaction at a mapped workshop, several queued kinds
+        -> "work at the {workshop}" (the kind is not knowable)
+      CustomReaction at an unmapped position
+        -> "a workshop job" (vague, true)
+      ConstructBuilding at a mapped workshop
+        -> "the still" (the workshop that was built)
+      anything else -> job_words, as before.
+    workshop_map is {pos tuple: {id, kind}}; queue_kinds is
+    {building id: set of queue-job tokens}. A completion's pos is
+    a list (or None); a job id is never used here — ids are
+    reused across types and days, so they cannot name a job."""
+    ws = None
+    if pos is not None:
+        ws = workshop_map.get(tuple(pos))
+    if job == "CustomReaction" and ws is not None:
+        kinds = queue_kinds.get(ws["id"]) or set()
+        if len(kinds) == 1:
+            return _queue_job_phrase(next(iter(kinds)))
+        if len(kinds) > 1:
+            return "work at " + _workshop_display(ws["kind"])
+        return "a workshop job"
+    if job == "CustomReaction":
+        return "a workshop job"
+    if job == "ConstructBuilding" and ws is not None:
+        return _workshop_display(ws["kind"])
+    return job_words(job) or job
+
+
+def _queue_groups_and_phrases(summary: dict[str, Any]
+                              ) -> tuple[list[str],
+                                         dict[str, list[tuple[str, int, str]]],
+                                         list[str]]:
+    """The day's decisions as prompt phrases, with queue_job
+    decisions grouped by workshop instead of listed one by one.
+    Returns (dec_phrases, queue_groups, queue_order): the groups
+    are {loc: [(job token, count, outcome)]} in first-seen order.
+    A job that did not work keeps its outcome on its own item.
+    This is the one place the queue phrases are parsed — the
+    events section reads the groups (for the completion-phrase
+    resolver) and the "What I did today" section renders them,
+    so both agree on what was queued where.
+    Each group also carries its materials, from JOB_MATERIALS
+    with the day-start stocks as the have: "Queued at the
+    Carpenters workshop #7: make_bed x5, make_barrel x2 (7 jobs
+    total; needs 7 wood, have 117)". The have is the day-start
+    stock (what the fort had when the queue was made), falling
+    back to the day-end stock. A material the feed has no count
+    for (brewable plants, empty barrels, food stacks — the
+    summary stocks carry only drink/food/wood/stone/population)
+    renders its need with no have, never a guessed number.
+    That is the real fix for the 04-02 "the beds want stone"
+    invention: the model reads the need from the feed instead of
+    guessing it, and a bed needs wood, not stone."""
+    dec_phrases: list[str] = []
+    queue_groups: dict[str, list[tuple[str, int, str]]] = {}
+    queue_order: list[str] = []
+    for dec in summary.get("decisions") or []:
+        phrase = clean_diary_text(
+            dec.get("decision") or dec.get("action") or "")
+        if not phrase:
+            continue
+        outcome = ("worked" if dec.get("ok") is True
+                   else "did not work" if dec.get("ok") is False
+                   else "outcome unknown")
+        if dec.get("action") == "queue_job":
+            m = _QUEUE_PHRASE.match(phrase)
+            if m:
+                loc = m.group(3)
+                if loc not in queue_groups:
+                    queue_groups[loc] = []
+                    queue_order.append(loc)
+                queue_groups[loc].append(
+                    (m.group(1), int(m.group(2)), outcome))
+                continue
+        dec_phrases.append(f"{phrase} ({outcome})")
+    for loc in queue_order:
+        jobs = queue_groups[loc]
+        total = sum(n for _, n, _ in jobs)
+        job_bits = ", ".join(
+            f"{j} x{n}" if o == "worked" else f"{j} x{n} ({o})"
+            for j, n, o in jobs)
+        mat_bit = _queue_materials_bit(
+            jobs, summary.get("stocks_start")
+            or summary.get("stocks_end") or {})
+        dec_phrases.append(
+            f"Queued at {loc}: {job_bits} ({total} job"
+            f"{'s' if total > 1 else ''} total{mat_bit})")
+    return dec_phrases, queue_groups, queue_order
+
+
+# JOB_MATERIALS stock keys to the summary stocks' keys, and the
+# singular/plural the prompt uses. The summary stocks carry only
+# drink/food/wood/stone/population, so brewable plants, empty
+# barrels, and food stacks have no have-number — their need
+# renders alone, never with a guessed count.
+_MATERIAL_STOCK_KEY = {
+    "wood_units": "wood",
+    "stone_units": "stone",
+}
+_MATERIAL_NAMES = {
+    "wood_units": ("wood", "wood"),
+    "stone_units": ("stone", "stone"),
+    "brewable_plants": ("brewable plant", "brewable plants"),
+    "empty_barrels": ("empty barrel", "empty barrels"),
+    "food_stacks": ("food stack", "food stacks"),
+}
+
+
+def _queue_materials_bit(jobs: list[tuple[str, int, str]],
+                         stocks: dict[str, Any]) -> str:
+    """The materials bit for one queue group: "; needs 7 wood
+    (have 117)" or "; needs 2 brewable plants + 2 empty barrels"
+    or "" when no queued job has a materials row. The need is the
+    per-job requirement times the count, summed across the
+    group's jobs (5 beds + 2 barrels = 7 wood). The have is the
+    day-start stock when the summary carries it; a material with
+    no summary count renders its need with no have."""
+    needs: dict[str, int] = {}
+    for job, count, _outcome in jobs:
+        for req in JOB_MATERIALS.get(job) or []:
+            stock = req.get("stock") or ""
+            if stock not in _MATERIAL_NAMES:
+                continue
+            per = req.get("per_job") or 0
+            if not isinstance(per, int) or per <= 0:
+                continue
+            needs[stock] = needs.get(stock, 0) + count * per
+    if not needs:
+        return ""
+    bits = []
+    for stock, need in needs.items():
+        singular, plural = _MATERIAL_NAMES[stock]
+        name = singular if need == 1 else plural
+        summary_key = _MATERIAL_STOCK_KEY.get(stock)
+        have = stocks.get(summary_key) if summary_key else None
+        if isinstance(have, int):
+            bits.append(f"{need} {name} (have {have})")
+        else:
+            bits.append(f"{need} {name}")
+    return "; needs " + " + ".join(bits)
 
 
 def _finalize_decisions(decisions: list[dict[str, Any]]
@@ -336,6 +535,12 @@ def build_daily_summary(store: Any, journal: Any,
         "stocks_start": {}, "stocks_end": {},
         "deaths": [], "decisions": [], "events": [],
         "observations": [],
+        # Distress as structured pairs, not only as an observation
+        # sentence: the feed attaches each pair to the named
+        # dwarf's record (audit R4 — a "Noted:" line alone was
+        # dropped by the model on 06-28, while the manager and
+        # stockpile attempts beside it were kept).
+        "distress": [],
         "arrivals": 0, "threats": 0,
     }
     # Stocks at the day boundaries, from the trend samples (one per
@@ -407,7 +612,18 @@ def build_daily_summary(store: Any, journal: Any,
     summary["decisions"].reverse()
     summary["events"].reverse()
     # Diary boundary: diagnostics become observations, repeated
-    # identical decisions collapse to one story beat.
+    # identical decisions collapse to one story beat. The distress
+    # pairs are kept structured alongside the observation sentence
+    # (see the "distress" field above): _finalize_decisions turns
+    # the diagnostic into prose and drops the reason, which is the
+    # only place the dwarf's name lives.
+    for dec in summary["decisions"]:
+        if (dec.get("action") or "") in LOG_ACTIONS:
+            for name, need in parse_distress_pairs(
+                    dec.get("reason") or ""):
+                pair = {"name": name, "need": need}
+                if pair not in summary["distress"]:
+                    summary["distress"].append(pair)
     decisions, observations = _finalize_decisions(
         summary["decisions"])
     summary["decisions"] = decisions
@@ -432,7 +648,14 @@ def _stock_crisis_lines(summary: dict[str, Any]) -> list[str]:
     """Stock-crisis sentences (significance, 2026-11-27): a survival
     stock hitting zero, or sitting at zero, is significant even when
     no event record fired — a day like that can never be called
-    quiet. Returns the sentences, [] when the stocks are fine."""
+    quiet. Returns the sentences, [] when the stocks are fine.
+    The crossing is stated as an interval of the record, never as
+    a same-day event: the ledger endpoints (06-20: drink 6 -> 0)
+    do not date the crossing — the stock_low event dates the zero
+    to 06-21 (tick 192076), and only two drinks are recorded
+    06-13 to 06-20. "Ran out today" for a ledger interval is
+    wrong; the event-dated form lives in the prompt's event list,
+    where the stock_low event itself carries the date."""
     lines = []
     start = summary.get("stocks_start") or {}
     end = summary.get("stocks_end") or {}
@@ -443,7 +666,9 @@ def _stock_crisis_lines(summary: dict[str, Any]) -> list[str]:
         # floats); a zero value of either type is a zero stock.
         if isinstance(e, (int, float)) and e == 0 \
                 and isinstance(s, (int, float)) and s > 0:
-            lines.append(f"The last of the {label} ran out today.")
+            lines.append(f"The last of the {label} ran out during "
+                         f"this record ({int(s)} at the start, "
+                         "none at the end).")
         elif isinstance(e, (int, float)) and e == 0:
             lines.append(f"There is no {label} left in the fort.")
     return lines
@@ -474,7 +699,7 @@ def _ledger_line(summary: dict[str, Any]) -> str:
 def render_entry(summary: dict[str, Any]) -> str:
     """Render the daily summary as a diary entry (markdown body, no
     heading — write_entry adds the heading). Narrative prose in the
-    overseer's voice, Boatmurdered-style: the day's story — what
+    overseer's voice — plain, concrete, dry: the day's story — what
     happened, what was decided, what went wrong, what the dwarves
     did — with the stock numbers kept as a ledger line, not the
     story itself. Every sentence states a recorded fact from the
@@ -829,45 +1054,165 @@ def _feed_samples(store: Any, uid: int, first: int, last: int
 
 def open_threads(store: Any, day_start_tick: int,
                  year: int = 0) -> list[dict[str, Any]]:
-    """The fort's open threads, derived from the current samples:
+    """The fort's open threads, derived from the day's samples:
     a wounded dwarf, a stressed dwarf, a dwarf in a strange mood,
     a dwarf with an unmet need, a survival stock at zero. Each
     thread carries how long it has been true (walked back through
     the samples), so the diary can arc a story across days — a
     wound on its third day reads differently from a fresh one. A
     thread closes when its condition clears; nothing is stored, so
-    a closed thread simply stops appearing."""
+    a closed thread simply stops appearing. The current sample is
+    the latest at or before the DAY END, not the store's latest
+    overall: a rebuild of an old day used to list July's threads
+    on an April day (the rebuild cleared threads entirely to dodge
+    it — that dropped real threads like Olon's 06-28 distress
+    from the feed, audit R4)."""
     first, last = day_range(day_start_tick)
+    # The store's earliest sample tick, once: _since needs it for
+    # the pre-record boundary (a run reaching the first recorded
+    # moment with the condition already true predates the record).
+    # The method exists on the real Store; the fallback scans the
+    # samples (test fakes) and gives the same number.
+    earliest_tick: int | None = None
+    getter = getattr(store, "earliest_unit_tick", None)
+    if callable(getter):
+        earliest_tick = getter()
+    if earliest_tick is None:
+        for _uid in store.unit_ids():
+            for _s in store.unit_history(_uid):
+                _t = _s.get("tick")
+                if isinstance(_t, int) and (
+                        earliest_tick is None or _t < earliest_tick):
+                    earliest_tick = _t
     threads: list[dict[str, Any]] = []
     for uid in store.unit_ids():
-        samples = store.unit_history(uid)
+        samples = [s for s in store.unit_history(uid)
+                   if isinstance(s.get("tick"), int)
+                   and s["tick"] <= last]
         if not samples:
             continue
         curr = samples[-1]
-        name = curr.get("name") or f"dwarf {uid}"
+        name = curr.get("name")
+        if not name:
+            # A lite sample carries no name: resolve it from the
+            # citizen's latest full sample at or before the day
+            # end (re-check 6, 06-02: the wound thread named only
+            # "dwarf 5407" for äs Oslanlumash, whose name the
+            # Store has at every full sample — the model then
+            # wrote that there is no name for him). Samples are
+            # already filtered to tick <= day end, so a name
+            # first recorded after the day is never used; a
+            # citizen with no full sample ever keeps
+            # "dwarf {uid}".
+            full_names = [s.get("name") for s in samples
+                          if _is_full_sample(s) and s.get("name")]
+            name = full_names[-1] if full_names else f"dwarf {uid}"
         # A condition's start: the earliest sample in the current
         # unbroken run of samples where the condition holds.
-        def _since(pred: Any) -> int | None:
+        # Returns (tick_or_None, first_sighting): the tick is a
+        # true run start when the walk broke on a full sample with
+        # the condition clear; a first sighting when the walk ran
+        # out of samples without breaking (the condition may have
+        # started earlier — rendered "(first recorded DATE)", never
+        # "(since DATE)"). None when the run reaches the store's
+        # first sample with the condition already true there: the
+        # start predates the record and no date is honest.
+        def _since(pred: Any) -> tuple[int | None, bool]:
             since = None
+            broke = False
             for s in reversed(samples):
+                if not _is_full_sample(s):
+                    # A lite sample records no wounds, needs, or
+                    # relations: its empty fields are "not
+                    # recorded", not "clear". Skipping it keeps the
+                    # run unbroken across the gap — Lòr's 04-02
+                    # lite samples (no wound recorded) broke his
+                    # wound run and dated it 04-03 instead of
+                    # 04-01, contradicting the diary's own 04-01
+                    # entry (re-check 2026-11-27). But a lite
+                    # sample that SHOWS the condition is positive
+                    # evidence it held at that tick: record it as
+                    # a sighting and keep walking — an earlier
+                    # full sample may push the run further back,
+                    # and a full clear sample below it still
+                    # breaks the run.
+                    if isinstance(s.get("tick"), int) and pred(s):
+                        since = s.get("tick")
+                    continue
                 if pred(s):
                     since = s.get("tick")
                 else:
+                    broke = True
                     break
-            return since if isinstance(since, int) else None
+            if broke:
+                return (since if isinstance(since, int) else None,
+                        False)
+            # The walk ran out of samples. The start predates the
+            # record only when the dwarf's earliest sample IS the
+            # store's earliest tick AND shows the condition there
+            # (Rakust's wound is already present in the lite
+            # sample at tick 100800, the first tick of 04-01 —
+            # re-check 3, 2026-11-27). An empty earliest lite
+            # sample proves nothing ("not recorded"), and a dwarf
+            # whose record starts later (a migrant, first seen
+            # 06-13) has a first sighting, not a pre-record start.
+            if (earliest_tick is not None and samples
+                    and samples[0].get("tick") == earliest_tick
+                    and pred(samples[0])):
+                return (None, False)
+            return (since if isinstance(since, int) else None, True)
 
         wounds = curr.get("wounds") or []
         if wounds:
-            since = _since(lambda s: bool(s.get("wounds")))
+            # Wound dates are first sightings of THIS wound id,
+            # never taking-dates and never the start of an earlier
+            # healed wound. A wound record's id is stable per wound
+            # (dwarves._wound_ids): a new id is a new wound, a
+            # missing id is a healed one. The April wounds (id 4)
+            # healed by 04-12; the June wounds are id 7, then id
+            # 8 — tracking wound *presence* dated the id-8 wound
+            # to the id-7 run's start (06-02), and the model then
+            # invented 04-01 for it (re-check 5, 06-22). Walk back
+            # per id. The date is always a first sighting
+            # ("(first recorded DATE)"), never "(since DATE)": a
+            # first sighting is not a taking-date — the wound could
+            # have been taken any day between the last clear sample
+            # and the sighting. A wound present in the store's
+            # earliest sample predates the record: no date, and the
+            # dwarf line renders "(since before today)".
+            since_ticks: list[int] = []
+            pre_record = False
+            for w in wounds:
+                wid = w.get("id") if isinstance(w, dict) else None
+                if wid is None:
+                    continue
+                t, _first = _since(
+                    lambda s, wid=wid: any(
+                        isinstance(x, dict) and x.get("id") == wid
+                        for x in s.get("wounds") or []))
+                if t is None:
+                    pre_record = True
+                else:
+                    since_ticks.append(t)
+            if pre_record:
+                since = None
+                first_sighting = False
+            elif since_ticks:
+                since = min(since_ticks)
+                first_sighting = True
+            else:
+                since = None
+                first_sighting = False
             threads.append({
                 "kind": "wounded", "subject": name,
                 "unit_id": uid,
                 "detail": f"{len(wounds)} wound"
                           f"{'s' if len(wounds) > 1 else ''}",
-                "since": date_str(since, year) if since else None})
+                "since": date_str(since, year) if since else None,
+                "first_sighting": first_sighting})
         cat = curr.get("stress_category")
         if isinstance(cat, int) and cat != -1 and cat <= 1:
-            since = _since(lambda s: isinstance(
+            since, first_sighting = _since(lambda s: isinstance(
                 s.get("stress_category"), int)
                 and s.get("stress_category") != -1
                 and s.get("stress_category") <= 1)
@@ -876,16 +1221,19 @@ def open_threads(store: Any, day_start_tick: int,
                 "unit_id": uid,
                 "detail": ("at breaking point" if cat == 0
                            else "highly stressed"),
-                "since": date_str(since, year) if since else None})
+                "since": date_str(since, year) if since else None,
+                "first_sighting": first_sighting})
         mood = curr.get("mood")
         if isinstance(mood, int) and mood != -1:
-            since = _since(lambda s: isinstance(s.get("mood"), int)
-                           and s.get("mood") != -1)
+            since, first_sighting = _since(
+                lambda s: isinstance(s.get("mood"), int)
+                and s.get("mood") != -1)
             threads.append({
                 "kind": "strange_mood", "subject": name,
                 "unit_id": uid,
                 "detail": curr.get("mood_name") or "a strange mood",
-                "since": date_str(since, year) if since else None})
+                "since": date_str(since, year) if since else None,
+                "first_sighting": first_sighting})
         for n in curr.get("needs") or []:
             if not isinstance(n, dict):
                 continue
@@ -957,11 +1305,278 @@ def _group_counts(dwarves: list[dict[str, Any]]
     return out
 
 
+# The drink threshold the review itself used for Olon's distress
+# (thirst counter past ~20000). The lite feed below derives a
+# drink need from it — the game's need report is not in lite
+# samples, so the counter is the signal.
+_THIRST_THRESHOLD = 20000
+# A lite record older than this before the day end is not the
+# day's record at all (06-02's last sample is 04-02's, 54 days
+# back) — the day gets no per-dwarf record. Up to this old, the
+# record is used with its date attached, so the model attributes
+# it instead of presenting it as today's. The line is a judgment
+# call, flagged for the re-review.
+_LITE_STALE_TICKS = 10 * TICKS_PER_DAY
+# A lite-to-lite stress jump big enough to be a change, not
+# noise. The full-sample diff uses a 10,000 threshold for a
+# stress-category change; lite samples are the raw counter, and
+# their deltas run in the tens/hundreds. Calibrated from the
+# year-125 lite data: the routine band is roughly ±100 (Litast
+# -30, -30, -6, +10; Cog -30, -30, -55, -10, -4, -42; Zulban
+# -90, -45), while real jumps start at +131 (Zulban, 06-12) and
+# run to +1034 (Litast, 06-12) and +678 (Olon, 07-05). 150 sits
+# between the noise band and the signal: it catches Litast's
+# +183/+212/+1034, Cog's +354, Olon's +678, Ral's +194, and
+# misses Zulban's borderline +131. A judgment call, like the
+# staleness line above — the re-review can move it.
+_LITE_STRESS_DELTA = 150
+
+
+def _day_has_full_samples(store: Any, day_start: int) -> bool:
+    """True when any citizen has a full per-dwarf sample inside
+    the day starting at day_start. The feed's curr is the last
+    full sample at or before the day end; when no full sample
+    falls inside the day, curr is an older day's sample and the
+    feed's per-dwarf record is stale for this day (04-05: the
+    last full samples are 101999, from 04-01; the June/July days:
+    the last full is 101999 for the originals, and the migrants
+    never had one)."""
+    day_end = day_start + TICKS_PER_DAY - 1
+    for uid in store.unit_ids():
+        for s in store.unit_history(uid):
+            tick = s.get("tick")
+            if (isinstance(tick, int)
+                    and day_start <= tick <= day_end
+                    and _is_full_sample(s)):
+                return True
+    return False
+
+
+def _lite_dwarf_feed(store: Any, day_start: int, population: int,
+                     year: int):
+    """The day's per-dwarf record from LITE samples — the only
+    per-dwarf data the June/July days have. For each citizen, the
+    latest sample (full or lite) at or before the day end: wounds
+    from its wounds list (presence only — the lite sampler's wound
+    ids are suspect: at tick 103996 all six wounded dwarves carry
+    the identical wound id 4, parts 2, so only the count is used,
+    never the id), job from its job column, and a drink need
+    derived from its thirst counter (past _THIRST_THRESHOLD).
+    Names come from the citizen's last FULL sample; a citizen with
+    no full sample ever (the three migrants) has no name and
+    appears as "an unnamed migrant" — the prompt names the gap
+    instead of inventing one. Returns a dict — records,
+    group_counts, record_tick (the latest sample tick used),
+    unnamed (citizens in the records with no recorded name),
+    sampled (citizens with any sample at or before the day end),
+    span_ticks (the spread of the per-citizen latest-sample ticks
+    — 0 when every record is from one sample round),
+    in_day_sampled / in_day_wounded (citizens whose latest sample
+    falls inside the day, and how many of them are wounded) — or
+    None when no citizen has any sample at or before the day
+    end. Moved here from scripts/rebuild_diary.py (2026-11-27,
+    audit R1) so the live paths use the same fallback the rebuild
+    does, instead of presenting an older day's full samples as
+    today's."""
+    day_end = day_start + TICKS_PER_DAY - 1
+    records: list[dict] = []
+    record_tick = None
+    unnamed = 0
+    sampled = 0
+    in_day_sampled = 0
+    in_day_wounded = 0
+    latest_ticks: list[int] = []
+    for uid in store.unit_ids():
+        samples = store.unit_history(uid)
+        latest = None
+        prev = None
+        for s in samples:
+            tick = s.get("tick")
+            if not isinstance(tick, int) or tick > day_end:
+                continue
+            if latest is None or tick > latest["tick"]:
+                prev = latest
+                latest = s
+            elif prev is None or tick > prev["tick"]:
+                prev = s
+        if latest is None:
+            continue
+        sampled += 1
+        tick = latest.get("tick")
+        if isinstance(tick, int):
+            latest_ticks.append(tick)
+            if day_start <= tick <= day_end:
+                in_day_sampled += 1
+                if latest.get("wounds"):
+                    in_day_wounded += 1
+        # Names (and the social/traits/emotions taken from the
+        # same sample, below) come only from full samples at or
+        # before the day end. The unfiltered version took the
+        # citizen's last full sample overall — a name first
+        # recorded after the day (the migrants', 06-28) would
+        # land on an earlier day's feed (same root cause as
+        # re-check 6's 06-02 thread: a lite record with no name
+        # of its own must resolve against what the record had
+        # by then, never against the future).
+        full = [s for s in samples
+                if _is_full_sample(s)
+                and isinstance(s.get("tick"), int)
+                and s["tick"] <= day_end]
+        name = full[-1].get("name") if full else ""
+        if not name:
+            unnamed += 1
+        rec = dwarf_record(latest, changes=[], related_states={},
+                           prev_relations=None)
+        rec["name"] = name or "an unnamed migrant"
+        rec["profession"] = (full[-1].get("profession") or ""
+                             if full else "")
+        if full:
+            # A lite sample carries no social/traits/emotions, so
+            # the record takes them from the latest full sample —
+            # the same override as name/profession above. Without
+            # this the June/July feeds would show every dwarf as
+            # friendless and characterless by construction.
+            ties, outside = social_ties(full[-1], None, {})
+            rec["social"] = ties
+            rec["social_outside"] = outside
+            rec["traits"] = salient_traits(full[-1])
+            rec["emotions"] = recent_emotions(full[-1])
+        rec["needs"] = []
+        thirst = latest.get("thirst")
+        if isinstance(thirst, int) and thirst > _THIRST_THRESHOLD:
+            # Derived, not game-reported: the lite sample carries
+            # the counter but not the need. Marked by the comment
+            # and by the rebuild's log line, not hidden.
+            rec["needs"] = [{"need": "drink", "focus": -1,
+                             "level": 1}]
+        # A stress jump between lite samples is the only per-dwarf
+        # change signal the June/July days have (the lite feed
+        # carries no needs, relations, or moods, and the wounds
+        # flap). The raw counter, rendered qualitatively — never
+        # the number, which the model would narrate as a stat.
+        # prev is the sample before latest in tick order (None on
+        # a first sighting); a missing stress on either side is
+        # no signal, not a zero.
+        cur_stress = latest.get("stress")
+        prev_stress = prev.get("stress") if prev is not None else None
+        if isinstance(cur_stress, int) and isinstance(prev_stress, int):
+            delta = cur_stress - prev_stress
+            if delta >= _LITE_STRESS_DELTA:
+                rec["changes"].append({
+                    "kind": "stress_rose",
+                    "text": "stress rose sharply"})
+            elif delta <= -_LITE_STRESS_DELTA:
+                rec["changes"].append({
+                    "kind": "stress_eased",
+                    "text": "stress eased sharply"})
+        rec["featured"] = False
+        rec["significance"] = 0
+        records.append(rec)
+        if isinstance(tick, int) and (record_tick is None
+                                      or tick > record_tick):
+            record_tick = tick
+    if not records and unnamed == 0:
+        return None
+    counts = _group_counts(records)
+    for g in counts:
+        g["total"] = population
+    span = (max(latest_ticks) - min(latest_ticks)
+            if latest_ticks else 0)
+    return {"records": records, "counts": counts,
+            "record_tick": record_tick, "unnamed": unnamed,
+            "sampled": sampled, "span_ticks": span,
+            "in_day_sampled": in_day_sampled,
+            "in_day_wounded": in_day_wounded}
+
+
+def feed_is_writable(feed: dict[str, Any]) -> tuple[bool, str]:
+    """Whether a diary feed is worth writing from (audit R2:
+    skip, never write from stale). A feed is writable when it
+    carries a fresh per-dwarf record, or a dated lite/partial
+    record plus an anchor (decisions, or stocks from a run, a
+    fresh collect, or a ledger — never the Store's trend sample,
+    which is a single 04-01 sample for every later day), or
+    snapshot counts plus an anchor (the rebuild's 04-05 class),
+    or decisions/observations plus fresh stocks. A feed with no
+    fresh dwarves, no usable lite record, no decisions and only
+    trend stocks is refused — the model would invent the day
+    from the recent entries. Returns (True, "") or
+    (False, reason); the reason always starts "feed too thin"
+    so the route's existing contract holds."""
+    summary = feed.get("summary") or {}
+    stocks_ok = summary.get("stocks_source") in (
+        "run", "fresh", "ledger")
+    has_fresh_dwarves = bool(feed.get("feed_fresh")
+                             and feed.get("dwarves"))
+    has_dated_record = bool(
+        feed.get("lite_dwarf_record_date")
+        or feed.get("partial_dwarf_record"))
+    has_counts = bool(feed.get("group_counts"))
+    has_decisions = bool(summary.get("decisions"))
+    has_observations = bool(summary.get("observations"))
+    if has_fresh_dwarves:
+        return True, ""
+    if has_dated_record and (has_decisions or stocks_ok):
+        return True, ""
+    if (feed.get("no_per_dwarf_samples") and has_counts
+            and (has_decisions or stocks_ok)):
+        return True, ""
+    if (has_decisions or has_observations) and stocks_ok:
+        return True, ""
+    return False, ("feed too thin or stale: no fresh per-dwarf "
+                   "record, no usable lite record, no decisions, "
+                   "and no fresh stocks")
+
+
+def apply_snapshot_counts(feed: dict[str, Any],
+                          end: dict[str, Any]) -> bool:
+    """Override a stale feed's wounded/idle counts with the run
+    snapshots' own counts (rebuild-only: the live paths have no
+    run logs to read them from). The snapshots are the day's own
+    data — the Population lines the run recorded — so they win
+    over lite counts and over a feed whose counts were already
+    cleared. Only wounded/idle are overridden, with names
+    cleared (their states are not the day's); the other groups
+    (stressed/mood/needs from the stale day) are dropped, they
+    have no record here. Returns True when the counts changed.
+    A from-scratch group (feed counts already cleared) gets its
+    label/complement from _group_counts' table."""
+    labels = {"wounded": ("Wounded", "Not wounded"),
+              "idle": ("Idle", "Working")}
+    existing = {g["key"]: g for g in feed.get("group_counts") or []}
+    new_counts = []
+    changed = False
+    for key in ("wounded", "idle"):
+        if key not in end:
+            continue
+        old = existing.get(key)
+        label, complement = labels[key]
+        if old is None:
+            changed = True
+        else:
+            label, complement = old["label"], old["complement"]
+            if (old["count"] != end[key]
+                    or old["total"] != end["population"]):
+                changed = True
+        new_counts.append({
+            "key": key, "label": label, "complement": complement,
+            "count": end[key], "total": end["population"],
+            "names": [], "not_names": []})
+    if changed:
+        feed["group_counts"] = new_counts
+        feed["dwarves"] = []
+        feed["no_per_dwarf_samples"] = True
+    return changed
+
+
 def build_diary_feed(store: Any, journal: Any,
                      day_start_tick: int,
                      fort_name: str = "",
                      year: int = 0,
-                     state_dir: str | Path | None = None
+                     state_dir: str | Path | None = None,
+                     population: int | None = None,
+                     watch_log_path: str | Path | None = None,
+                     run_logs_dir: str | Path | None = None,
                      ) -> dict[str, Any]:
     """The feed for the AI diary writer: the day's ledger
     (build_daily_summary) + one structured record per dwarf who
@@ -973,6 +1588,51 @@ def build_diary_feed(store: Any, journal: Any,
     summary = build_daily_summary(store, journal, day_start_tick,
                                   fort_name, year)
     first, last = day_range(day_start_tick)
+    # The day's events, from the daemon's bus event log
+    # (day_events) plus the raw DFHack watch log, which is the
+    # fuller completion source (the bus misses CustomReaction and
+    # the still's ConstructBuilding, and its day-start baseline
+    # rows are not completions). The watch log lives in the repo
+    # (third_party/df_47_05/dfh-events.jsonl); the caller passes
+    # it. None means bus-only (the offline tests, which must not
+    # read a live game file) — never auto-resolved here, so a
+    # test feed stays hermetic.
+    events_path = None
+    if state_dir is not None:
+        events_path = Path(state_dir) / "events.jsonl"
+    else:
+        jpath = getattr(journal, "path", None)
+        if jpath:
+            events_path = Path(jpath).parent / "events.jsonl"
+    resolved_watch: Path | None = None
+    if watch_log_path is not None:
+        resolved_watch = Path(watch_log_path)
+    store_names: dict[int, str] = {}
+    for _uid in store.unit_ids():
+        _full = [s for s in store.unit_history(_uid)
+                 if _is_full_sample(s)]
+        if _full and _full[-1].get("name"):
+            store_names[_uid] = _full[-1]["name"]
+    events = read_day_events(events_path, year, first, store_names,
+                             watch_log_path=resolved_watch)
+    # The workshop map (run logs, not the journal — the journal
+    # mixes forts and lacks the main fort's 04-01 still build):
+    # pos -> {id, kind}, so a completion's position becomes a
+    # name in the prompt. A missing dir is an empty map; the
+    # phrases fall back to the vague-but-true forms.
+    workshops = read_workshop_map(run_logs_dir)
+    feed_workshops = [
+        {"pos": list(pos), "id": w["id"], "kind": w["kind"]}
+        for pos, w in sorted(workshops.items())]
+    # Deaths, named: the Store's death diagnosis carries the cause
+    # but no name; the event log carries the name but no cause.
+    # Join them here (the harness joins, never the model), so the
+    # prompt renders one death line with both — and the events
+    # section can skip deaths the summary already names.
+    for d in summary.get("deaths") or []:
+        uid = d.get("unit_id")
+        if isinstance(uid, int) and uid in store_names:
+            d["name"] = store_names[uid]
     featured_ids: set[int] = set()
     for d in summary["deaths"]:
         if isinstance(d.get("unit_id"), int):
@@ -1007,6 +1667,9 @@ def build_diary_feed(store: Any, journal: Any,
         rec = dwarf_record(curr, changes, related,
                            prev_relations=(
                                prev.get("relations")
+                               if prev else None),
+                           prev_social=(
+                               prev.get("social")
                                if prev else None))
         rec["featured"] = (
             rec["significance"] >= FEATURE_THRESHOLD
@@ -1016,6 +1679,262 @@ def build_diary_feed(store: Any, journal: Any,
                                 -r["significance"],
                                 r["name"]))
     counts = _group_counts(dwarves)
+    # Stocks provenance: build_daily_summary reads the Store's
+    # trend samples — a single 04-01 sample for every later day —
+    # so unless a caller merged fresher stocks in (the retry
+    # route's driver stocks, the rebuild's run/ledger stocks),
+    # these are the trend's, not today's. feed_is_writable uses
+    # this to refuse a feed whose only anchor is a stale trend.
+    summary.setdefault("stocks_source", "trend")
+    # Staleness (audit R1): the per-dwarf record above is the last
+    # FULL sample at or before the day end, however old. When no
+    # full sample falls inside the day, that record is an older
+    # day's — presenting it as today's wrote 04-01's numbers into
+    # the 04-05 entry. Fall back to the lite record (dated) or to
+    # no per-dwarf record at all, exactly as the rebuild used to
+    # do on its own; the live paths now get the same treatment.
+    # feed_fresh is False whenever the day has no full samples,
+    # even when a lite record covers it — the prompt dates the
+    # record either way.
+    feed: dict[str, Any] = {"summary": summary, "dwarves": dwarves,
+                            "group_counts": counts,
+                            "feed_fresh": True,
+                            "workshops": feed_workshops}
+    pop_end = (summary.get("stocks_end") or {}).get("population")
+    if isinstance(population, int):
+        # The rebuild passes the merged summary's population: the
+        # ledger/run stocks know the true headcount (10 on 06-02),
+        # while the trend sample says 7 for a June day.
+        pop = population
+    else:
+        pop = pop_end if isinstance(pop_end, int) else 0
+    sampled_uids = 0
+    for uid in store.unit_ids():
+        if any(isinstance(s.get("tick"), int)
+               and s["tick"] <= last
+               for s in store.unit_history(uid)):
+            sampled_uids += 1
+    pop = max(pop, sampled_uids)
+    feed["population"] = pop
+    record_tick: int | None = None
+    if _day_has_full_samples(store, first):
+        # Citizens with no full sample ever (the migrants) are
+        # missing from the dwarves list: name the gap instead of
+        # letting the counts pretend the fort is smaller.
+        missing = max(0, pop - len(dwarves))
+        if missing:
+            feed["unnamed_citizens"] = missing
+            for g in counts:
+                g["total"] = pop
+    else:
+        feed["feed_fresh"] = False
+        lite = _lite_dwarf_feed(store, first, pop, year)
+        if lite is None:
+            feed["dwarves"] = []
+            feed["group_counts"] = []
+            feed["no_per_dwarf_samples"] = True
+        else:
+            record_tick = lite["record_tick"]
+            rec_date = (date_str(record_tick, year)
+                        if isinstance(record_tick, int) else None)
+            no_record = pop - lite["sampled"]
+            unnamed = lite["unnamed"] + max(0, no_record)
+            if lite["span_ticks"] > _LITE_STALE_TICKS:
+                # Partial record: the per-citizen latest samples
+                # span weeks (06-02: two dwarves sampled today,
+                # the rest from 04-03). No single date owns the
+                # record, so no count is attributable to the day
+                # — clear it, and name the partial poll instead
+                # of hiding it.
+                feed["dwarves"] = []
+                feed["group_counts"] = []
+                feed["no_per_dwarf_samples"] = True
+                feed["last_dwarf_record_date"] = date_str(
+                    record_tick - lite["span_ticks"], year)
+                feed["partial_dwarf_record"] = {
+                    "sampled": lite["in_day_sampled"],
+                    "wounded": lite["in_day_wounded"]}
+                if unnamed:
+                    feed["unnamed_citizens"] = unnamed
+            elif isinstance(record_tick, int) \
+                    and last - record_tick > _LITE_STALE_TICKS:
+                feed["dwarves"] = []
+                feed["group_counts"] = []
+                feed["no_per_dwarf_samples"] = True
+                feed["last_dwarf_record_date"] = rec_date
+                if unnamed:
+                    feed["unnamed_citizens"] = unnamed
+            else:
+                feed["dwarves"] = lite["records"]
+                feed["group_counts"] = lite["counts"]
+                if unnamed:
+                    feed["unnamed_citizens"] = unnamed
+                if rec_date != summary.get("date"):
+                    feed["lite_dwarf_record_date"] = rec_date
+    feed["events"] = events
+    # Source coverage (P0-2): the feed states which sources were
+    # live for the day. The events part (bus + watch log) comes
+    # from read_day_events; the samples part is measured here from
+    # the Store: how many full/lite samples fall in the day, and
+    # the latest sample at or before the day end. Six of the seven
+    # bar-failing days have no sample in the day at all, so the
+    # "latest" fact is what the prompt can honestly draw on.
+    full_in_day = lite_in_day = 0
+    latest_tick: int | None = None
+    for _uid in store.unit_ids():
+        for s in store.unit_history(_uid):
+            t = s.get("tick")
+            if not isinstance(t, int):
+                continue
+            if first <= t <= last:
+                if _is_full_sample(s):
+                    full_in_day += 1
+                else:
+                    lite_in_day += 1
+            if t <= last and (latest_tick is None or t > latest_tick):
+                latest_tick = t
+    feed["coverage"] = {
+        **(events.get("coverage") or {}),
+        "day_start_tick": first,
+        "samples": {
+            "full_in_day": full_in_day,
+            "lite_in_day": lite_in_day,
+            "latest_tick": latest_tick,
+            "latest_date": (date_str(latest_tick, year)
+                            if isinstance(latest_tick, int) else None),
+        },
+    }
+    # Per-dwarf "did": what each dwarf actually did today, from
+    # the day's job completions — the per-dwarf section is what a
+    # dwarf DID and what happened TO them, not their stat line.
+    # Routine jobs (drink/eat/sleep) ride as counts; non-routine
+    # jobs name the work. A dwarf with no completions gets none.
+    for rec in feed["dwarves"]:
+        uid = rec.get("unit_id")
+        did = [{"job": c["job"], "count": c["count"],
+                "routine": c["routine"], "pos": c.get("pos")}
+               for c in events.get("completions") or []
+               if c.get("worker_id") == uid]
+        if did:
+            rec["did"] = did
+    # Migrant names (audit 2026-11-27): the Store's lite samples
+    # never recorded the migrants' names, but the event log's
+    # citizen_new events do (Cog Letmossazir, Litast Aknònul,
+    # Zasit Bistöklòr). Resolve them here so no entry calls them
+    # unnamed: records named "an unnamed migrant" take the name,
+    # and citizens missing from the dwarves list entirely (no full
+    # sample ever) are named with their first-recorded date.
+    known = events.get("known_names") or {}
+    if known:
+        for rec in feed["dwarves"]:
+            uid = rec.get("unit_id")
+            if (rec.get("name") == "an unnamed migrant"
+                    and isinstance(uid, int) and uid in known):
+                # The name is a detection, not an arrival: the
+                # migrants' names were first recorded at tick
+                # 201600 (07-01) though they arrived 06-02/06-03.
+                # A feed for an earlier day must not use a name
+                # the record did not have yet — the day's feed
+                # keeps them unnamed, as the record had them.
+                first_seen = known[uid].get("first_seen_tick")
+                if (not isinstance(first_seen, int)
+                        or first_seen > day_start_tick):
+                    continue
+                rec["name"] = known[uid]["name"]
+                if known[uid].get("profession"):
+                    rec["profession"] = known[uid]["profession"]
+                if feed.get("unnamed_citizens"):
+                    feed["unnamed_citizens"] -= 1
+        present = {r.get("unit_id") for r in feed["dwarves"]}
+        named_missing = []
+        for uid in store.unit_ids():
+            if uid in present or uid not in known:
+                continue
+            samples = store.unit_history(uid)
+            if any(_is_full_sample(s) for s in samples):
+                continue
+            first_tick = samples[0].get("tick") if samples else None
+            # Not yet arrived: a migrant whose first sample is
+            # after this day's end was not in the fort on this
+            # day, so the feed does not list them (04-01 listed
+            # all three with a future first-recorded date).
+            if (not isinstance(first_tick, int)
+                    or first_tick > last):
+                continue
+            # Not yet named: the name is a detection, not an
+            # arrival — a migrant whose name was first recorded
+            # after this day's end (the three migrants' names at
+            # 201600/07-01, though they arrived 06-02/06-03) is
+            # not named on this day, even though they were in the
+            # fort. The same gate as the rename above, against
+            # the day end instead of the day start (this list
+            # names citizens missing from the dwarves list, so
+            # the day end is the right bound).
+            first_seen = known[uid].get("first_seen_tick")
+            if (not isinstance(first_seen, int)
+                    or first_seen > last):
+                continue
+            named_missing.append({
+                "name": known[uid]["name"],
+                "profession": known[uid].get("profession") or "",
+                "first_recorded": (
+                    date_str(first_tick, year)
+                    if isinstance(first_tick, int) else "")})
+        if named_missing:
+            feed["migrants_named"] = named_missing
+            if feed.get("unnamed_citizens"):
+                feed["unnamed_citizens"] = max(
+                    0, feed["unnamed_citizens"] - len(named_missing))
+        if not feed.get("unnamed_citizens"):
+            feed.pop("unnamed_citizens", None)
+    # The counts were computed before the rename above, so their
+    # names still say "an unnamed migrant" for dwarves the dwarf
+    # lines now name (re-check 7: Litast/Zasit/Cog named in the
+    # dwarf lines, "an unnamed migrant" in the counts). Recompute
+    # them from the renamed records so the two agree; the rename
+    # touches only name/profession, so the counts themselves do
+    # not change. Totals are preserved: the lite path's total is
+    # the ledger headcount (population), not len(dwarves).
+    if feed.get("group_counts"):
+        old_totals = {g["key"]: g.get("total")
+                      for g in feed["group_counts"]}
+        feed["group_counts"] = _group_counts(feed["dwarves"])
+        for g in feed["group_counts"]:
+            if g["key"] in old_totals:
+                g["total"] = old_totals[g["key"]]
+    # Record age + unknown window (audit R3): the model must never
+    # subtract dates or assert anything about days with no record.
+    # Age is the date difference (day indices), not tick elapsed:
+    # 06-20 minus 06-13 is 7 days even though the record tick sits
+    # part-way through 06-13.
+    if isinstance(record_tick, int):
+        rec_day = record_tick // TICKS_PER_DAY
+        first_day = first // TICKS_PER_DAY
+        age = first_day - rec_day
+        if age > 0:
+            feed["record_age_days"] = age
+        unknown = [date_str(d * TICKS_PER_DAY, year)
+                   for d in range(rec_day + 1, first_day + 1)]
+        if unknown:
+            feed["unknown_dates"] = unknown
+    # Distress attached to the dwarf (audit R4): a distress
+    # observation is a fact about a named dwarf, not a footnote.
+    # The dwarf's own line carries it, and it also becomes an open
+    # thread (merged with open_threads below), so it survives even
+    # when the model skims the notes.
+    distress_threads: list[dict[str, Any]] = []
+    for pair in summary.get("distress") or []:
+        name = pair.get("name") or ""
+        need = pair.get("need") or ""
+        if not name:
+            continue
+        for rec in feed["dwarves"]:
+            if rec.get("name") == name:
+                rec["distress"] = need
+        distress_threads.append({
+            "kind": "distress", "subject": name,
+            "detail": f"in distress, {need}",
+            "since": summary.get("date")})
     recent: list[dict[str, str]] = []
     if state_dir is not None:
         md = diary_md_path(state_dir)
@@ -1036,25 +1955,142 @@ def build_diary_feed(store: Any, journal: Any,
                                "body": e["body"][:1500]})
             recent = recent[-3:]
     threads = open_threads(store, day_start_tick, year)
-    return {"summary": summary, "dwarves": dwarves,
-            "recent_entries": recent, "threads": threads,
-            "group_counts": counts}
+    for t in distress_threads:
+        if not any(x.get("kind") == "distress"
+                   and x.get("subject") == t["subject"]
+                   for x in threads):
+            threads.append(t)
+    feed["recent_entries"] = recent
+    feed["threads"] = threads
+    return feed
 
 
-_DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You write one diary entry per in-game day, in the voice of a tired, dry-witted overseer chronicling their dwarves — Boatmurdered-style: a story about the dwarves as people, not a ledger and not a list.
+_DIARY_SYSTEM = """You are the overseer of the Dwarf Fortress fort {fort}. You write one diary entry per in-game day, in the first person, as a person keeping a log — not as a storyteller performing one.
+
+VOICE — plain, concrete, dry. Short sentences and long ones mixed. A detail beats a flourish: "the brewer has been thirsty for a week" is a good line; "thirst has become the fort's long shadow" is not — it says nothing a ledger could not. Dry humour is welcome when the facts earn it; archaic phrasing, elegy, and purple prose are not. Write the way a tired overseer would write at the end of the day: direct, specific, a little weary, never reaching for effect.
 
 RULES — break none of them:
-- Write narrative prose in the first person ("I"), 150-300 words, a few paragraphs. Never a bullet list, never a table, never "I decided to ... It worked."
+- Write from WHAT HAPPENED TODAY, not from the ledger. The feed opens with the day's events (announcements, arrivals, failures, what each dwarf finished) and what you decided ("What I did today"). Those are the entry. The ledger and the counts are background: they are there so you can check a number, not so you can narrate them. A count without a name and a deed behind it is not a sentence — "seven of the ten had no work" is a spreadsheet, not a day. Lead with a dwarf doing something, or something happening to a dwarf, or a decision you made and what came of it. Never lead with a stock, a count, or the ledger. Numbers appear only as the trace of an event: "Lòr finished the carpenter's workshop" is an event; "wood two hundred eleven" is not. If the feed says no event record exists for the day, the entry is two or three lines from the decisions and the per-dwarf record, and then it stops.
+- The entry is ABOUT THE DWARVES: what they did today, what happened to them, how they relate, who they are close to, how that person is doing, their moods, stress, wounds, needs. The feed gives each dwarf their friends and grudges, their character, what they felt — use them. A dwarf's friend in a bad mood matters more than the food count. The stocks are a ledger line at most — one short sentence, never the story, never the opening, never the close.
+- Write narrative prose in the first person ("I"), a few paragraphs when the day had something in it (150-300 words), two or three lines when it did not — and then stop. Never a bullet list, never a table. Write only what is new or changed today. If the feed lists no new event, no new decision, and no change since yesterday, the entry is at most three lines. No exceptions, and never fill the page with the roll-call and the stocks to reach a length: the ledger line below your entry already carries the numbers. A quiet day is two or three lines, then stop.
+- Vary the shape of the entry. No two entries should read as if they were written from the same template. Never open with the date (the heading already carries it), with the age of the record, or with a disclaimer about what you do or don't know. Start with what happened. Never write a sentence whose job is to say which record is the latest: "The last per-dwarf record is the 3rd's", "The latest page on the dwarves is the 21st's", "The twenty-third is the last roll with names on it", "The third is the most recent page with names on it" are all the same construction — the record-date frame — and it is banned in every position, not just as an opening: moving it to the second sentence or the second paragraph is still the frame. The ONLY permitted form is the one above: the date inside the sentence about the fact it qualifies ("On the 13th, two migrants were carrying wounds"). A quiet day's two or three lines must be the new facts — the one thing that changed, or the one dwarf the day turned on. Never spend a line restating the record's date, the roll-call, or the stocks. Do not recite the full stock list in the prose — the ledger line below your entry carries the numbers; mention a stock only when it changed, and only in a sentence that dates the change: a same-day change ("Drink fell from thirty-five to thirty-three", two drinks recorded that day — the entry's day is its date), or a ledger interval with both endpoint dates ("Drink went from six at the end of the 12th to none by the 20th"). A stock change the day's events cannot account for must carry both endpoint dates. A sentence that only states current levels ("Food twenty-three, wood two hundred eleven") is out, even once. A sentence that only says a stock did not change ("food sits at thirty-two where it was") is the same move and is out too — an unchanged stock is not news. Do not paste the whole roster: name a dwarf when they did something, changed, or are the one the day turned on. The feed lists everyone for reference; the entry is not the list. Do not list every dwarf's need, wound, or job — pick the one or two that matter today; the rest is in the feed, not the entry. Do not put the ledger in the same place every day, and do not close with the same refrain.
+- NEVER repeat a sentence, a joke, or a refrain from a previous entry. The recent entries are there so you know what has already been said — not so you can say it again. Before you write, read the recent entries and note the exact phrases they use for staleness, for the ledger, for idle hands, for thirst, for the workshops. Do NOT reuse any of them — not the words, not the construction. That includes the constructions a recent entry uses: a sentence that says which record is latest, a sentence that announces what you do not know, a sentence that restates the stocks. If a recent entry opens with a record-date sentence, do not open yours with one, and do not move it to the second sentence either. If a recent entry says "I will not dress it up", "I would swear to", "did not walk down", "went onto the slate", "ten pairs of idle hands", or "wood does not hold water", those phrases are used up: find different words, or leave the point unmade. If you said it yesterday, find a new way to say it or do not say it at all.
+- When the record is old, put its age inside the sentence about the fact it qualifies ("On the 13th, two migrants were carrying wounds"), never as an opening disclaimer and never as a sentence about what you can or can't claim. One mention is enough; the reader knows.
+- Do not announce your uncertainty. Never write a sentence whose job is to say what you will or won't claim, what you can or can't swear to, what you do or don't know, or how little you have. "I cannot tell you", "so I will not", "I won't claim", "I record it as it stands", "that is all I have", "That is the sum of what I have", "The first is certain", "the one figure I am sure of" are all the same move in different words — do not write any of them. The ban is on the move, not the phrase list: ANY sentence whose job is to say the figures are old, carried over, not fresh, or unmeasured is out — "the figures beside this entry are the old ones carried over", "I have the counts for the day and nothing attached to them", "the rest of the store I have not measured again" are the same move in new words. The age belongs inside a fact sentence or nowhere at all. State the facts and stop. Do not certify one figure as the sure one. Do not close with a summary of how little you know.
+- Never end with a vow about tomorrow ("Tomorrow I will…", "I mean to find…", "I will find out…"). A bare prediction about what will happen ("they will not wait long") is the same move without the vow's wording — do not write it. Never close with an aphorism or tagline ("three throats, no barrel", "Water would answer most of what ails this place", "dry barrels or no"). Never write an aside about the writing ("That is the whole difficulty in two lines", "I know what the barrels would tell me"). End on a fact, not a line.
+- Never end an entry on the drink-zero fact — "There is no drink in the fort" or any restatement of it. The ledger line already says it. A quiet day's last line is its one new fact, not the standing zero. Do not close on a joke or a punchline about something the fort lacks: no well jokes — the fort has no well in the facts, and "so there is no well" is a line, not a fact.
+- Never infer whether queued jobs were begun or finished. The feed says what was queued, and the events say what finished ("Finished: ..."). A queued job is finished only when the events say it finished — never because it was queued, and never because a building stands. If the events do not say a job finished, do not say it was begun, unbegun, or finished.
+- Never tie two same-day facts into one causal sentence unless the feed ties them. Wounds and a finished building on the same day are two facts, not one story — "five of them took wounds putting it there" is invention unless the feed says the wounds came from that job (same job, same report, same event). A coincidence of dates is not a cause.
+- Count drinkers from the completions, never from the needs. One unit of drink is one drink. The events list who drank ("Routine: drinking — Olon, Ral"); the needs lines say who still goes without. Five "finally got drink" need lines are not five drinkers, and a stock drop of one is one drink, not five.
+- Never state what a job or a building is made of unless the feed states it. "The beds want stone" is wrong (a bed takes wood) and the feed never said stone — materials come from the feed or not at all.
+- At most two dwarves' needs per entry, and only the strongest one each. The feed lists every dwarf's needs for reference; the entry is not the list. "Badly" comes from the feed's rendering only (the feed marks a need "badly" when it gnaws hard) — never add it yourself, and never present a dwarf's weakest need as their defining want. A need the feed marks ongoing is background, not today's news.
+- Say each fact once. Restating the same fact in new words is still restating it: a wound count, a thirsty list, a stock level, or a decision gets one sentence, not three. If you have said it, move on.
+- Never close with a summary of the day. "That is the whole of the day:", "That is the day:" and any sentence that sums the entry up are out. End on a fact, not a line.
+- A fact from a dated record carries its date in the same sentence. A wound first recorded on the 13th, a friendship from before the record, a stock from the previous entry's ledger — the date rides with the fact, never in a separate sentence about the record. The date rides in EVERY sentence that reports a fact from a dated record, not just the first: 06-27's second sentence ("Olon's close friend Rakust was idle alongside him") reported 06-26 facts with no date and was wrong.
+- A wound first recorded on a date was not necessarily taken that day, and a wound first recorded on the 13th was not necessarily from before the 13th. First sighting is not the date of injury: the wound could have been taken any day between the last clear record and the sighting. Write "first recorded", never "taken" or "from before", for a wound's first sighting. "Taken today" for a wound first seen today is wrong; "from before the 13th" for a wound first seen on the 13th is wrong.
+- A change is first recorded on the record's date, and may have happened any day since the last record: a stress rise first seen on the 21st may have happened any day since the last record. Date the change to the record date, and never claim a day inside the gap for it.
+- Never say one dwarf has been thirsty longer than another. The feed carries no since-dates for thirst, and the thirst counters cannot order two dwarves — both Ral and Olon first crossed the line on the same day. "Goes back further than anyone else's", "longest", "the one going without longest" are all out. Say who is thirsty today; never rank them by duration.
+- Do not comment on the record, the pages, or the entries themselves. "The one line on it that reads differently from the pages before" is an aside about the record, not a fact about the fort. Do not compare today's stocks to yesterday's unless the feed lists yesterday's numbers: "The stores are where yesterday left them" asserts a yesterday measurement the feed never gave.
+- Do not use "hands" as a word for idle dwarves. Say "idle" or "with no work" plainly. No "pairs of hands", no "idle hands", no "empty hands".
+- Do not personify the book, the ledger, or the column. The book is paper; it does not speak, keep secrets, carry names, or have a truest line. Do not write "the book doesn't say", "the column has stopped carrying his name", "the truest line in the book". Do not set the scene ("The ledger sits open on the desk"). Do not apologize for the fort, the book, or yourself, and do not assign blame the facts don't support ("parched for weeks by my own hand"). The thirst is a fact; whose fault it is is not in the facts.
+- Do not guess why. "Perhaps" is still a guess. If the facts don't say why something happened, say nothing about why. Do not draw a conclusion the numbers don't support: a one-drink drop tells you nothing about how much the fort had.
+- Advance open threads or drop them. A thread that has not changed in days is not news: mention it only if today changed it, and note when one closes. Never copy a thread line verbatim. Refer back to the recent entries when a story arcs across days.
 - Every claim must come from the facts supplied below. Never invent an event, a name, a number, or a death that is not in the facts. If the facts do not say what happened to a dwarf, do not guess — leave them out or say their fate is unclear.
 - Count carefully. When you say how many dwarves share a condition — wounded, stressed, thirsty, in a mood — name exactly which ones, and claim ALL of them only if the facts say all of them. Six wounded out of seven is six, not every dwarf. A dwarf the facts do not list as wounded is not wounded.
-- Time is in the facts. A fact the feed marks pre-existing, long-standing, ongoing, or "since" a date did NOT happen today — never write that it happened today, was found today, or is new. Only a fact the feed marks "new today", or a change the feed lists for today, happened today. A dwarf's god, a long-standing bond, and a wound from an earlier day are background, not today's events.
+- Never use a share word ("most", "bulk", "mainly", "the bulk of", "the lion's share") unless the feed states the total — and then put the total in the sentence. "Most of what the fort got out of the daylight" for three gatherings out of six is wrong; "three of the six gatherings" is right. Say the numbers, not the share.
+- Time is in the facts. A fact the feed marks pre-existing, long-standing, ongoing, or "since" a date did NOT happen today — never write that it happened today, was found today, or is new. Only a fact the feed marks "new today", or a change the feed lists for today, happened today. A dwarf's god, a long-standing bond, and a wound from an earlier day are background, not today's events. A wound the feed lists as "(since before today)" was already there when the record began — do not say it was taken today, found today, or is new. Five wounds taken today and one already there is five, not all. The seasons follow the Dwarf Fortress calendar, not Earth's: Granite, Slate and Felsite are spring; Hematite, Malachite and Galena are summer; Limestone, Sandstone and Timber are autumn; Moonstone, Opal and Obsidian are winter. A wound from Hematite is a summer wound — never call it spring. A count from Limestone is autumn, not summer.
 - Do not compress distinct actions into one. If the feed lists two different actions — two job types, two workshops, a build and a queue — name both, with their counts. "Set one job running" for two queued jobs is wrong; say which jobs, how many of each, and at which workshop.
 - The recent entries are from EARLIER days and may describe a different telling of this fort's story. Never carry a claim forward from a recent entry unless TODAY'S facts confirm it. If a past entry says an attempt failed, it stays failed unless today's facts say it succeeded. Name a dwarf as doing a job only if today's facts name them doing it — never because an old entry named them.
-- The entry is ABOUT THE DWARVES: their moods, stress, wounds, needs, relationships, and what happened to them today. The stocks are a ledger line at most — one short sentence, never the story.
-- Continue any open thread that is still true (a wound, a stressed dwarf, a strange mood) and note when one closes. Refer back to the recent entries when a story arcs across days.
+- A dwarf's profession is what they ARE, not what they are DOING today. Never write a dwarf working at their profession's bench, tool, or trade unless the facts say their job today is that work. If the facts say a dwarf is drinking, eating, or idle, say that — do not put tools in their hands. A jeweler who spent the day drinking was drinking, not grinding facets.
+- When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need, what they did today, what they felt. A new friendship is news; a long-standing bond is background — the feed marks which is which, and only the new one is today's story. A dwarf's character (their traits) and what they felt (their emotions) are in the feed when the game recorded them; use them when they bear on the day, and never invent a feeling the feed does not carry. People outside the fort are a count only — the feed says how many, never who they are, and you must not give them names or stories.
 - Name the dwarves by name. Use each dwarf's full name the first time you mention them, and their first name after that. When you write about a dwarf, use their personal life from the facts: who they are close to, how that person is doing, what they need.
-- Plain words, no game jargon, no internal terms (no "unit_id", no "tick", no "job_type", no "stress_category"). A stranger reading this should follow it as a story.
-- If nothing happened today and no dwarf changed, say so in one or two sentences — a quiet day, plainly. Do not pad a quiet day into a saga."""
+- A name first recorded after the event must not name the event. A completion names its worker by id, not by name: the old 06-12 entry named Litast Aknûnònul eating on the 12th, but his name was first recorded on the 1st of Limestone — on the 12th the record had him only as an unnamed migrant. Name a dwarf in an event only when the feed names them for that event.
+- Plain words, no game jargon, no internal terms (no "unit_id", no "tick", no "job_type", no "stress_category"). A stranger reading this should follow it as a story."""
+
+
+def _coverage_lines(feed: dict[str, Any],
+                    has_events: bool) -> list[str]:
+    """Plain-words source coverage for the day (P0-2): which event
+    sources were live for the day, and what is unknown. The bus and
+    the watch log end on different days, and the per-dwarf samples
+    often end days before the day itself — the feed states each,
+    so "sources dead, unknown" is never conflated with "sources
+    live, nothing happened". Returns [] when the feed carries no
+    coverage (old hand-built feeds keep the old text)."""
+    cov = feed.get("coverage") or {}
+    if not cov:
+        return []
+    year = 0
+    date = (feed.get("summary") or {}).get("date") or ""
+    try:
+        year = int(str(date).split("-")[0])
+    except ValueError:
+        year = 0
+    day_start = cov.get("day_start_tick")
+    if not isinstance(day_start, int):
+        day_start = 0
+    lines: list[str] = []
+    dead = False
+    for key, label, unknown in (
+            ("bus", "bus event log",
+             "announcements, arrivals, and completions"),
+            ("watch", "watch log", "job completions")):
+        src = cov.get(key) or {}
+        if not src.get("present"):
+            dead = True
+            lines.append(f"The {label} is missing — no {unknown} "
+                         "from it.")
+            continue
+        last_tick = src.get("last_tick")
+        in_day = src.get("in_day") or 0
+        if isinstance(last_tick, int) and last_tick < day_start:
+            dead = True
+            lines.append(f"The {label} ends on "
+                         f"{date_words(last_tick, year)} — no "
+                         f"{unknown} from it after that day.")
+        elif in_day:
+            lines.append(f"The {label} covers this day "
+                         f"({in_day} record"
+                         f"{'s' if in_day != 1 else ''}).")
+        else:
+            # No rows in the day is not "live and recorded
+            # nothing": the bus is lossy (06-12 captured 1 of 2
+            # Eat completions) and a gap of days with zero rows
+            # says nothing about what happened. The honest
+            # wording is that no record exists for the day.
+            lines.append(f"No {label} record exists for this day.")
+    samples = cov.get("samples") or {}
+    if samples.get("full_in_day"):
+        lines.append("Full per-dwarf samples exist for this day.")
+    elif samples.get("lite_in_day"):
+        lines.append("Lite per-dwarf samples exist for this day.")
+    else:
+        latest_tick = samples.get("latest_tick")
+        if isinstance(latest_tick, int):
+            lines.append("No per-dwarf sample falls in this day — "
+                         "the last record is from "
+                         f"{date_words(latest_tick, year)}.")
+        else:
+            lines.append("No per-dwarf sample exists at or before "
+                         "this day.")
+        dead = True
+    if not has_events:
+        if dead:
+            lines.append("Write two or three lines from the "
+                         "decisions and the last dated record, and "
+                         "stop. Do not fill the entry with the "
+                         "ledger or the roll-call.")
+        else:
+            # The per-dwarf record covers this day, and no event
+            # was recorded for it — but "nothing happened today"
+            # is not the claim: the record is lossy, and a
+            # same-day first sighting (06-02: äs's wound) IS
+            # something happening. Say what the writer may draw
+            # on, never that nothing happened (re-check 8).
+            lines.append("The per-dwarf record covers this day. "
+                         "Write two or three lines from the "
+                         "per-dwarf record, and stop.")
+    return lines
 
 
 def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
@@ -1070,6 +2106,117 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
     parts.append(
         f"Day: {summary['date_words']} ({summary['date']}), "
         f"{summary['season']}.")
+    # What happened today — the day's events, first, before the
+    # ledger. The feed used to hand the model stocks and state
+    # diffs, so it narrated a spreadsheet; the events are the day.
+    # A day with no event record says so and stops padding.
+    # The queue groups are parsed once here (the one place the
+    # queue phrases are parsed) so the completion phrases below
+    # can resolve a workshop job to its gerund, and the "What I
+    # did today" section later renders the same groups.
+    dec_phrases, queue_groups, queue_order = (
+        _queue_groups_and_phrases(summary))
+    workshop_map = {
+        tuple(w["pos"]): w for w in feed.get("workshops") or []
+        if isinstance(w.get("pos"), list)}
+    queue_kinds: dict[int, set] = {}
+    for _loc in queue_order:
+        _m = re.search(r"#(\d+)", _loc)
+        if _m:
+            queue_kinds[int(_m.group(1))] = {
+                j for j, _, _ in queue_groups[_loc]}
+    ev = feed.get("events") or {}
+    cov_lines = _coverage_lines(feed, bool(ev.get("has_events")))
+    if cov_lines:
+        # Record for this day, right after the Day line and before
+        # the events: which sources were live, and what is unknown.
+        # The no-event branch below stays silent when this block
+        # exists — it already says what the entry may draw on.
+        parts.append("Record for this day:\n" + "\n".join(cov_lines))
+    if ev.get("has_events"):
+        elines = []
+        for text in ev.get("reports") or []:
+            elines.append(f"Announced: {text}")
+        for text in ev.get("weather") or []:
+            elines.append(f"Weather: {text}")
+        for a in ev.get("arrivals") or []:
+            prof = (f" ({a['profession']})"
+                    if a.get("profession") else "")
+            elines.append(
+                f"Arrived: {a['name']}{prof} joined the fort.")
+        for d in ev.get("departures") or []:
+            elines.append(
+                f"Left: {d['name']} is no longer in the fort "
+                "(not recorded as a death).")
+        for c in ev.get("cancellations") or []:
+            job = job_words(c["job"]) or c["job"]
+            elines.append(
+                f"Failed: {c['name']} cancelled {job}. The record "
+                "does not say why — do not guess.")
+        routine_by_job: dict[str, list[str]] = {}
+        for c in ev.get("completions") or []:
+            job = _completion_phrase(c["job"], c.get("pos"),
+                                     workshop_map, queue_kinds)
+            if c.get("routine"):
+                workers = c.get("workers") or []
+                who = ", ".join(workers) if workers else "someone"
+                n = c["count"]
+                routine_by_job.setdefault(job, []).append(
+                    f"{who} ({n})" if n > 1 else who)
+            elif c.get("name"):
+                n = c["count"]
+                elines.append(
+                    f"Finished: {c['name']} finished {job}"
+                    + (f" ({n} times)" if n > 1 else "") + ".")
+            else:
+                n = c["count"]
+                elines.append(
+                    f"Finished: {job} was completed {n} "
+                    f"time{'s' if n > 1 else ''} (the record does "
+                    "not say by whom).")
+        for job, whos in routine_by_job.items():
+            elines.append(f"Routine: {job} — {', '.join(whos)}.")
+        summary_death_names = {
+            d.get("name") for d in summary.get("deaths") or []
+            if d.get("name")}
+        for d in ev.get("deaths") or []:
+            if d.get("name") not in summary_death_names:
+                elines.append(
+                    f"Died: {d['name']} died today (the record "
+                    "does not give the cause).")
+        for d in ev.get("distress") or []:
+            elines.append(f"In distress: {d['name']} — {d['kind']}.")
+        for s in ev.get("stock_alerts") or []:
+            if s["units"] == 0:
+                elines.append(f"Ran out: the last of the "
+                              f"{s['kind']} ran out today.")
+            else:
+                elines.append(f"Running low: {s['kind']} down to "
+                              f"{s['units']}.")
+        for t in ev.get("threats") or []:
+            what = t.get("name") or t.get("race") or t.get("detail") \
+                or "something hostile"
+            elines.append(f"Threat: {what} came too close today.")
+        noise = []
+        if ev.get("wildlife_arrivals"):
+            noise.append(f"{ev['wildlife_arrivals']} wild creatures "
+                         "appeared")
+        if ev.get("wildlife_deaths"):
+            noise.append(f"{ev['wildlife_deaths']} wild creatures "
+                         "died")
+        if ev.get("dropped_reports"):
+            noise.append(f"{ev['dropped_reports']} combat reports")
+        if noise:
+            elines.append("Also recorded, not the fort's story: "
+                          + ", ".join(noise) + ".")
+        parts.append("What happened today:\n" + "\n".join(elines))
+    elif not cov_lines:
+        parts.append(
+            "No event record exists for this day: the watcher and "
+            "the poller recorded nothing — write only from the "
+            "decisions, the per-dwarf record, and the counts "
+            "below, briefly, and stop. Do not pad the entry with "
+            "the stocks or the roll-call to reach a length.")
     stock_bits = []
     for metric, label in (("drink", "drink"), ("food", "food"),
                           ("wood", "wood"), ("stone", "stone"),
@@ -1094,19 +2241,62 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         # The rebuild sets this when the Store has no full
         # per-dwarf samples for the day (04-05): the counts above
         # are the day's own, from the run snapshots, but no
-        # individual dwarf's state was recorded. Naming a dwarf
-        # or describing one's state would be invention. When the
-        # last record is known (a lite sample from an earlier
-        # day, e.g. 06-02's is 04-02's), say so — the gap itself
-        # is a fact.
-        note = ("No per-dwarf record exists for this day: do not "
-                "name any dwarf or describe any dwarf's individual "
-                "state — write only about the fort's stocks, "
-                "decisions, and counts.")
+        # individual dwarf's state was recorded. Do not describe
+        # a dwarf's individual state (wounds, needs, stress,
+        # mood) from the record — there is none. But the events
+        # section above DOES name the dwarves who did things
+        # (finished a building, gathered plants, drank), and the
+        # entry must name them for what they did: the old wording
+        # ("do not name any dwarf") contradicted the events and
+        # made 04-02 hide its gatherers and drinkers behind "one
+        # pair of hands" while 04-05 named them correctly
+        # (re-check 5). When the last record is known (a lite
+        # sample from an earlier day, e.g. 06-02's is 04-02's),
+        # say so — the gap itself is a fact.
+        part = feed.get("partial_dwarf_record")
+        if part:
+            # 06-02: lite samples exist today for a few citizens,
+            # but the curated record was cleared (the samples span
+            # too far to attribute to this day). "No record" would
+            # contradict the coverage block, which says lite
+            # samples exist for this day — say the partial truth
+            # instead (re-check 8): samples exist today, only a
+            # few citizens are covered, the rest have no record.
+            pop = feed.get("population") or (
+                feed["summary"].get("stocks_end") or {}).get(
+                    "population")
+            note = (f"The per-dwarf record for this day is "
+                    f"partial: only {part['sampled']} of the {pop} "
+                    f"citizens were recorded today. Do not "
+                    f"describe any dwarf's individual state "
+                    f"(wounds, needs, stress, mood) from the "
+                    f"record beyond what the open threads carry. "
+                    f"The events section above names the dwarves "
+                    f"who did things today, and you may name them "
+                    f"for what they did.")
+        else:
+            note = ("No per-dwarf record exists for this day: do "
+                    "not describe any dwarf's individual state "
+                    "(wounds, needs, stress, mood) from the "
+                    "record — there is none. The events section "
+                    "above names the dwarves who did things "
+                    "today, and you may name them for what they "
+                    "did. Write only about the day's events, "
+                    "decisions, and counts.")
         last = feed.get("last_dwarf_record_date")
         if last:
-            note += (f" The last per-dwarf record is from {last}; "
-                     f"do not present its states as today's.")
+            if part:
+                # The date is the span's start, not the last
+                # record: the partial samples run from it to
+                # today, and no single date owns the record.
+                note += (f" The samples behind it run from {last} "
+                         f"to today; no single date owns the "
+                         f"record — do not present its states as "
+                         f"today's.")
+            else:
+                note += (f" The last per-dwarf record is from "
+                         f"{last}; do not present its states as "
+                         f"today's.")
         parts.append(note)
     if feed.get("partial_dwarf_record"):
         # The rebuild's partial-poll days (06-02): the day's own
@@ -1114,14 +2304,20 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         # poll's, not the fort's — say so, and claim nothing
         # about the unrecorded dwarves.
         part = feed["partial_dwarf_record"]
-        pop = (feed["summary"].get("stocks_end") or {}).get(
-            "population")
+        # The population is the feed's own (computed in
+        # build_diary_feed); the summary's stocks_end has no
+        # population when the store has no trend samples, and
+        # rendering "None citizens" would be worse than the gap.
+        pop = feed.get("population") or (
+            feed["summary"].get("stocks_end") or {}).get(
+                "population")
         parts.append(
             f"Only {part['sampled']} of the {pop} citizens were "
             f"recorded today ({part['wounded']} wounded, "
             f"{part['sampled'] - part['wounded']} unmarked); the "
-            f"rest have no record for today. Do not claim "
-            f"anything about the unrecorded dwarves.")
+            f"other {pop - part['sampled']} have no record for "
+            f"today. Do not claim anything about the unrecorded "
+            f"dwarves.")
     if feed.get("lite_dwarf_record_date"):
         # The rebuild's lite-sample days (June/July): the
         # per-dwarf record below is the most recent one, from an
@@ -1134,6 +2330,32 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
             f"a per-dwarf sample — it is the most recent record, "
             f"not today's measurement. Attribute its facts to "
             f"that day; do not present them as today's.")
+    if feed.get("record_age_days"):
+        # Audit R3: the age in days, stated — never make the
+        # model subtract dates (06-20: the record was 06-13 and
+        # the model wrote "six days old" for seven).
+        n = feed["record_age_days"]
+        parts.append(
+            f"The per-dwarf record is {n} "
+            f"{'day' if n == 1 else 'days'} old.")
+    if feed.get("unknown_dates"):
+        # Audit R3: the days with no record at all, named — the
+        # model must say nothing about them (07-07: the record
+        # was 07-05 and the model still asserted "Nobody has
+        # moved since" about 07-06/07-07). A long gap names its
+        # ends, not every day in it.
+        dates = feed["unknown_dates"]
+        if len(dates) > 5:
+            span = (f"the days from {dates[0]} to {dates[-1]} "
+                    f"({len(dates)} days)")
+        elif len(dates) == 1:
+            span = dates[0]
+        else:
+            span = ", ".join(dates[:-1]) + f" or {dates[-1]}"
+        parts.append(
+            f"No record exists for {span}; say nothing about "
+            f"them — do not claim any dwarf changed, stayed the "
+            f"same, or did anything on those days.")
     if feed.get("unnamed_citizens"):
         # The rebuild's June/July days: migrants whose names were
         # never recorded. They are in the counts (the total is
@@ -1146,17 +2368,28 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
             f"{'it appears' if n == 1 else 'they appear'} in the "
             f"lists below as 'an unnamed migrant'. Do not invent "
             f"names for {'it' if n == 1 else 'them'}.")
+    if feed.get("migrants_named"):
+        # Citizens missing from the dwarves list whose names the
+        # event log recovered: named here with their first-recorded
+        # date, so the entry can write about them without inventing
+        # an arrival date.
+        mn = []
+        for m in feed["migrants_named"]:
+            prof = (f", {m['profession']}" if m.get("profession")
+                    else "")
+            when = (f" (first recorded {m['first_recorded']})"
+                    if m.get("first_recorded") else "")
+            mn.append(f"{m['name']}{prof}{when}")
+        parts.append(
+            "Migrants in the fort whose names the record "
+            "recovered: " + "; ".join(mn) + ".")
     for crisis in _stock_crisis_lines(summary):
         parts.append("CRISIS: " + crisis)
     for death in summary["deaths"]:
+        name = death.get("name")
+        who = f"{name} died today" if name else "A dwarf died today"
         parts.append(
-            f"A dwarf died today: {death.get('cause') or 'an unknown cause'}.")
-    if summary["arrivals"]:
-        n = summary["arrivals"]
-        parts.append(
-            f"{n} new {'dwarf' if n == 1 else 'dwarves'} joined the fort today.")
-    if summary["threats"]:
-        parts.append("Something hostile came too close today.")
+            f"{who}: {death.get('cause') or 'an unknown cause'}.")
     for obs in summary.get("observations") or []:
         parts.append("Noted: " + obs)
     # Queued jobs group by workshop, with counts per job type:
@@ -1164,37 +2397,9 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
     # make_barrel x2 (3 jobs total)". Two different jobs are two
     # facts, never compressed into "set one job running". A job
     # that did not work keeps its outcome on its own item.
-    dec_phrases = []
-    queue_groups: dict[str, list[tuple[str, int, str]]] = {}
-    queue_order: list[str] = []
-    for dec in summary["decisions"]:
-        phrase = clean_diary_text(
-            dec.get("decision") or dec.get("action") or "")
-        if not phrase:
-            continue
-        outcome = ("worked" if dec.get("ok") is True
-                   else "did not work" if dec.get("ok") is False
-                   else "outcome unknown")
-        if dec.get("action") == "queue_job":
-            m = _QUEUE_PHRASE.match(phrase)
-            if m:
-                loc = m.group(3)
-                if loc not in queue_groups:
-                    queue_groups[loc] = []
-                    queue_order.append(loc)
-                queue_groups[loc].append(
-                    (m.group(1), int(m.group(2)), outcome))
-                continue
-        dec_phrases.append(f"{phrase} ({outcome})")
-    for loc in queue_order:
-        jobs = queue_groups[loc]
-        total = sum(n for _, n, _ in jobs)
-        job_bits = ", ".join(
-            f"{j} x{n}" if o == "worked" else f"{j} x{n} ({o})"
-            for j, n, o in jobs)
-        dec_phrases.append(
-            f"Queued at {loc}: {job_bits} ({total} job"
-            f"{'s' if total > 1 else ''} total)")
+    # (dec_phrases, queue_groups, queue_order were parsed once
+    # above, before the events section, so the completion phrases
+    # could resolve workshop jobs; they are rendered here.)
     if dec_phrases:
         parts.append("What I did today: " + "; ".join(dec_phrases) + ".")
     # Pre-computed counts: the AI reads the number instead of
@@ -1216,14 +2421,26 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
             "below):\n" + "\n".join(count_lines))
     # The dwarves: featured first, each with their changes and
     # their personal life. A stable dwarf gets one line.
-    # Wound threads carry "since" (how long the wound has been
-    # true) — a pre-existing wound is background, not today's
-    # event. A wound that appeared today is already named by the
-    # change text ("was wounded"), so the line only needs the
-    # since-date for the pre-existing case.
-    wound_since = {t["subject"]: t["since"]
-                   for t in feed["threads"]
-                   if t["kind"] == "wounded" and t.get("since")}
+    # Wound threads carry "since" (first recorded date of the
+    # wound the dwarf carries now) — a pre-existing wound is
+    # background, not today's event. A wound that appeared today
+    # is already named by the change text ("was wounded"), so the
+    # line only needs the since-date for the pre-existing case.
+    # Keyed by unit_id, not by name: three unnamed migrants share
+    # the display name "an unnamed migrant" while the threads
+    # name them "dwarf {uid}" — keying by name lost their
+    # since-dates and the line fell back to "(since before today)"
+    # (re-check 5, 06-20). The name key is kept only as a
+    # fallback for threads/records without a unit id.
+    wound_since = {}
+    wound_since_by_name = {}
+    for t in feed["threads"]:
+        if t["kind"] != "wounded" or not t.get("since"):
+            continue
+        entry = (t["since"], t.get("first_sighting"))
+        if isinstance(t.get("unit_id"), int):
+            wound_since[t["unit_id"]] = entry
+        wound_since_by_name[t["subject"]] = entry
     dwarf_lines = []
     for rec in feed["dwarves"]:
         bits = [f"{rec['name']} ({rec['profession'] or 'dwarf'})"]
@@ -1232,28 +2449,138 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
         stress_w = (rec["stress"] or {}).get("words") or ""
         if stress_w and stress_w not in ("content",):
             bits.append(f"{stress_w}")
+        if rec.get("distress"):
+            # Audit R4: distress is a fact about this dwarf, on
+            # their own line — not only a "Noted:" line elsewhere
+            # (06-28: the model dropped the note and kept the
+            # manager/stockpile attempts beside it).
+            bits.append(f"in distress, {rec['distress']}")
         if rec["wounds"]:
             w = (f"{rec['wounds']} wound"
                  f"{'s' if rec['wounds'] > 1 else ''}")
             wound_new = any(c["kind"] == "wound_new"
                             for c in rec["changes"])
             if not wound_new:
-                since = wound_since.get(rec["name"])
-                w += (f" (since {since})" if since
-                      else " (since before today)")
+                since = None
+                if isinstance(rec.get("unit_id"), int):
+                    since = wound_since.get(rec["unit_id"])
+                if since is None:
+                    since = wound_since_by_name.get(rec["name"])
+                if since:
+                    date, first = since
+                    w += (f" (first recorded {date})" if first
+                          else f" (since {date})")
+                else:
+                    w += " (since before today)"
             bits.append(w)
+        # Needs, once each, strongest first (most_unmet_needs
+        # already sorts by focus, lowest first): a need that is
+        # both current and newly unmet is listed once here, and
+        # its "went without" change below is skipped (audit R6 —
+        # 04-01 carried ~11 need fragments per dwarf and the
+        # model summarized them vaguely). A need gnawing hard
+        # (focus at or below -5000; 22 of 254 unmet needs in the
+        # store sit there, the rest mostly -1000..-5000) says so.
+        current_needs = {n["need"] for n in rec["needs"]}
         for n in rec["needs"]:
             need_new = any(
                 c["kind"] == "need_unmet"
                 and n["need"] in c["text"]
                 for c in rec["changes"])
-            bits.append(f"going without {n['need']}"
+            focus = n.get("focus")
+            strength = (" badly" if isinstance(focus, int)
+                        and focus <= -5000 else "")
+            bits.append(f"going without {n['need']}{strength}"
                         + ("" if need_new
                            else " (ongoing, not new today)"))
         if rec["job"]:
-            bits.append(f"working as {rec['job']}")
+            # Audit R5: the job in plain words, never the raw
+            # token — "working as Fish" became "Ral cleans fish"
+            # in three entries. Mapped tokens render bare
+            # ("fishing"); unmapped ones render as
+            # "working as <words>".
+            words = job_words(rec["job"])
+            if rec["job"] in JOB_VERBS:
+                bits.append(words)
+            elif words:
+                bits.append(f"working as {words}")
         for ch in rec["changes"]:
+            if ch["kind"] == "need_unmet" \
+                    and ch["text"].startswith("went without "):
+                if ch["text"][len("went without "):] \
+                        in current_needs:
+                    continue
             bits.append(ch["text"])
+        # What the dwarf DID today (from the day's job completions)
+        # comes before the state: the per-dwarf section is what
+        # happened to them, not their stat line.
+        for did in rec.get("did") or []:
+            job = _completion_phrase(did["job"], did.get("pos"),
+                                     workshop_map, queue_kinds)
+            n = did["count"]
+            if did.get("routine"):
+                bits.append(f"{job} {n} "
+                            f"time{'s' if n > 1 else ''} today")
+            else:
+                bits.append(f"finished {job}"
+                            + (f" {n} times" if n > 1 else ""))
+        # Social ties (friendships, grudges — hf_visual), with the
+        # other dwarf's state, so the entry can write the human
+        # consequence. People outside the fort are a count only:
+        # their names and stories are not in the record, and the
+        # model must not invent them.
+        for tie in rec.get("social") or []:
+            tbits = f"{tie['label']} of {tie['name']}"
+            if tie.get("mood") and tie["mood"] != "none":
+                tbits += f" (in a {tie['mood']} mood)"
+            if tie.get("stress"):
+                tbits += f" ({tie['stress']})"
+            if tie.get("changed"):
+                tbits += " — changed today"
+            tbits += (" (new today)" if tie.get("new_today")
+                      else " (long-standing, not new today)")
+            bits.append(tbits)
+        if rec.get("social_outside"):
+            n = rec["social_outside"]
+            bits.append(
+                f"has {n} {'person' if n == 1 else 'people'} "
+                "elsewhere, outside the fort (a count only — "
+                "their names and stories are not in the record)")
+        for t in rec.get("traits") or []:
+            bits.append(f"{t['facet']} {t['words']} ({t['value']})")
+        for e in rec.get("emotions") or []:
+            thought = (f" — {e['thought']}" if e.get("thought")
+                       else "")
+            # A feeling is a dated event, not a current state:
+            # Zulban's uneasiness was felt on the 8th of Hematite
+            # and carried forward undated into June, where the
+            # model reported it as the 26th's (re-check 5). The
+            # date rides with the feeling, from its own year_tick.
+            # An emotion with no recorded tick keeps no date —
+            # undated is honest, a guessed date is not.
+            when = ""
+            yt = e.get("year_tick")
+            ey = e.get("year")
+            if isinstance(yt, int):
+                if not isinstance(ey, int):
+                    ey = int((summary.get("date") or "125").split(
+                        "-")[0])
+                when = f" ({date_words(yt, ey)})"
+            bits.append(f"felt {e['type']}{thought}{when}")
+        # Personal goals and notable skills: the dwarf's own
+        # ambitions, not a stat. The goal names are verb phrases
+        # ("Create Great Artwork", "Be a Father"), so they render
+        # lowercased after "wants to". Skills render with their
+        # game rating word ("adequate"), best first.
+        if rec.get("goal"):
+            bits.append(f"wants to {str(rec['goal']).lower()}")
+        if rec.get("skills"):
+            sk = ", ".join(
+                f"{str(s.get('skill') or '').lower().replace('_', ' ')}"
+                f" ({str(s.get('rating') or '').lower()})"
+                for s in rec["skills"] if s.get("skill"))
+            if sk:
+                bits.append(f"skilled at {sk}")
         for rel in rec["relations"]:
             rbits = f"{rel['type']} {rel['name']}"
             word = ("devotion" if rel["type"] == "deity"
@@ -1281,7 +2608,18 @@ def diary_prompt(feed: dict[str, Any]) -> list[dict[str, str]]:
     if feed["threads"]:
         tlines = []
         for t in feed["threads"]:
-            since = f" since {t['since']}" if t.get("since") else ""
+            if t.get("kind") == "unmet_need":
+                # Re-check 4 fix F: unmet_need threads duplicate
+                # the dwarf lines without focus values — the exact
+                # lines the model misread on 04-01. Kept in the
+                # feed dict, never rendered into the prompt.
+                continue
+            if t.get("since"):
+                since = (f" (first recorded {t['since']})"
+                         if t.get("first_sighting")
+                         else f" since {t['since']}")
+            else:
+                since = ""
             tlines.append(
                 f"{t['subject']}: {t['kind']} — {t['detail']}{since}")
         parts.append("Open threads:\n" + "\n".join(tlines))
@@ -1443,7 +2781,13 @@ def _find_numbers(body: str) -> list[tuple[int, int, int]]:
     thirty + nine; "a hundred and twenty-four" is one run).
     A run starts on a digit or a number word; "a"/"an" start a run
     only when the next token is hundred/thousand. Runs are maximal
-    — "thirty-nine from thirty-three" is two numbers, not one."""
+    — "thirty-nine from thirty-three" is two numbers, not one.
+    Digit ordinals ("the 12th", "the 20th") are dates, not
+    numbers, and are skipped: the tokenizer splits "12th" into
+    "12" + "th", and without the skip the stock check reads the
+    date as a level — which makes bar (2), the date riding with
+    the fact in the same sentence, unimplementable. Word ordinals
+    ("first") already return no number."""
     lowered = body.lower()
     tokens = [(m.group(0), m.start(), m.end())
               for m in re.finditer(r"[a-z]+|\d+", lowered)]
@@ -1452,6 +2796,15 @@ def _find_numbers(body: str) -> list[tuple[int, int, int]]:
     while i < len(tokens):
         tok, start, _ = tokens[i]
         if tok.isdigit():
+            # Ordinal date, not a quantity: "12th" is the day, and
+            # the two characters right after the digits are the
+            # suffix. A space or punctuation intervenes in every
+            # legitimate quantity use ("drink 12", "12 dwarves"),
+            # so the adjacency is the test.
+            if lowered[tokens[i][2]:tokens[i][2] + 2] in (
+                    "th", "st", "nd", "rd"):
+                i += 1
+                continue
             out.append((int(tok), start, tokens[i][2]))
             i += 1
             continue
@@ -1469,11 +2822,18 @@ def _find_numbers(body: str) -> list[tuple[int, int, int]]:
         # Consume the maximal run of number words. "and" joins a
         # run only after hundred/thousand ("a hundred and
         # twenty-four" is one number); "one and two" is two numbers,
-        # not three — the "and" there ends the run.
+        # not three — the "and" there ends the run. A sentence
+        # boundary also ends a run: "thirty-three. Six of the
+        # seven" is 33 and 6, not 39 — the tokenizer drops the
+        # punctuation, so the gap between tokens is checked for
+        # ".", "!", "?", or a newline.
         run = [tok]
         end = tokens[i][2]
         j = i + 1
         while j < len(tokens):
+            gap = lowered[tokens[j - 1][2]:tokens[j][1]]
+            if any(c in gap for c in ".!?\n"):
+                break
             t2 = tokens[j][0]
             if t2 in _NUMBER_ONES or t2 in _NUMBER_TENS \
                     or t2 in ("hundred", "thousand"):

@@ -13,6 +13,7 @@ from this module.
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -89,6 +90,20 @@ class FreePiClient:
                 wait = _retry_wait(e, attempt)
             except urllib.error.URLError as e:
                 # Network failure (DNS, connect, reset): transient.
+                if attempt == MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        f"Free Pi chat -> network error: {e}") from e
+                last_exc = e
+                wait = _retry_wait(None, attempt)
+            except http.client.HTTPException as e:
+                # Dropped connection mid-response (IncompleteRead,
+                # RemoteDisconnected): resp.read() raises these
+                # OUTSIDE urlopen, so they are not wrapped in
+                # URLError and used to escape with no retry at all
+                # (the 04-02 diary rewrite failed 8 straight times
+                # on IncompleteRead while direct calls with the
+                # identical prompt succeeded — transient, not
+                # content). Same retry policy as URLError.
                 if attempt == MAX_ATTEMPTS:
                     raise RuntimeError(
                         f"Free Pi chat -> network error: {e}") from e

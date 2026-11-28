@@ -490,10 +490,13 @@ class TestEvalRunCLI(unittest.TestCase):
                             "--model", "deepseek-v4.1-flash"])
         self.assertEqual(rc, 2)
 
-    def test_baselines_blocked(self):
+    def test_baselines_refuse_without_allow_live(self):
         import eval_run
         rc = eval_run.main(["baselines",
                             "--kind", "noop"])
+        self.assertEqual(rc, 2)
+        rc = eval_run.main(["baselines",
+                            "--kind", "scripted"])
         self.assertEqual(rc, 2)
 
     def test_replay_two_logs(self):

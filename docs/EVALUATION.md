@@ -122,6 +122,17 @@ do not implement it in evaluation files:
   driver-added guidance). Live proof: a `--guidance-off a`
   2-tick run completed with a model call and an action, run_start
   naming guidance_off 'a'.
+- A scripted model route (the baselines need it; EVALUATION.md
+  §Baselines and scripts/eval_run.py `baselines`): `--scripted`
+  runs the snapshot's suggestion each tick — the harness's own
+  checklist applied in order — with no model. run_start records
+  `scripted: true`; the diary is skipped so the run stays
+  model-free end to end. Live proof: a `--scripted` 2-tick run
+  logged scripted=True, 0 model_call, and correctly idled (the
+  fort had no suggestion — drink 64, food 88, farm plot built).
+  `eval_run.py baselines --kind noop|scripted --allow-live`
+  now runs one baseline (S0, day tier) and records it, instead
+  of failing with BLOCKED.
 
 ## Why this is a benchmark worth building
 

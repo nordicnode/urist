@@ -295,26 +295,58 @@ def cmd_leaderboard(args) -> int:
 
 
 def cmd_baselines(args) -> int:
-    """Baselines are specified, not implemented. The no-op baseline
-    needs a driver mode that never acts (--noop does not exist in
-    m1_driver.py; that is a track-4 driver change). The scripted
-    baseline needs a scripted model route (the harness's checklist
-    applied in order, no model). Both are blocked, not skipped:
-    this command fails with the blocker named rather than
-    pretending to run a baseline."""
-    if args.kind == "noop":
-        print("BLOCKED: the no-op baseline needs a driver mode that "
-              "never acts. m1_driver.py has --mock (canned "
-              "suggestions) but no --noop. That is a driver change "
-              "(track 4, R3-P0-3/P0-4 work) — report it to the main "
-              "chat; do not fake a no-op run with the mock model.",
-              file=sys.stderr)
+    """Run one baseline live (S0 anchor, day tier, 1 repeat).
+    Gated: refuses without --allow-live (live runs are scheduled
+    by the main chat; the live fort is serialized). The no-op
+    baseline uses the driver's --noop (never acts); the scripted
+    baseline uses --scripted (the harness's checklist applied in
+    order, no model). Both driver routes exist (track 4); the
+    full multi-repeat, multi-scenario baseline suite is R2-6
+    work, not this command."""
+    if not args.allow_live:
+        print("live runs are scheduled by the main chat: the live "
+              "fort is serialized and only one track drives it at a "
+              "time. Re-run with --allow-live once your turn is "
+              "scheduled.", file=sys.stderr)
         return 2
-    print("BLOCKED: the scripted baseline needs a scripted model "
-          "route (the harness checklist applied in order, no "
-          "model). It does not exist yet — report it to the main "
-          "chat.", file=sys.stderr)
-    return 2
+    model = "noop" if args.kind == "noop" else "scripted"
+    flag = "--noop" if args.kind == "noop" else "--scripted"
+    if not _reload_anchor():
+        print("reload failed; aborting baseline", file=sys.stderr)
+        return 1
+    suite_ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    log_path = (HARNESS / "logs" /
+                f"eval-baseline-{args.kind}-S0-{suite_ts}.jsonl")
+    rc = subprocess.run(
+        [str(VENV_PYTHON),
+         str(HARNESS / "scripts" / "m1_driver.py"),
+         "--days", "1", flag, "--out", str(log_path)]).returncode
+    if rc != 0:
+        print(f"driver exited {rc}; baseline failed",
+              file=sys.stderr)
+        return 1
+    commit = _harness_commit()
+    manifest = ev.build_manifest(
+        log_path, model=model, scenario_id="S0", tier="day",
+        repeat=1, harness_commit=commit)
+    manifest_path = ev.write_manifest(
+        log_path, model=model, scenario_id="S0", tier="day",
+        repeat=1, harness_commit=commit)
+    manifest["manifest_path"] = str(manifest_path)
+    if manifest["validity"] == "discarded":
+        print(f"baseline discarded ({manifest['validity_reason']})",
+              file=sys.stderr)
+        return 1
+    lb = Leaderboard(args.db or default_scores_db_path())
+    try:
+        lb.record_eval(manifest)
+    finally:
+        lb.close()
+    print(f"{args.kind} baseline: v1 "
+          f"{manifest['score_v1']['composite']:.1f} "
+          f"validity={manifest['validity']} "
+          f"manifest={manifest_path}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -344,9 +376,11 @@ def main(argv: list[str] | None = None) -> int:
     p_lb.add_argument("--db", default=None)
     p_lb.add_argument("--out", default=None)
     p_lb.set_defaults(fn=cmd_leaderboard)
-    p_base = sub.add_parser("baselines", help="baseline status")
+    p_base = sub.add_parser("baselines", help="run one baseline live")
     p_base.add_argument("--kind", required=True,
                         choices=["noop", "scripted"])
+    p_base.add_argument("--allow-live", action="store_true")
+    p_base.add_argument("--db", default=None)
     p_base.set_defaults(fn=cmd_baselines)
     args = ap.parse_args(argv)
     return args.fn(args)

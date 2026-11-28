@@ -49,7 +49,7 @@ unpaused with no driver):
 Usage:
     .venv/bin/python scripts/m1_driver.py [--days 1] [--window 150]
         [--max-ticks N] [--mock] [--model ID] [--out logs/m1-<ts>.jsonl]
-        [--resume] [--noop] [--guidance-off {a,b,c,d}]
+        [--resume] [--noop] [--scripted] [--guidance-off {a,b,c,d}]
 """
 import argparse
 import json
@@ -745,7 +745,12 @@ class M1Driver:
     def __init__(self, args):
         self.args = args
         self.daemon = DaemonClient()
-        self.model = None if args.mock else FreePiClient(args.model)
+        # No model client for --mock or --scripted: neither route
+        # calls a model (mock runs the suggestion as a plumbing
+        # test; scripted runs it as the baseline).
+        self.model = (None if args.mock
+                      or getattr(args, "scripted", False)
+                      else FreePiClient(args.model))
         self.out = Path(args.out)
         self.out.parent.mkdir(parents=True, exist_ok=True)
         self.start_tick: int | None = None
@@ -848,6 +853,12 @@ class M1Driver:
         model's)."""
         if getattr(self.args, "noop", False):
             self._log("diary", skipped="noop run")
+            return
+        if getattr(self.args, "scripted", False):
+            # A scripted run takes real actions but no model is
+            # involved; the diary writer is a model call, so a
+            # scripted baseline stays model-free end to end.
+            self._log("diary", skipped="scripted run")
             return
         if self.args.mock:
             self._log("diary", skipped="mock run")
@@ -1163,26 +1174,37 @@ class M1Driver:
         return content
 
     def _model_decide(self, snap: dict) -> tuple[str, list[dict]]:
-        if self.args.mock:
-            # Plumbing test only: run the snapshot's suggestion (a
-            # task or a query), never a raw action. If there is no
-            # suggestion, take no action. Under guidance-off A/D
-            # the suggestion is stripped from the prompt, so the
-            # mock has nothing to run — it idles, like a model
-            # that was never told what to do.
+        if self.args.mock or getattr(self.args, "scripted", False):
+            # Plumbing test only (--mock) / scripted baseline
+            # (--scripted): run the snapshot's suggestion (a task or
+            # a query), never a raw action. If there is no
+            # suggestion, take no action. The scripted baseline is
+            # the harness's own checklist applied in order (the
+            # suggestion is the attention system's top item each
+            # tick), with no model: the floor for "plays the game
+            # competently without a model" (EVALUATION.md). The
+            # reason string names which route this is, so a run log
+            # shows whether the suggestion was run by the mock or
+            # by the scripted baseline.
+            route = ("scripted" if getattr(self.args, "scripted",
+                                            False) else "mock")
+            # Under guidance-off A/D the suggestion is stripped
+            # from the prompt, so there is nothing to run — the
+            # route idles, like a model that was never told what
+            # to do.
             if not self._suggestion_available():
-                return "mock: no suggestion (guidance off)", []
+                return f"{route}: no suggestion (guidance off)", []
             parsed = parse_suggestion(snap.get("suggestion"))
             if parsed is None:
-                return "mock: no suggestion", []
+                return f"{route}: no suggestion", []
             kind, name = parsed
             if kind == "task":
-                return "mock: suggestion task", [
+                return f"{route}: suggestion task", [
                     {"action": f"task:{name}", "kwargs": {},
-                     "reason": "mock suggestion"}]
-            return "mock: suggestion query", [
+                     "reason": f"{route} suggestion"}]
+            return f"{route}: suggestion query", [
                 {"action": "query", "kwargs": {"route": name},
-                 "reason": "mock suggestion"}]
+                 "reason": f"{route} suggestion"}]
         messages = self._prompt(snap)
         text = self._model_call(messages)
         attempts = 0
@@ -1322,6 +1344,7 @@ class M1Driver:
                   window=self.args.window, model=self.args.model,
                   mock=self.args.mock,
                   noop=getattr(self.args, "noop", False),
+                  scripted=getattr(self.args, "scripted", False),
                   guidance_off=self._guidance_off(),
                   harness_commit=current_harness_commit(),
                   protocol_version=PROTOCOL_VERSION)
@@ -1364,8 +1387,11 @@ class M1Driver:
         # start amnesiac. Best-effort inside _reground (a failed
         # fetch logs and leaves no section); preflight already
         # passed, so a grounding failure never refuses the run.
-        # A noop run has no model to ground, so it skips this.
-        if not getattr(self.args, "noop", False):
+        # A noop run has no model to ground, so it skips this; a
+        # scripted run has no model either (it follows the
+        # suggestion, never the prompt).
+        if not getattr(self.args, "noop", False) and not getattr(
+                self.args, "scripted", False):
             self._reground()
         # The diary feed's run-start per-dwarf sample: a fresh full
         # units collect now, while the game is paused at the run's
@@ -1377,7 +1403,8 @@ class M1Driver:
         # diary entry, so it takes no sample either — but the
         # scoring system's run-start fortress value is still
         # fetched: the no-op baseline's score needs it.
-        if not self.args.mock and not getattr(self.args, "noop", False):
+        if not self.args.mock and not getattr(self.args, "noop", False) \
+                and not getattr(self.args, "scripted", False):
             if self.citizens_start_fresh is None:
                 self.citizens_start_fresh = self._fetch_fresh_citizens(
                     "start")
@@ -1638,6 +1665,11 @@ def main() -> int:
     # never act — the fort runs on its own for the day. Takes
     # precedence over --mock (a mock that never acts is a noop).
     ap.add_argument("--noop", action="store_true")
+    # The scripted baseline (EVALUATION.md): no model — each tick
+    # runs the snapshot's suggestion, the harness's own checklist
+    # applied in order. Takes precedence over --mock for the
+    # reason string; --noop still wins over both (it never acts).
+    ap.add_argument("--scripted", action="store_true")
     # Guidance ablation (EVALUATION.md Phase 6, HARNESS_ROLE.md
     # §8.1): a = suggestion off, b = briefings/wiki prefetch off
     # (recorded; the driver prefetches neither, so no prompt
@@ -1649,7 +1681,7 @@ def main() -> int:
     if args.out is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         args.out = str(HARNESS / "logs" / f"m1-{ts}.jsonl")
-    if not args.mock and not JWT_PATH.exists():
+    if not args.mock and not args.scripted and not JWT_PATH.exists():
         print(f"m1: no JWT at {JWT_PATH} — run the Free Pi device "
               "flow first", file=sys.stderr)
         return 2

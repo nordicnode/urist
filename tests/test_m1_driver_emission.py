@@ -275,6 +275,28 @@ class TestModelCallRecord(unittest.TestCase):
             self.assertEqual(actions, [])
             self.assertIn("guidance off", reasoning)
 
+    def test_scripted_runs_the_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = _driver(tmp, scripted=True)
+            driver.tick_no = 1
+            snap = _snap()
+            snap["suggestion"] = (
+                "Suggested action: run the brew task")
+            reasoning, actions = driver._model_decide(snap)
+            self.assertEqual(reasoning, "scripted: suggestion task")
+            self.assertEqual(actions[0]["action"], "task:brew")
+            self.assertEqual(actions[0]["reason"],
+                             "scripted suggestion")
+
+    def test_scripted_no_suggestion_idles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = _driver(tmp, scripted=True)
+            driver.tick_no = 1
+            reasoning, actions = driver._model_decide(
+                {"text": "OBS", "tick": 1, "suggestion": None})
+            self.assertEqual(actions, [])
+            self.assertIn("scripted", reasoning)
+
 
 class TestRunStartAndNoop(unittest.TestCase):
     def _run_driver(self, tmp, **over):
@@ -338,6 +360,40 @@ class TestRunStartAndNoop(unittest.TestCase):
             self.assertTrue(any(r.get("skipped") == "noop run"
                                 for r in diary))
             # The model was never consulted.
+            self.assertEqual(driver.model, None)
+
+    def test_scripted_run_follows_the_suggestion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            driver = self._run_driver(tmp, scripted=True)
+            driver.daemon.run_task.return_value = {
+                "ok": True, "reason": "brew x1 completed"}
+            snaps = self._snapshots([100000, 100150, 101200])
+            snaps[1]["suggestion"] = (
+                "Suggested action: run the brew task")
+            driver.daemon.snapshot.side_effect = snaps
+            with mock.patch(
+                    "dfagent_harness.store.Store") as store_cls, \
+                mock.patch(
+                    "dfagent_harness.store.default_world_db_path",
+                    return_value="/tmp/world.db"):
+                store_cls.return_value.clear_snapshots.return_value = 0
+                rc = driver.run()
+            self.assertEqual(rc, 0)
+            recs = _log_records(tmp)
+            starts = [r for r in recs if r.get("kind") == "run_start"]
+            self.assertEqual(len(starts), 1)
+            self.assertTrue(starts[0]["scripted"])
+            self.assertFalse(starts[0]["noop"])
+            # The suggestion ran as a real action, with no model.
+            actions = [r for r in recs if r.get("kind") == "action"]
+            self.assertEqual(len(actions), 1)
+            self.assertEqual(actions[0]["name"], "task:brew")
+            self.assertTrue(actions[0]["ok"])
+            self.assertFalse(any(r.get("kind") == "model_call"
+                                 for r in recs))
+            diary = [r for r in recs if r.get("kind") == "diary"]
+            self.assertTrue(any(r.get("skipped") == "scripted run"
+                                for r in diary))
             self.assertEqual(driver.model, None)
 
     def test_mock_run_start_carries_commit_and_protocol(self):

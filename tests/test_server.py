@@ -503,6 +503,56 @@ class TestDiaryWriteThinFeed(_HttpCase):
         self.assertIn("feed too thin", body["error"]["message"])
 
 
+class TestMemorySummaryFailures(_HttpCase):
+    """GET /v1/memory/summary lists recent failures from journal
+    decisions with ok False — including the SQLite int form.
+
+    Live bug (2026-11-27, P0-3): the filter used ``is False``,
+    but the journal stores ok as a SQLite int (0/1), and
+    ``0 is False`` is False in Python, so the failures list was
+    always empty and the re-grounding could never name a recent
+    failure. The filter must match both the bool and the int
+    forms; a decision with no ok at all is unknown, not a
+    failure, and stays out.
+    """
+
+    class _Journal:
+        def recent_decisions(self, limit=100):
+            return [
+                {"decision": "brew at the still",
+                 "action": "task:brew", "ok": 1, "result": "ok"},
+                {"decision": "make beds at the carpenter",
+                 "action": "queue_job", "ok": 0,
+                 "result": "transport failure"},
+                {"decision": "dig down for stone",
+                 "action": "dig_to_completion", "ok": False,
+                 "result": "no path"},
+                {"decision": "appoint a manager",
+                 "action": "ui:appoint_noble",
+                 "result": "no window"},
+            ]
+
+        def recent_events(self, limit=100):
+            return []
+
+    def setUp(self):
+        daemon = _FakeDaemon()
+        daemon.store = _EmptyStore()
+        daemon.journal = self._Journal()
+        self._start(daemon=daemon)
+
+    def test_failures_include_int_zero_and_bool_false(self):
+        status, raw = self._req("GET", "/v1/memory/summary")
+        self.assertEqual(status, 200, raw)
+        body = json.loads(raw)
+        failures = body.get("failures") or []
+        decisions = [f.get("decision") for f in failures]
+        self.assertIn("make beds at the carpenter", decisions)
+        self.assertIn("dig down for stone", decisions)
+        self.assertNotIn("brew at the still", decisions)
+        self.assertNotIn("appoint a manager", decisions)
+
+
 class TestDiaryWriteRetryValidation(_HttpCase):
     """The retry path runs the IDENTICAL validation as the live
     path — no separate code path, no weaker check. The 04-05

@@ -112,9 +112,16 @@ def memory_summary(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: d
         summary["recent_events"] = journal.recent_events(
             limit=10)
         # Failures: decisions that did not work, most recent.
+        # The journal stores ok as a SQLite int (0/1), and
+        # ``0 is False`` is False in Python — an identity check
+        # here matched nothing, so this list was always empty
+        # and the re-grounding could never name a recent
+        # failure (found live 2026-11-27, P0-3). Match both
+        # the bool and the int forms; a missing ok is not a
+        # failure, it is unknown, so it stays out.
         summary["failures"] = [
             d for d in journal.recent_decisions(limit=100)
-            if d.get("ok") is False][:5]
+            if d.get("ok") in (False, 0)][:5]
     _json(handler, 200, summary)
 
 def diary_write(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict[str, list[str]], path: str, body: Optional[dict[str, Any]]) -> None:

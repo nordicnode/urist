@@ -4,8 +4,98 @@ A design for expanding the harness's evaluation side into a serious,
 alternative way to evaluate LLMs. This is a DESIGN document. The
 scoring system in docs/SCORING.md already exists and is the v1
 baseline; this doc designs what comes after it. Nothing here is
-implemented yet. Anything marked UNVERIFIED is a claim the
-implementation must check before it is relied on.
+implemented yet unless the implementation status below says so.
+Anything marked UNVERIFIED is a claim the implementation must check
+before it is relied on.
+
+## Implementation status (2026-11-27, track 3)
+
+- **Phase 1 (instrumentation): PARTIAL.** The manifest schema and
+  writer exist (`src/dfagent_harness/evaluation.py`:
+  `build_manifest` / `write_manifest`; `scripts/score_run.py
+  --manifest`). The two verified 1-day runs were re-scored with
+  manifests attached (`logs/*.manifest.json`, local artifacts);
+  both reproduce their verified scores exactly (91.8 / 91.7).
+  The manifest records what the log does not record as honestly
+  null with a `gaps` list: tokens, harness commit, and protocol
+  version are all null for legacy logs. The driver-side emission
+  (model_call records, see "Driver emission spec" below) is a
+  track-4 change, NOT done here.
+- **Phase 2 (scenario registry): PARTIAL.** `scenarios/
+  scenarios.json` exists: S0 anchor verified on disk
+  (saves-clean/region2-00125-04-01-clean); S1-S5 archetypes with
+  fixed seeds and the M2_PROFILE finder profile; S6 held out.
+  Expected match counts and start states are UNVERIFIED until each
+  scenario is generated live twice from its registry entry.
+  Cross-machine determinism stays UNVERIFIED.
+- **Phase 3 (suite runner): PARTIAL.** `scripts/eval_run.py`
+  exists: `plan`, `replay` (offline, verified on the two real
+  logs: median 91.8, IQR 91.7-91.8, survival 100%), `run`
+  (live, gated by --allow-live; refuses non-S0/unverified
+  scenarios), `leaderboard`, `baselines` (fails with the blocker
+  named). No live suite has run yet; that waits for main-chat
+  scheduling.
+- **Phase 4 (v2 metrics): PARTIAL.** Expansion lands now
+  (breadth of use from logged actions; both real runs score 12.5,
+  crafts only). Economy, defense, diplomacy report None ("not
+  measured"), never 0; v2 composite is None until all four land,
+  and v1 remains the headline. Sensitivity analysis done
+  (2026-11-27, script /tmp/sensitivity.py): no single dimension
+  dominates (worst single-dimension score 25.0); the two verified
+  runs keep their v1 ordering under v2 weights at every gated
+  level (gap 0.05, noise-level, as expected for two
+  near-identical smoke runs); wealth-farm-only (77.5) scores well
+  below a balanced good run (89.0).
+- **Phase 5 (leaderboard publication): PARTIAL.** The `eval_runs`
+  table exists (scoring.Leaderboard); `docs/LEADERBOARD.md` is
+  generated from scores.db and committed. It currently says no
+  benchmark suite has completed and lists the two 1-day runs as
+  smoke-tier only. The baselines have NOT run (both blocked; see
+  `eval_run.py baselines`).
+- **Phase 6 (ablation): SPEC ONLY.** Needs a guidance-off flag
+  that does not exist (track-4 driver change).
+
+## Run-end summary (Mikey, 2026-11-27 ~21:29 PT)
+
+The harness must log run statistics, not just the score, so the
+user gets a nice metrics summary at the end of their AI run:
+units killed, buildings created, and more. Implemented in
+`scoring.run_summary` / `format_run_summary`, printed by
+`scripts/score_run.py --summary` and embedded in every manifest
+as `run_summary`. It covers: dwarves arrived/died/departed,
+deaths by kind with causes, units killed (total, split into
+citizen deaths the store diagnosed vs other units), buildings
+created by kind (workshops, farm plots, furniture), jobs queued /
+completed (by DF job type, from job_completed events) /
+cancelled / failed, wealth change, drink/food start/end,
+decisions (decision ticks, actions, idle ticks, model failures
+with taxonomy, suggestions matched), threats faced, dwarf
+distress by kind. Counts with no evidence are None with a reason
+in `not_recorded`, never 0: moods and trades have no event in the
+harness yet, hostile kills by the fort's dwarves are not recorded
+(no kill event exists), arrivals/departures need the events
+journal. Verified offline on synthetic logs and on the two real
+runs (071025: Still x1, brew x2, make_barrel x4, make_bed x3,
+7 jobs completed, 1 failed; 073557: 6 queued, 6 completed,
+0 failed). Live proof waits for scheduling, same as the rest of
+this track's live verification.
+
+## Driver emission spec (for track 4, NOT this track's files)
+
+The manifest fields that are null for legacy logs need the driver
+(m1_driver.py, track 4) to emit them. This spec is the handoff;
+do not implement it in evaluation files:
+- A `model_call` record per model call attempt: `prompt_tokens`,
+  `completion_tokens`, `latency_s`, `model`, `temperature`. The
+  Free Pi client currently discards the response `usage` field;
+  either keep it (if the API returns it, UNVERIFIED at the API
+  level) or count tokens locally from prompt/reply text.
+- `run_start` gains `harness_commit` (git HEAD at run start) and
+  `protocol_version` (evaluation.PROTOCOL_VERSION, currently 1).
+- A `--noop` driver mode that never acts, for the no-op baseline
+  (the mock model returns canned suggestions; it is not a no-op).
+- A guidance-off flag for the Phase 6 ablation (disable the
+  guidance layers; the flag does not exist today).
 
 ## Why this is a benchmark worth building
 
@@ -552,18 +642,139 @@ same score with guidance on as the ordinary suite run.
   same seed and profile produce the same world on another
   machine or install? UNVERIFIED.
 - Does Free Pi's API return token usage, or must tokens be
-  counted locally from prompt and reply text? UNVERIFIED.
+  counted locally from prompt and reply text? PARTLY ANSWERED
+  2026-11-27: the client (freepi.py `chat()`) returns only
+  `choices[0]["message"]["content"]` and discards the response
+  `usage` field entirely. Whether the API returns usage is still
+  UNVERIFIED at the API level, but the client drops it either
+  way. Tokens must be counted locally or the client must keep
+  `usage` (see "Driver emission spec").
 - What model call parameters does freepi.py currently send?
-  UNVERIFIED until read.
+  ANSWERED 2026-11-27 by reading it: body is `{"model",
+  "messages", "temperature": 0.2}`: no max_tokens, no other
+  parameters.
 - Is produced-value share trackable through job completions?
-  UNVERIFIED.
+  ANSWERED NO for the current log 2026-11-27: job_completed
+  events carry job_id, job_type, worker_id, and pos, no values.
+  The craft-share cap stays PROPOSED (implemented as
+  `evaluation.craft_share_cap`, tested on synthetic numbers, not
+  adopted, not used by any composite) until item-level value
+  tracking exists.
 - The wall-clock estimate for long runs (about 19 hours for a
   2-year run, about 9 to 10 days for a 12-run suite serial) is
-  derived from one measured day on a small fort. It will change
+  derived from one measured day on a small fort. CONFIRMED RATE
+  2026-11-27: 97 s/day on the verified 1-day run. It will change
   as forts grow. The suite runner must measure real wall time.
 - Solo Pro 4 pricing and endpoint details were verified by the
   parent on 2026-11-24; re-verify at implementation time, and
   the paid key needs Mikey's explicit say-so.
 - The v2 weights are proposed, not validated. Sensitivity
   analysis on real runs is part of Phase 4, and the weights can
-  change before v2 is published, but not after.
+  change before v2 is published, but not after. SENSITIVITY DONE
+  2026-11-27 (see "Implementation status", Phase 4): no single
+  dimension dominates; the verified ordering does not flip under
+  v2 weights; wealth farming does not beat balanced play.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit.
+
+### Snapshot: no evaluation section, by design
+
+Evaluation pushes nothing into the per-tick snapshot. There is no
+"Score: 91.8" line, no live dimension read, and no milestone
+tally while a run is in progress. That is deliberate, and it is
+the anti-gaming rule in §Anti-gaming: showing the model its live
+score would steer it toward the metric instead of the fort. The
+model plays the fort; the harness scores the play afterwards.
+The score is computed by the harness from live game state, the
+run log, and the store, never self-reported by the model, and it
+is never fed back into a running model.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, the
+evaluation section costs 0 tokens in the snapshot: there is no
+section to render. The cost does not grow with population,
+because nothing is pushed at any population. If a future change
+puts any evaluation number into the snapshot, the change is
+refused until it is justified against the anti-gaming rule in
+writing.
+
+### Query route: scores are read after the run, not during it
+
+There is no live evaluation route, and there must not be one
+during a run. Scores are read after the run ends:
+
+- `scripts/score_run.py` scores a run log from scores.db: one
+  row per scored run (model, run log, start save, tick budget,
+  days planned, date, composite, dimensions, milestones,
+  evidence). A run log is scored at most once per model;
+  re-scoring replaces its row.
+- GET /v1/wealth exists today and carries the wealth dimension's
+  raw input (fortress value from lua/wealth.lua). The other
+  dimensions are computed from the run log and the store, not
+  from a live route.
+- A proposed GET /v1/scores route (UNVERIFIED: does not exist)
+  would return past scores for a model and scenario, for the
+  leaderboard, never for a running model.
+
+The two rows that exist today are both DeepSeek V4.1 Flash on
+1-day runs on the clean base 125-04-01: 91.8 and 91.7. They are
+1-day smoke-tier runs and must not be presented as benchmark
+results, to the model or to anyone else.
+
+### Briefing: none during a run
+
+No evaluation briefing fires during a run. The run-end report is
+delivered after the run, outside the snapshot, in this shape:
+
+```
+Run m1-20261127-071025: composite 91.8 (survival 100, lives 100, wealth 50, needs 100, growth 60, competence 88, threats 100). Milestones: first brew, first bed.
+```
+
+That report is 161 characters: about 53 tokens by the
+accountant, 40 on the wire. At 50 dwarves it costs the same:
+the report is a fixed shape, and only the numbers in it change,
+not its length. The report goes to the human and to the log, not
+back into the model that just played.
+
+### Opportunities: none
+
+The opportunities section carries no evaluation entries. An entry
+such as "score 91.8, one milestone from 93.8" would be the
+harness grading the model in its own ear while it plays. The
+opportunities section is for facts about the fort the model can
+act on; a score is not one of them. The model decides what to do
+from the fort's state, not from its own grade.
+
+### What the system deliberately does NOT push, and why
+
+- **The live composite or any live dimension.** Showing a
+  running score invites score-chasing: the model would optimize
+  the number instead of the fort. The score exists only after
+  the run.
+- **Milestone progress mid-run.** Telling the model it is one
+  milestone from a bonus is the same steering by another name.
+  Milestones are detected after the fact, from the run log.
+- **The leaderboard.** Past scores for a model and scenario
+  belong to the human choosing a model, not to a model choosing
+  its next action. The leaderboard is read by people.
+- **Token counts and wall-clock per model call.** The run log
+  does not record them yet (a Phase 1 gap in this doc). Until
+  it does, there is nothing to push, and when it does, the
+  counts go to the run log and the report, not to the snapshot.
+- **Prompt or snapshot schema versions.** The run log does not
+  record them yet (also a Phase 1 gap). Versioning is harness
+  bookkeeping, not something the model needs while it plays.

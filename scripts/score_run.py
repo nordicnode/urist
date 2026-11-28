@@ -18,6 +18,10 @@ Usage:
       --wealth-start 5418 --wealth-end 5410 --record
   .venv/bin/python scripts/score_run.py --leaderboard
   .venv/bin/python scripts/score_run.py --leaderboard --model deepseek-v4.1-flash
+  .venv/bin/python scripts/score_run.py logs/m1-....jsonl --manifest --v2
+  .venv/bin/python scripts/score_run.py logs/m1-....jsonl --summary
+  .venv/bin/python scripts/score_run.py logs/m1-....jsonl --manifest \\
+      --eval-record --scenario S0 --tier day --repeat 1
 """
 import argparse
 import json
@@ -26,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from dfagent_harness import evaluation as ev  # noqa: E402
 from dfagent_harness.scoring import (  # noqa: E402
     Leaderboard, WEIGHTS, compute_score, default_scores_db_path)
 from dfagent_harness.store import Store, default_world_db_path  # noqa: E402
@@ -60,6 +65,22 @@ def _print_leaderboard(rows: list[dict]) -> None:
               f"{r['date']:<12}  {Path(r['run_log']).name}")
 
 
+def _print_v2(score_v2: dict) -> None:
+    print(f"composite v2: {score_v2['composite_v2']} "
+          f"({score_v2['v2_status']})")
+    print("dimensions v2:")
+    for name in ev.WEIGHTS_V2:
+        v = score_v2["dimensions_v2"][name]
+        print(f"  {name:<11} "
+              f"{f'{v:>5.1f}' if v is not None else '  n/a  '} "
+              f"(weight {ev.WEIGHTS_V2[name]:.0f})")
+    print(f"milestones v2: "
+          f"{', '.join(score_v2['milestones_all']) or 'none'}"
+          f" (+{score_v2['milestone_bonus_v2']:.0f})")
+    print(f"expansion systems used: "
+          f"{', '.join(score_v2['expansion_systems_used']) or 'none'}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("run_log", nargs="?",
@@ -83,6 +104,26 @@ def main() -> int:
                     help="scores.db path (default: daemon state dir)")
     ap.add_argument("--leaderboard", action="store_true",
                     help="list the leaderboard instead of scoring")
+    ap.add_argument("--manifest", action="store_true",
+                    help="write a run manifest next to the log "
+                    "(evaluation.py Phase 1)")
+    ap.add_argument("--summary", action="store_true",
+                    help="also print the run-end summary (units "
+                    "killed, buildings created, jobs, wealth, "
+                    "decisions) in human-readable form")
+    ap.add_argument("--v2", action="store_true",
+                    help="also print the v2 composite and dimensions")
+    ap.add_argument("--eval-record", action="store_true",
+                    help="record the run in the eval_runs benchmark "
+                    "table (requires --manifest and --scenario/--tier/"
+                    "--repeat)")
+    ap.add_argument("--scenario", default=None,
+                    help="scenario id for --eval-record (e.g. S0)")
+    ap.add_argument("--tier", default=None,
+                    help="tier for --eval-record (day/season/year/"
+                    "two-year)")
+    ap.add_argument("--repeat", type=int, default=None,
+                    help="repeat number for --eval-record")
     args = ap.parse_args()
 
     if args.leaderboard:
@@ -92,6 +133,14 @@ def main() -> int:
         return 0
     if not args.run_log:
         ap.error("run_log is required unless --leaderboard is given")
+    if args.eval_record:
+        # A score without a manifest is not a benchmark result.
+        if not args.manifest:
+            ap.error("--eval-record requires --manifest")
+        if not (args.scenario and args.tier
+                and args.repeat is not None):
+            ap.error("--eval-record requires --scenario, --tier, "
+                     "and --repeat")
 
     store = None
     store_path = Path(args.store) if args.store else default_world_db_path()
@@ -110,13 +159,46 @@ def main() -> int:
         wealth_start=args.wealth_start, wealth_end=args.wealth_end,
         model=args.model, start_save=args.start_save)
     _print_score(score)
-    if store is not None:
-        store.close()
+    if args.summary:
+        from dfagent_harness.scoring import (  # noqa: E402
+            format_run_summary, run_summary)
+        print()
+        print(format_run_summary(run_summary(
+            args.run_log, store=store, events_path=events_path,
+            wealth_start=args.wealth_start,
+            wealth_end=args.wealth_end, model=args.model,
+            start_save=args.start_save)))
     if args.record:
         lb = Leaderboard(args.db or default_scores_db_path())
         lb.record(score)
         lb.close()
         print(f"recorded in {args.db or default_scores_db_path()}")
+    manifest_path = None
+    if args.manifest or args.eval_record:
+        manifest_path = ev.write_manifest(
+            args.run_log, store=store, events_path=events_path,
+            wealth_start=args.wealth_start,
+            wealth_end=args.wealth_end, model=args.model,
+            start_save=args.start_save, scenario_id=args.scenario,
+            tier=args.tier, repeat=args.repeat)
+        print(f"manifest: {manifest_path}")
+    if args.v2:
+        _print_v2(ev.compute_score_v2(
+            args.run_log, store=store, events_path=events_path,
+            wealth_start=args.wealth_start,
+            wealth_end=args.wealth_end, model=args.model,
+            start_save=args.start_save))
+    if args.eval_record:
+        manifest = ev.load_manifest(manifest_path)
+        manifest["manifest_path"] = str(manifest_path)
+        manifest["harness_version"] = ev.current_harness_commit()
+        lb = Leaderboard(args.db or default_scores_db_path())
+        lb.record_eval(manifest)
+        lb.close()
+        print(f"recorded eval row in "
+              f"{args.db or default_scores_db_path()}")
+    if store is not None:
+        store.close()
     return 0
 
 

@@ -217,6 +217,112 @@ def composite(dimensions: dict[str, float],
     return _clamp(total + milestone_bonus(milestones))
 
 
+# -- failure taxonomy -----------------------------------------------------
+# Every failed action and model failure is classified, not just
+# counted (EVALUATION.md: decision quality is evidence, not a
+# dimension). The rules are keyword-based on the harness's own log
+# text and are documented here so a classification can be audited.
+# evaluation.py imports these (it used to define them; they moved
+# here so scoring.run_summary can use them without a circular
+# import).
+
+_MODEL_FAILURE_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("transport", ("incompleteread", "remotedisconnected", "urlerror",
+                   "network error", "connection", "reset by peer",
+                   "broken pipe", "dns")),
+    ("provider", ("http 429", "http 401", "http 500", "http 502",
+                  "http 503", "concurrent", "rate limit",
+                  "provider")),
+    ("parse", ("json", "parse", "malformed", "invalid response",
+               "no choices")),
+    ("timeout", ("timeout", "timed out")),
+]
+
+
+def classify_model_failure(error: str) -> str:
+    """Classify a model_failure error string: transport | provider |
+    parse | timeout | unclassified. Keyword rules on the log text;
+    an error matching nothing is 'unclassified', never guessed."""
+    e = (error or "").lower()
+    for kind, keywords in _MODEL_FAILURE_RULES:
+        if any(k in e for k in keywords):
+            return kind
+    return "unclassified"
+
+
+# An action failure is a harness refusal with a named fix when the
+# reason names what to do instead ("cannot queue brew ... — queue
+# make_barrel ..."); a model error when the action itself was
+# invalid; a game constraint when the game state forbids it.
+_ACTION_FAILURE_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("harness_refusal_named_fix", ("cannot queue", "cannot build",
+                                    "cannot place", "material shortage",
+                                    "need ", "— queue", "— run",
+                                    "— build", "try ")),
+    ("model_error", ("unknown action", "invalid", "not a valid",
+                     "missing param", "bad param")),
+    ("game_constraint", ("no path", "occupied", "blocked",
+                         "no free", "out of reach", "no dwarf",
+                         "already designated")),
+]
+
+
+def classify_action_failure(reason: str) -> str:
+    """Classify a failed action's reason string:
+    harness_refusal_named_fix | model_error | game_constraint |
+    unclassified."""
+    r = (reason or "").lower()
+    for kind, keywords in _ACTION_FAILURE_RULES:
+        if any(k in r for k in keywords):
+            return kind
+    return "unclassified"
+
+
+def failure_taxonomy(run: dict[str, Any]) -> dict[str, Any]:
+    """Failure taxonomy for one parsed run log: every model failure
+    and every failed action classified, with counts per class and
+    the unclassified items listed for review."""
+    from collections import Counter
+    records = run.get("records") or []
+    model_failures: Counter[str] = Counter()
+    model_unclassified: list[str] = []
+    for r in records:
+        if r.get("kind") == "model_failure":
+            err = str(r.get("error", ""))
+            kind = classify_model_failure(err)
+            model_failures[kind] += 1
+            if kind == "unclassified":
+                model_unclassified.append(err)
+    action_failures: Counter[str] = Counter()
+    action_unclassified: list[str] = []
+    for a in run.get("actions") or []:
+        if not a.get("ok", True):
+            reason = str(a.get("reason", ""))
+            kind = classify_action_failure(reason)
+            action_failures[kind] += 1
+            if kind == "unclassified":
+                action_unclassified.append(reason)
+    return {
+        "model_failures": dict(model_failures),
+        "model_failures_unclassified": model_unclassified,
+        "action_failures": dict(action_failures),
+        "action_failures_unclassified": action_unclassified,
+    }
+
+
+def model_calls_attempted(run: dict[str, Any]) -> int:
+    """Model call attempts in one parsed run log: one per decision
+    tick (one snapshot per tick, except the final snapshot the run
+    ends on before calling the model) plus in-tick retries."""
+    snapshots = run.get("snapshots") or []
+    final_tick = run.get("final_snapshot_tick_no")
+    attempts = sum(1 for s in snapshots
+                   if s.get("tick_no") != final_tick)
+    attempts += sum(1 for r in (run.get("records") or [])
+                    if r.get("kind") == "model_retry")
+    return attempts
+
+
 # -- run-log parsing ------------------------------------------------------
 
 _STOCKS_RE = re.compile(r"drink\s+(\d+),\s*food\s+(\d+)")
@@ -670,6 +776,323 @@ def compute_score(run_log: str | Path,
     )
 
 
+# -- run-end summary --------------------------------------------------------
+# The metrics summary at the end of an AI run (Mikey, 2026-11-27
+# ~21:29 PT): not just the score — how many units were killed, how
+# many buildings were created, jobs completed/failed, items
+# produced, dwarves arrived/died, wealth change, and whatever else
+# the harness already records. Every count comes from the harness's
+# own records (run log, store, daemon events journal); a count with
+# no evidence reports None and is listed in ``not_recorded`` —
+# never 0, never guessed.
+
+def _read_events_in_window(events_path: str | Path | None,
+                           start_tick: int, last_tick: int
+                           ) -> list[dict[str, Any]]:
+    """Daemon events journal rows in [start_tick, last_tick].
+    Empty list when no journal is supplied or it cannot be read."""
+    if events_path is None:
+        return []
+    out = []
+    try:
+        with open(events_path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                t = ev.get("tick")
+                if t is not None and start_tick <= t <= last_tick:
+                    out.append(ev)
+    except OSError:
+        return []
+    return out
+
+
+def _counts(items: list[Any]) -> dict[str, int]:
+    from collections import Counter
+    return dict(sorted(Counter(str(i) for i in items).items()))
+
+
+def run_summary(run_log: str | Path,
+                store: Any = None,
+                events_path: str | Path | None = None,
+                wealth_start: Optional[float] = None,
+                wealth_end: Optional[float] = None,
+                model: Optional[str] = None,
+                start_save: str = "region2-00125-04-01-clean",
+                ) -> dict[str, Any]:
+    """Run-end summary for one run log: the score plus a broad set
+    of counts. JSON-ready (the ``score`` entry is Score.to_dict()).
+    Counts with no evidence are None with a reason in
+    ``not_recorded``."""
+    score = compute_score(run_log, store=store,
+                          events_path=events_path,
+                          wealth_start=wealth_start,
+                          wealth_end=wealth_end, model=model,
+                          start_save=start_save)
+    run = parse_run_log(run_log)
+    ev = score.evidence
+    start_tick = run.get("start_tick") or 0
+    end_tick = run.get("end_tick") or start_tick
+    run_end = run.get("run_end") or {}
+    last_tick = run_end.get("tick") or end_tick
+    days_planned = float(run.get("days_planned") or 1.0)
+    days_lasted = max(0.0, (last_tick - start_tick) / TICKS_PER_DAY)
+    actions = run.get("actions") or []
+    not_recorded: dict[str, str] = {}
+
+    # -- dwarves: arrivals, deaths, departures. The store's deaths
+    # table is the authority for citizen deaths; arrivals come from
+    # citizen_new events, departures from citizen_gone events.
+    deaths = [{"unit_id": d["unit_id"], "tick": d["tick"],
+               "cause": d["cause"], "kind": d["kind"]}
+              for d in ev["deaths"]]
+    if store is None:
+        not_recorded["deaths"] = (
+            "no store supplied: citizen deaths come from the store, "
+            "not the log alone")
+    events = _read_events_in_window(events_path, start_tick,
+                                    last_tick)
+    by_type: dict[str, list[dict[str, Any]]] = {}
+    for e in events:
+        by_type.setdefault(str(e.get("type")), []).append(e)
+    arrivals = len(by_type.get("citizen_new", []))
+    departed = len(by_type.get("citizen_gone", []))
+    if events_path is None:
+        not_recorded["arrivals_departures"] = (
+            "no events journal supplied: arrivals/departures need "
+            "citizen_new / citizen_gone events")
+        arrivals = departed = None
+
+    # -- units killed: every unit_death event in the window, split
+    # into citizen deaths the store diagnosed vs other units (the
+    # event carries only a unit_id; wildlife and visitors have no
+    # store diagnosis). Hostile kills by the fort's dwarves are NOT
+    # recorded anywhere: no kill event exists in the harness yet.
+    unit_deaths = by_type.get("unit_death", [])
+    diagnosed_ids = {(d["unit_id"], d["tick"]) for d in deaths}
+    citizen_unit_deaths = sum(
+        1 for e in unit_deaths
+        if (isinstance(e.get("data"), dict)
+            and (e["data"].get("unit_id"),
+                 e.get("tick")) in diagnosed_ids))
+    other_unit_deaths = len(unit_deaths) - citizen_unit_deaths
+    not_recorded["hostile_kills"] = (
+        "no kill event exists in the harness yet: deaths of "
+        "hostiles at the fort's hands are not recorded")
+
+    # -- buildings created, by kind: workshops from ok
+    # build_workshop actions, farm plots, furniture placed.
+    workshops = _counts(
+        str((a.get("params") or {}).get("kind", "unknown"))
+        for a in actions
+        if a.get("name") == "build_workshop" and a.get("ok"))
+    farm_plots = sum(1 for a in actions
+                     if a.get("name") == "build_farm_plot"
+                     and a.get("ok"))
+    furniture = _counts(
+        str((a.get("params") or {}).get("kind", "unknown"))
+        for a in actions
+        if a.get("name") == "build_furniture" and a.get("ok"))
+
+    # -- jobs: queued (units, from queue_job count params),
+    # completed (job_completed events, by DF job type), cancelled,
+    # failed (from the log, with taxonomy).
+    queued: dict[str, int] = {}
+    for a in actions:
+        if a.get("name") == "queue_job" and a.get("ok"):
+            job = action_job(a) or "unknown"
+            queued[job] = (queued.get(job, 0)
+                           + int((a.get("params") or {}).get("count",
+                                                            1) or 1))
+    queued = dict(sorted(queued.items()))
+    completed = _counts(
+        str((e.get("data") or {}).get("job_type", "unknown"))
+        for e in by_type.get("job_completed", []))
+    cancelled = _counts(
+        str((e.get("data") or {}).get("job_type", "unknown"))
+        for e in by_type.get("job_cancelled", []))
+    failed = [a for a in actions if not a.get("ok", True)]
+    failed_by_job = _counts(action_job(a) or "unknown"
+                            for a in failed)
+
+    # -- moods, trades, sieges: moods and trades have no event yet.
+    # Sieges/threats come from hostile_spawn / threat events.
+    mood_count = (len(by_type.get("mood", []))
+                  + len(by_type.get("strange_mood", [])))
+    if mood_count == 0 and "mood" not in by_type \
+            and "strange_mood" not in by_type:
+        not_recorded["moods"] = (
+            "no mood event exists in the harness yet")
+        mood_count = None
+    trade_count = (len(by_type.get("trade", []))
+                   + len(by_type.get("caravan", [])))
+    if trade_count == 0 and "trade" not in by_type \
+            and "caravan" not in by_type:
+        not_recorded["trades"] = (
+            "no trade event exists in the harness yet")
+        trade_count = None
+    threats_faced = ev["threats_faced"]
+    distress = _counts(
+        str((e.get("data") or {}).get("kind", "unknown"))
+        for e in by_type.get("dwarf_distress", []))
+    stock_lows = len(by_type.get("stock_low", []))
+
+    taxonomy = failure_taxonomy(run)
+    return {
+        "model": score.model,
+        "run_log": str(run_log),
+        "date": score.date,
+        "days_planned": days_planned,
+        "days_lasted": round(days_lasted, 2),
+        "end_reason": ev["end_reason"],
+        "score": score.to_dict(),
+        "dwarves": {
+            "start": ev["pop_start"],
+            "end": ev["pop_end"],
+            "arrived": arrivals,
+            "died": len(deaths),
+            "departed": departed,
+        },
+        "deaths": deaths,
+        "deaths_by_kind": _counts(d["kind"] for d in deaths),
+        "units_killed": {
+            "total_unit_deaths": (len(unit_deaths)
+                                  if events_path is not None else None),
+            "citizen_deaths": (citizen_unit_deaths
+                               if events_path is not None else None),
+            "other_unit_deaths": (other_unit_deaths
+                                  if events_path is not None else None),
+        },
+        "buildings": {
+            "workshops_by_kind": workshops,
+            "workshops_total": sum(workshops.values()),
+            "farm_plots": farm_plots,
+            "furniture_by_kind": furniture,
+        },
+        "jobs": {
+            "queued_by_job": queued,
+            "queued_units_total": sum(queued.values()),
+            "completed_by_type": completed,
+            "completed_total": sum(completed.values()),
+            "cancelled_by_type": cancelled,
+            "cancelled_total": sum(cancelled.values()),
+            "failed_total": len(failed),
+            "failed_by_job": failed_by_job,
+            "repeated_failures": ev["repeated_failures"],
+        },
+        "wealth": {
+            "start": ev["wealth_start"],
+            "end": ev["wealth_end"],
+            "change": (ev["wealth_end"] - ev["wealth_start"]
+                       if ev["wealth_known"] else None),
+            "change_pct": ev["wealth_growth_pct"],
+            "known": ev["wealth_known"],
+        },
+        "stocks": {
+            "drink_start": ev["drink_start"],
+            "drink_end": ev["drink_end"],
+            "food_start": ev["food_start"],
+            "food_end": ev["food_end"],
+            "zero_stock": ev["zero_stock"],
+            "stock_low_alerts": stock_lows,
+        },
+        "decisions": {
+            "decision_ticks": model_calls_attempted(run),
+            "actions_taken": ev["actions_taken"],
+            "failed_actions": ev["failed_actions"],
+            "idle_ticks": ev["idle_ticks"],
+            "model_failures": ev["model_failures"],
+            "failure_taxonomy": taxonomy,
+            "suggestions_matched": ev["suggestions_matched"],
+            "suggestions_total": ev["suggestions_total"],
+        },
+        "threats": {
+            "faced": threats_faced,
+            "hostile_deaths": ev["hostile_deaths"],
+            "dwarf_distress_by_kind": distress,
+        },
+        "moods": mood_count,
+        "trades": trade_count,
+        "not_recorded": not_recorded,
+    }
+
+
+def format_run_summary(summary: dict[str, Any]) -> str:
+    """Short human-readable run-end summary (the form the user sees
+    at the end of their AI run)."""
+    s = summary
+    sc = s["score"]
+    dims = sc["dimensions"]
+    lines = [
+        f"Run summary — {s['model']}, {s['date']}, "
+        f"{s['days_lasted']}/{s['days_planned']} day(s) "
+        f"({s['end_reason']})",
+        f"Score: {sc['composite']:.1f}/100 "
+        f"(survival {dims['survival']:.0f}, lives {dims['lives']:.0f}, "
+        f"wealth {dims['wealth']:.0f}, needs {dims['needs']:.0f}, "
+        f"growth {dims['growth']:.0f}, competence "
+        f"{dims['competence']:.0f}, threats {dims['threats']:.0f}; "
+        f"milestones: {', '.join(sc['milestones']) or 'none'})",
+    ]
+    d = s["dwarves"]
+    lines.append(
+        f"Dwarves: {d['start']} -> {d['end']} "
+        f"({d['arrived']} arrived, {d['died']} died, "
+        f"{d['departed']} left)")
+    if s["deaths_by_kind"]:
+        lines.append("Deaths by kind: " + ", ".join(
+            f"{k} x{v}" for k, v in s["deaths_by_kind"].items()))
+    uk = s["units_killed"]
+    lines.append(
+        f"Units killed: {uk['total_unit_deaths']} total "
+        f"({uk['citizen_deaths']} citizens, "
+        f"{uk['other_unit_deaths']} other)")
+    b = s["buildings"]
+    built = ([f"{k} x{v}" for k, v in b["workshops_by_kind"].items()]
+             + ([f"farm plot x{b['farm_plots']}"]
+                if b["farm_plots"] else [])
+             + [f"{k} x{v}"
+                for k, v in b["furniture_by_kind"].items()])
+    lines.append("Buildings created: "
+                 + (", ".join(built) if built else "none"))
+    j = s["jobs"]
+    lines.append(
+        f"Jobs: {j['queued_units_total']} queued "
+        f"({', '.join(f'{k} x{v}' for k, v in j['queued_by_job'].items()) or 'none'}), "
+        f"{j['completed_total']} completed, "
+        f"{j['cancelled_total']} cancelled, "
+        f"{j['failed_total']} failed")
+    if j["completed_by_type"]:
+        lines.append("Jobs completed by type: " + ", ".join(
+            f"{k} x{v}" for k, v in j["completed_by_type"].items()))
+    w = s["wealth"]
+    if w["known"]:
+        lines.append(
+            f"Wealth: {w['start']:.0f} -> {w['end']:.0f} "
+            f"({w['change']:+.0f}, {w['change_pct']:+.1f}%)")
+    st = s["stocks"]
+    lines.append(
+        f"Stocks: drink {st['drink_start']} -> {st['drink_end']}, "
+        f"food {st['food_start']} -> {st['food_end']}")
+    dec = s["decisions"]
+    lines.append(
+        f"Decisions: {dec['decision_ticks']} decision ticks, "
+        f"{dec['actions_taken']} actions, {dec['idle_ticks']} idle, "
+        f"{dec['model_failures']} model failures")
+    th = s["threats"]
+    lines.append(
+        f"Threats: {th['faced']} faced, "
+        f"{th['hostile_deaths']} dwarves lost to hostiles")
+    if s["not_recorded"]:
+        lines.append("Not recorded: " + "; ".join(
+            f"{k} ({v})" for k, v in s["not_recorded"].items()))
+    return "\n".join(lines)
+
+
 # -- leaderboard ----------------------------------------------------------
 
 def default_scores_db_path() -> Path:
@@ -708,6 +1131,33 @@ class Leaderboard:
             " evidence_json TEXT NOT NULL,"
             " scored_at TEXT NOT NULL,"
             " PRIMARY KEY (model, run_log))")
+        # Benchmark runs (evaluation.py). The scores table above is
+        # left alone, so the v1 leaderboard keeps working. One row
+        # per benchmark run: model, harness + protocol version,
+        # scenario, repeat, tier, v1/v2 composites, survival,
+        # tokens, wall clock, cost, validity, run log, manifest.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS eval_runs ("
+            " model TEXT NOT NULL,"
+            " harness_version TEXT,"
+            " protocol_version INTEGER,"
+            " scenario_id TEXT NOT NULL,"
+            " repeat INTEGER NOT NULL,"
+            " tier TEXT NOT NULL,"
+            " composite_v1 REAL NOT NULL,"
+            " composite_v2 REAL,"
+            " dimensions_json TEXT NOT NULL,"
+            " survival INTEGER NOT NULL,"
+            " tokens_in INTEGER,"
+            " tokens_out INTEGER,"
+            " wall_clock_s REAL,"
+            " cost_usd REAL,"
+            " validity TEXT NOT NULL,"
+            " validity_reason TEXT,"
+            " run_log TEXT NOT NULL,"
+            " manifest_path TEXT,"
+            " scored_at TEXT NOT NULL,"
+            " PRIMARY KEY (model, scenario_id, repeat, tier))")
         self.conn.commit()
 
     def record(self, score: Score) -> None:
@@ -753,6 +1203,88 @@ class Leaderboard:
                  "milestones", "scored_at"), r))
             d["dimensions"] = json.loads(d["dimensions"])
             d["milestones"] = json.loads(d["milestones"])
+            out.append(d)
+        return out
+
+    def record_eval(self, entry: dict[str, Any]) -> None:
+        """Record one benchmark run in eval_runs. Re-recording the
+        same (model, scenario_id, repeat, tier) replaces its row —
+        the score is a function of the run, not of when it was
+        computed. ``entry`` is a manifest (evaluation.py) plus
+        ``harness_version`` (the git commit that scored it)."""
+        from datetime import datetime, timezone
+        eff = entry.get("efficiency") or {}
+        v2 = entry.get("score_v2") or {}
+        self.conn.execute(
+            "INSERT INTO eval_runs (model, harness_version,"
+            " protocol_version, scenario_id, repeat, tier,"
+            " composite_v1, composite_v2, dimensions_json, survival,"
+            " tokens_in, tokens_out, wall_clock_s, cost_usd,"
+            " validity, validity_reason, run_log, manifest_path,"
+            " scored_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(model, scenario_id, repeat, tier)"
+            " DO UPDATE SET harness_version=excluded.harness_version,"
+            " protocol_version=excluded.protocol_version,"
+            " composite_v1=excluded.composite_v1,"
+            " composite_v2=excluded.composite_v2,"
+            " dimensions_json=excluded.dimensions_json,"
+            " survival=excluded.survival,"
+            " tokens_in=excluded.tokens_in,"
+            " tokens_out=excluded.tokens_out,"
+            " wall_clock_s=excluded.wall_clock_s,"
+            " cost_usd=excluded.cost_usd,"
+            " validity=excluded.validity,"
+            " validity_reason=excluded.validity_reason,"
+            " run_log=excluded.run_log,"
+            " manifest_path=excluded.manifest_path,"
+            " scored_at=excluded.scored_at",
+            (entry["model"], entry.get("harness_version"),
+             entry.get("protocol_version"), entry["scenario_id"],
+             entry["repeat"], entry["tier"],
+             v2.get("composite_v1"), v2.get("composite_v2"),
+             json.dumps(v2.get("dimensions_v2") or {}),
+             1 if entry.get("validity") == "valid" else 0,
+             eff.get("tokens_in"), eff.get("tokens_out"),
+             eff.get("wall_clock_s"), eff.get("cost_usd"),
+             entry.get("validity"), entry.get("validity_reason"),
+             entry["run_log"], entry.get("manifest_path"),
+             datetime.now(timezone.utc).isoformat()))
+        self.conn.commit()
+
+    def list_eval(self, model: Optional[str] = None,
+                  tier: Optional[str] = None
+                  ) -> list[dict[str, Any]]:
+        """Benchmark rows, optionally filtered by model and tier."""
+        q = ("SELECT model, harness_version, protocol_version,"
+             " scenario_id, repeat, tier, composite_v1,"
+             " composite_v2, dimensions_json, survival, tokens_in,"
+             " tokens_out, wall_clock_s, cost_usd, validity,"
+             " validity_reason, run_log, manifest_path, scored_at"
+             " FROM eval_runs")
+        clauses = []
+        args: list[Any] = []
+        if model is not None:
+            clauses.append("model=?")
+            args.append(model)
+        if tier is not None:
+            clauses.append("tier=?")
+            args.append(tier)
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        q += " ORDER BY model, tier, scenario_id, repeat"
+        rows = self.conn.execute(q, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(zip(
+                ("model", "harness_version", "protocol_version",
+                 "scenario_id", "repeat", "tier", "composite_v1",
+                 "composite_v2", "dimensions", "survival",
+                 "tokens_in", "tokens_out", "wall_clock_s",
+                 "cost_usd", "validity", "validity_reason",
+                 "run_log", "manifest_path", "scored_at"), r))
+            d["dimensions"] = json.loads(d["dimensions"])
+            d["survival"] = bool(d["survival"])
             out.append(d)
         return out
 

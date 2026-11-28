@@ -27,8 +27,13 @@ and reports actual wall time per run.
 """
 import argparse
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
+import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +45,20 @@ from dfagent_harness.scoring import (  # noqa: E402
 
 HARNESS = Path(__file__).resolve().parent.parent
 VENV_PYTHON = HARNESS / ".venv" / "bin" / "python"
+
+# The supervisor owns the main DF: the runner never kills DF
+# behind its back (observed 2026-11-28: a direct reload_fort.py
+# kill made run_df relaunch the pinned save while the daemon was
+# down, and both baselines failed). The anchor reload is a
+# request the supervisor consumes once (see run_df.py).
+REQUEST_FILE = (Path.home() / ".config" / "df-agent-harness"
+                / "reload-request")
+TOKEN_FILE = Path.home() / ".config" / "df-agent-harness" / "token"
+DAEMON_URL = "http://127.0.0.1:8765"
+ANCHOR_SAVE = "region2-00125-04-01"
+CLEAN_BASE = HARNESS / "saves-clean" / "region2-00125-04-01-clean"
+ANCHOR_DIR = (HARNESS / "third_party" / "df_47_05" / "data"
+              / "save" / ANCHOR_SAVE)
 
 # Measured wall clock: 97 s per in-game day on the verified 1-day
 # run. Estimates only; the runner reports actuals per run.
@@ -161,17 +180,143 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def _restore_anchor() -> bool:
+    """Restore the S0 clean base into the working save dir.
+
+    reload_fort.py loads the named folder as-is; it never restores
+    the pristine base, so without this step repeats would start
+    from wherever the previous repeat left the save instead of
+    from identical conditions. The running game plays the pinned
+    04-12 save, never this dir, so the copy is safe mid-run; and
+    between repeats the game is paused (the driver leaves it so),
+    so nothing writes to this dir during the copy.
+    """
+    try:
+        if ANCHOR_DIR.exists():
+            shutil.rmtree(ANCHOR_DIR)
+        shutil.copytree(CLEAN_BASE, ANCHOR_DIR)
+    except OSError as exc:
+        print(f"reload: cannot restore the clean base: {exc}",
+              file=sys.stderr)
+        return False
+    print("reload: S0 clean base restored from saves-clean",
+          flush=True)
+    return True
+
+
+def _write_reload_request() -> bool:
+    """Atomically write the supervisor reload request (temp + rename)."""
+    cmd = (f"{VENV_PYTHON} {HARNESS / 'scripts' / 'reload_fort.py'} "
+           f"{ANCHOR_SAVE} --exact")
+    try:
+        REQUEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = REQUEST_FILE.with_name(REQUEST_FILE.name + ".tmp")
+        tmp.write_text(cmd + "\n", encoding="utf-8")
+        os.replace(tmp, REQUEST_FILE)
+    except OSError as exc:
+        print(f"reload: cannot write request file: {exc}",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def _wait_daemon_healthy(timeout: float = 600.0) -> bool:
+    """Poll /v1/health until the fresh daemon answers (no auth)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(
+                    DAEMON_URL + "/v1/health", timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("ok") and data.get("df_reachable"):
+                return True
+        except Exception:  # noqa: BLE001 - daemon still down
+            pass
+        time.sleep(5.0)
+    return False
+
+
+def _anchor_loaded() -> bool:
+    """Verify the reloaded fort IS the S0 anchor: paused, 7
+    citizens, in-game April year 125. The live fort has 9 citizens
+    at 125-07-10, so this distinguishes the two. Uses the live
+    snapshot, not /v1/status (stale after a restart). One retry:
+    the first snapshot after a daemon restart was observed empty.
+    """
+    for attempt in (1, 2):
+        try:
+            token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+            req = urllib.request.Request(
+                DAEMON_URL + "/v1/snapshot",
+                headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            text = data.get("text", "")
+        except Exception as exc:  # noqa: BLE001
+            print(f"reload: snapshot check failed: {exc}",
+                  file=sys.stderr)
+            return False
+        if not text:
+            if attempt == 1:
+                time.sleep(30.0)
+                continue
+            print("reload: snapshot came back empty", file=sys.stderr)
+            return False
+        break
+    header = text[:400]
+    if "paused: True" not in header:
+        print(f"reload: anchor not paused: {header[:200]!r}",
+              file=sys.stderr)
+        return False
+    if "125-04-01" not in header:
+        print(f"reload: anchor date wrong: {header[:200]!r}",
+              file=sys.stderr)
+        return False
+    m = (re.search(r"Population: (\d+) citizens", text)
+         or re.search(r"status: .*?\((\d+) citizens", text))
+    if m is None or int(m.group(1)) != 7:
+        print(f"reload: anchor citizens wrong: {header[:200]!r}",
+              file=sys.stderr)
+        return False
+    print("reload: anchor verified live (125-04, 7 citizens, "
+          "paused)", flush=True)
+    return True
+
+
 def _reload_anchor() -> bool:
-    """Reload the S0 clean base (the only scenario whose save
-    exists today). Returns True on success."""
-    out = subprocess.run(
-        [str(VENV_PYTHON), str(HARNESS / "scripts" / "reload_fort.py"),
-         "region2-00125-04-01", "--exact"],
-        capture_output=True, text=True, timeout=600)
-    print(out.stdout[-2000:])
-    if out.returncode != 0:
-        print(out.stderr[-2000:], file=sys.stderr)
-    return out.returncode == 0
+    """Reload the S0 clean base via the supervisor.
+
+    The supervisor owns the main DF, so the anchor reload is a
+    request, not a kill: restore the clean base, write the reload
+    request, restart the DF unit, and wait for the fresh daemon
+    to report the anchor loaded and paused. Returns False when
+    any step fails; the caller aborts the suite (a run on the
+    wrong fort would poison the benchmark).
+    """
+    if not _restore_anchor():
+        return False
+    if not _write_reload_request():
+        return False
+    print("reload: requested S0 anchor via supervisor; restarting "
+          "urist-df-main.service ...", flush=True)
+    proc = subprocess.run(
+        ["systemctl", "restart", "urist-df-main.service"],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        print(f"reload: systemctl restart failed: "
+              f"{proc.stderr[-1000:]}", file=sys.stderr)
+        return False
+    if not _wait_daemon_healthy():
+        print("reload: daemon did not come back healthy after "
+              "the supervisor reload", file=sys.stderr)
+        return False
+    if not _anchor_loaded():
+        print("reload: anchor check FAILED — the reloaded fort "
+              "is not the S0 anchor", file=sys.stderr)
+        return False
+    print("reload: GUARD 1 OK — S0 anchor loaded via supervisor, "
+          "game paused, daemon healthy", flush=True)
+    return True
 
 
 def cmd_run(args) -> int:

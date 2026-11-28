@@ -32,9 +32,9 @@ before it is relied on.
   exists: `plan`, `replay` (offline, verified on the two real
   logs: median 91.8, IQR 91.7-91.8, survival 100%), `run`
   (live, gated by --allow-live; refuses non-S0/unverified
-  scenarios), `leaderboard`, `baselines` (fails with the blocker
-  named). No live suite has run yet; that waits for main-chat
-  scheduling.
+  scenarios), `leaderboard`, `baselines` (live, via the
+  supervisor reload protocol below). No live suite has run yet;
+  that waits for main-chat scheduling.
 - **Phase 4 (v2 metrics): PARTIAL.** Expansion lands now
   (breadth of use from logged actions; both real runs score 12.5,
   crafts only). Economy, defense, diplomacy report None ("not
@@ -645,7 +645,15 @@ the same seed.
 tier (scenario by repeat), records validity, reruns
 infrastructure failures without counting them, and computes the
 median, interquartile range, survival rate, and efficiency
-numbers. Verification: a full day-tier suite (10 repeats on the
+numbers. The anchor reload goes through the supervisor, never
+through a direct `reload_fort.py` kill: the runner restores the
+S0 clean base, writes a one-shot reload request
+(`~/.config/df-agent-harness/reload-request`), restarts
+`urist-df-main.service`, and waits for the fresh daemon to
+report the anchor loaded and paused. A direct kill makes the
+supervisor relaunch the pinned save while the daemon is down
+(observed 2026-11-28: both baselines failed that way).
+Verification: a full day-tier suite (10 repeats on the
 anchor) runs end to end and produces a leaderboard row with a
 manifest per run.
 

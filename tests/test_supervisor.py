@@ -82,6 +82,81 @@ class TestFindDfPid(unittest.TestCase):
                                             str(self.proc)), 1234)
 
 
+class TestReadReloadRequest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._td.name)
+        self.req = self.tmp / "reload-request"
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_missing_file_is_none(self):
+        self.assertIsNone(run_df.read_reload_request(self.req))
+
+    def test_valid_request_consumed_once(self):
+        cmd = f"{sys.executable} scripts/reload_fort.py S0 --exact"
+        self.req.write_text(cmd + "\n")
+        self.assertEqual(run_df.read_reload_request(self.req), cmd)
+        self.assertFalse(self.req.exists())
+        self.assertIsNone(run_df.read_reload_request(self.req))
+
+    def test_stale_request_ignored(self):
+        self.req.write_text(f"{sys.executable} x.py\n")
+        os.utime(self.req, (0, 0))
+        self.assertIsNone(run_df.read_reload_request(self.req))
+        self.assertFalse(self.req.exists())
+
+    def test_empty_request_ignored(self):
+        self.req.write_text("\n")
+        self.assertIsNone(run_df.read_reload_request(self.req))
+        self.assertFalse(self.req.exists())
+
+    def test_multiline_request_ignored(self):
+        self.req.write_text(f"{sys.executable} a.py\n"
+                            f"{sys.executable} b.py\n")
+        self.assertIsNone(run_df.read_reload_request(self.req))
+        self.assertFalse(self.req.exists())
+
+    def test_shell_metacharacters_ignored(self):
+        self.req.write_text(f"{sys.executable} a.py; rm -rf /\n")
+        self.assertIsNone(run_df.read_reload_request(self.req))
+        self.assertFalse(self.req.exists())
+
+    def test_non_python_command_ignored(self):
+        self.req.write_text("/bin/true\n")
+        self.assertIsNone(run_df.read_reload_request(self.req))
+        self.assertFalse(self.req.exists())
+
+
+class TestRequestedReloadMain(unittest.TestCase):
+    def test_requested_command_overrides_reload_cmd(self):
+        # --reload-cmd is "false" (would fail); the request says
+        # "python -c pass" (succeeds, then no DF is found). If the
+        # request is honored, the output names it and the failure
+        # is the missing DF, not the reload.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            df_dir = Path(d) / "df"
+            df_dir.mkdir()
+            req = Path(d) / "reload-request"
+            req.write_text(f"{sys.executable} -c pass\n")
+            r = subprocess.run(
+                [sys.executable,
+                 str(Path(__file__).resolve().parent.parent
+                     / "scripts" / "supervisor" / "run_df.py"),
+                 "--df-dir", str(df_dir), "--display", ":99",
+                 "--reload-cmd", "false", "--name", "test",
+                 "--request-file", str(req)],
+                capture_output=True, text=True, timeout=60)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("using requested reload", r.stdout)
+            self.assertIn("reload ok but no DF found", r.stdout)
+            self.assertNotIn("reload failed", r.stdout)
+            self.assertFalse(req.exists())
+
+
 class TestWrapperExitCodes(unittest.TestCase):
     def test_failed_reload_exits_one(self):
         # A reload that fails must exit nonzero so systemd restarts

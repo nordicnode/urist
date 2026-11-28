@@ -523,6 +523,146 @@ class TestEvalRunCLI(unittest.TestCase):
             lb.close()
 
 
+class TestReloadAnchor(unittest.TestCase):
+    """The supervisor reload path (2026-11-28 fix): the runner
+    never kills DF behind the supervisor's back; it restores the
+    clean base, writes a reload request, restarts the DF unit,
+    and waits for the fresh daemon to report the anchor loaded."""
+
+    def _setup(self, tmp):
+        import eval_run
+        clean = tmp / "clean-base"
+        clean.mkdir()
+        (clean / "world.sav").write_text("clean")
+        anchor = tmp / "anchor-dir"
+        request = tmp / "reload-request"
+        token = tmp / "token"
+        token.write_text("tok\n")
+        return eval_run, clean, anchor, request, token
+
+    def test_success_writes_request_and_restarts_unit(self):
+        from unittest import mock
+        import eval_run
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, clean, anchor, request, token = self._setup(tmp)
+            with mock.patch.object(eval_run, "CLEAN_BASE", clean), \
+                    mock.patch.object(eval_run, "ANCHOR_DIR", anchor), \
+                    mock.patch.object(eval_run, "REQUEST_FILE",
+                                      request), \
+                    mock.patch.object(eval_run, "TOKEN_FILE", token), \
+                    mock.patch.object(eval_run.subprocess, "run") as run, \
+                    mock.patch.object(eval_run, "_wait_daemon_healthy",
+                                      return_value=True), \
+                    mock.patch.object(eval_run, "_anchor_loaded",
+                                      return_value=True):
+                run.return_value = mock.Mock(returncode=0)
+                self.assertTrue(eval_run._reload_anchor())
+            # Clean base restored into the working save dir.
+            self.assertEqual((anchor / "world.sav").read_text(),
+                             "clean")
+            # Request written (consumed later by run_df, not here).
+            self.assertIn("reload_fort.py region2-00125-04-01 "
+                          "--exact", request.read_text())
+            run.assert_called_once()
+            self.assertEqual(
+                run.call_args.args[0],
+                ["systemctl", "restart", "urist-df-main.service"])
+
+    def test_restore_failure_aborts(self):
+        from unittest import mock
+        import eval_run
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            with mock.patch.object(eval_run, "CLEAN_BASE",
+                                  tmp / "no-such-base"), \
+                    mock.patch.object(eval_run, "ANCHOR_DIR",
+                                      tmp / "anchor-dir"):
+                self.assertFalse(eval_run._reload_anchor())
+
+    def test_systemctl_failure_aborts(self):
+        from unittest import mock
+        import eval_run
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, clean, anchor, request, token = self._setup(tmp)
+            with mock.patch.object(eval_run, "CLEAN_BASE", clean), \
+                    mock.patch.object(eval_run, "ANCHOR_DIR", anchor), \
+                    mock.patch.object(eval_run, "REQUEST_FILE",
+                                      request), \
+                    mock.patch.object(eval_run, "TOKEN_FILE", token), \
+                    mock.patch.object(eval_run.subprocess, "run") as run:
+                run.return_value = mock.Mock(returncode=1, stderr="x")
+                self.assertFalse(eval_run._reload_anchor())
+
+    def test_unhealthy_daemon_aborts(self):
+        from unittest import mock
+        import eval_run
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, clean, anchor, request, token = self._setup(tmp)
+            with mock.patch.object(eval_run, "CLEAN_BASE", clean), \
+                    mock.patch.object(eval_run, "ANCHOR_DIR", anchor), \
+                    mock.patch.object(eval_run, "REQUEST_FILE",
+                                      request), \
+                    mock.patch.object(eval_run, "TOKEN_FILE", token), \
+                    mock.patch.object(eval_run.subprocess, "run") as run, \
+                    mock.patch.object(eval_run, "_wait_daemon_healthy",
+                                      return_value=False):
+                run.return_value = mock.Mock(returncode=0)
+                self.assertFalse(eval_run._reload_anchor())
+
+    def test_anchor_check_failure_aborts(self):
+        from unittest import mock
+        import eval_run
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            _, clean, anchor, request, token = self._setup(tmp)
+            with mock.patch.object(eval_run, "CLEAN_BASE", clean), \
+                    mock.patch.object(eval_run, "ANCHOR_DIR", anchor), \
+                    mock.patch.object(eval_run, "REQUEST_FILE",
+                                      request), \
+                    mock.patch.object(eval_run, "TOKEN_FILE", token), \
+                    mock.patch.object(eval_run.subprocess, "run") as run, \
+                    mock.patch.object(eval_run, "_wait_daemon_healthy",
+                                      return_value=True), \
+                    mock.patch.object(eval_run, "_anchor_loaded",
+                                      return_value=False):
+                run.return_value = mock.Mock(returncode=0)
+                self.assertFalse(eval_run._reload_anchor())
+
+    def test_anchor_loaded_parses_snapshot(self):
+        from unittest import mock
+        import eval_run
+        anchor_text = ("header: Erushtathtat, 125-04-01 "
+                       "(tick 1000) paused: True focus: x\n"
+                       "Population: 7 citizens (7 idle)\n")
+        live_text = ("header: Erushtathtat, 125-07-10 "
+                     "(tick 213000) paused: True focus: x\n"
+                     "status: unchanged (9 citizens, 0 hostiles)\n")
+
+        def _resp(text):
+            m = mock.Mock()
+            m.read.return_value = json.dumps(
+                {"text": text}).encode()
+            m.__enter__ = mock.Mock(return_value=m)
+            m.__exit__ = mock.Mock(return_value=False)
+            return m
+
+        with tempfile.TemporaryDirectory() as d:
+            token = Path(d) / "token"
+            token.write_text("tok\n")
+            with mock.patch.object(eval_run, "TOKEN_FILE", token):
+                with mock.patch.object(
+                        eval_run.urllib.request, "urlopen",
+                        return_value=_resp(anchor_text)):
+                    self.assertTrue(eval_run._anchor_loaded())
+                with mock.patch.object(
+                        eval_run.urllib.request, "urlopen",
+                        return_value=_resp(live_text)):
+                    self.assertFalse(eval_run._anchor_loaded())
+
+
 if __name__ == "__main__":
     unittest.main()
 

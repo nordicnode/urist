@@ -100,6 +100,18 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   start the target while manual Xvfb/DF/daemon processes are running**
   — the units would fight them for :99/:98 and RPC 5000. Run the
   install script (it hands over) or stop the manual processes first.
+  **Requested reloads:** the eval suite may ask the supervisor to
+  load a different save for ONE restart (e.g. the S0 anchor for a
+  benchmark tier) instead of the pinned save: write one line holding
+  the full reload command (argv, no shell) to
+  `~/.config/df-agent-harness/reload-request` (atomically, temp +
+  rename), then `systemctl restart urist-df-main.service`. run_df
+  consumes the request once (delete on read) and ignores it when
+  stale (>30 min), so a later crash recovery always falls back to
+  the pinned save. Never kill DF behind the supervisor to load
+  another save: run_df relaunches the pinned save and the daemon
+  stops while it does (observed 2026-11-28: both eval baselines
+  failed that way).
   /etc survives a reboot but NOT a VM replacement: after a replacement,
   run recover.sh, then install-supervisor.sh. **Verified 2026-11-27
   ~13:09 PT: a real VM replacement wiped /etc/systemd units, /tmp, and

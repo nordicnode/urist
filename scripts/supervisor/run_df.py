@@ -20,6 +20,18 @@ This wrapper owns the whole sequence:
      (systemctl stop), SIGKILL the DF pid (DF ignores SIGTERM) and
      exit 0 — a clean stop, not a crash.
 
+Requested reloads (eval suite): the suite runner may ask this
+wrapper to load a different save for ONE restart (e.g. the S0
+anchor for a benchmark tier) instead of the pinned save. The
+request is one line in ~/.config/df-agent-harness/reload-request
+holding the full reload command (argv, no shell). It is consumed
+once (deleted on read) and ignored when stale (>30 min), so a
+later crash recovery always falls back to the pinned save. The
+requester writes it atomically (temp file + rename). Never kill
+DF behind this wrapper to load another save: the wrapper
+relaunches the pinned save and the daemon stops while it does
+(observed 2026-11-28: both eval baselines failed that way).
+
 The wrapper never guesses a pid: the DF it watches is identified by
 (process name, cwd), the same identification kill_df uses.
 """
@@ -31,6 +43,75 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+
+# Requested reloads (see the module docstring). One line holding
+# the full reload command (argv, no shell). Consumed once, ignored
+# when stale, so crash recovery always falls back to the pinned save.
+DEFAULT_REQUEST_FILE = (
+    Path.home() / ".config" / "df-agent-harness" / "reload-request")
+REQUEST_MAX_AGE_SECONDS = 1800
+_REQUEST_FORBIDDEN = set(";&|$`><\n\r")
+
+
+def read_reload_request(path: Path | str,
+                        max_age_seconds: int = REQUEST_MAX_AGE_SECONDS
+                        ) -> str | None:
+    """Consume a pending requested-reload command, or None.
+
+    One-shot: the file is deleted on read (valid or not), so a
+    request can only ever fire once. Stale (> max_age) and
+    malformed requests are dropped with a warning, never executed.
+    A request is well-formed when it is one line, splits into at
+    least two argv tokens starting with a python binary, and
+    contains no shell metacharacters (it is run as an argv list,
+    never through a shell).
+    """
+    p = Path(path)
+    try:
+        mtime = p.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        print(f"run_df: cannot stat request file {p}: {exc}",
+              flush=True)
+        return None
+    if time.time() - mtime > max_age_seconds:
+        print(f"run_df: ignoring stale reload request {p} "
+              f"(older than {max_age_seconds}s)", flush=True)
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        return None
+    try:
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"run_df: cannot read request file {p}: {exc}",
+              flush=True)
+        return None
+    cmd = raw.strip()
+    ok = bool(cmd) and "\n" not in cmd
+    argv: list[str] = []
+    if ok:
+        try:
+            argv = shlex.split(cmd)
+        except ValueError:
+            argv = []
+        ok = (len(argv) >= 2
+              and Path(argv[0]).name in ("python", "python3")
+              and not any(c in cmd for c in _REQUEST_FORBIDDEN))
+    try:
+        p.unlink()
+    except OSError as exc:
+        print(f"run_df: cannot consume request file {p}: {exc}; "
+              "ignoring the request", flush=True)
+        return None
+    if not ok:
+        print(f"run_df: ignoring malformed reload request: {cmd!r}",
+              flush=True)
+        return None
+    return cmd
 
 
 def find_df_pid(df_dir: Path, proc_root: str = "/proc") -> int | None:
@@ -104,6 +185,9 @@ def main(argv: list[str] | None = None) -> int:
                          "--exact'")
     ap.add_argument("--name", required=True,
                     help="instance name for logs, e.g. main")
+    ap.add_argument("--request-file", default=None,
+                    help="requested-reload file (default: "
+                         "~/.config/df-agent-harness/reload-request)")
     args = ap.parse_args(argv)
     df_dir = Path(args.df_dir)
     os.environ["DISPLAY"] = args.display
@@ -124,7 +208,18 @@ def main(argv: list[str] | None = None) -> int:
               flush=True)
 
     # 2. Reload: launch ./dfhack, load the save, verify the pause.
-    cmd = shlex.split(args.reload_cmd)
+    # A requested reload (eval suite) overrides the pinned command
+    # for this restart only; anything else uses --reload-cmd.
+    request_file = (Path(args.request_file) if args.request_file
+                    else DEFAULT_REQUEST_FILE)
+    requested = read_reload_request(request_file)
+    if requested is not None:
+        print(f"run_df[{args.name}]: using requested reload: "
+              f"{requested}", flush=True)
+        reload_cmd = requested
+    else:
+        reload_cmd = args.reload_cmd
+    cmd = shlex.split(reload_cmd)
     print(f"run_df[{args.name}]: running: {' '.join(cmd)}", flush=True)
     proc = subprocess.run(cmd)
     if proc.returncode != 0:

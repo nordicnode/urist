@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""dfh-mcp — run the Urist MCP server over stdio.
+
+    .venv/bin/python scripts/dfh-mcp
+
+Reads JSON-RPC messages on stdin, writes them on stdout. The
+daemon must already be running (dfh start); the server refuses
+to start without it. See docs/MCP.md.
+"""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from dfagent_harness.mcp.__main__ import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

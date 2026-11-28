@@ -1447,6 +1447,16 @@ class Daemon:
         # brew). Check the newest reports for a cancellation after
         # the task started; a cancellation's text names the cause
         # (e.g. "cancels Brew Drink: No empty barrel").
+        # Boundary is <=, not <: the task reads its start state
+        # while the game is paused, BEFORE queueing the job, so a
+        # report AT the start tick predates the task — the job did
+        # not exist yet. The game sits paused at that tick between
+        # runs, so a previous run's cancellation lands exactly on
+        # it (found live 2026-11-27, P0-4 attempt 3: attempt 2's
+        # brew cancellation at time=168635 was blamed on attempt
+        # 3's make_barrel, whose start_tick was also 168635,
+        # even though the barrel completed and the cancellation
+        # named a different job and dwarf).
         try:
             cur = observe.collect(self.client, sections=("reports",))
             reports = (cur.get("reports") or {}).get("reports") or []
@@ -1456,7 +1466,7 @@ class Daemon:
                 if "cancel" not in text.lower():
                     continue
                 if start_tick is not None and rep.get("time") is not None \
-                        and rep["time"] < start_tick:
+                        and rep["time"] <= start_tick:
                     continue
                 return {"ok": False, "action": f"task:{name}",
                         "reason": f"the {job_name} job was cancelled: "

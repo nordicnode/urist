@@ -302,6 +302,94 @@ class TestFarmTaskOffline(unittest.TestCase):
         self.assertIn("wagon", res["fix"])
 
 
+class TestCancelBoundaryOffline(unittest.TestCase):
+    """A cancellation recorded AT the task's start tick belongs to
+    the previous run, not this task: the game sits paused at that
+    tick between runs, and the task reads its start state before
+    queueing the job, so the job did not exist yet. Found live
+    2026-11-27 (P0-4 attempt 3): attempt 2's brew cancellation
+    at time=168635 was blamed on attempt 3's make_barrel, whose
+    start_tick was also 168635, even though the barrel completed
+    and the cancellation named a different job and dwarf. The
+    filter is <=, not <."""
+
+    def _state(self):
+        return {
+            "status": {"year_tick": 100000, "population": 7},
+            "buildings": {"list": [
+                {"id": 7, "type": "Workshop", "subtype": "Carpenters"},
+                {"id": 8, "type": "Workshop", "subtype": "Still"}]},
+            "stocks": {
+                "by_material": [{"type": "PLANT", "brewable": True,
+                                 "units": 5}],
+                "empty_barrels": 3, "barrels": 5,
+                "drink_units": 97, "food_units": 23,
+                "wood_units": 117, "stone_units": 0},
+            "jobs": {"list": []},
+            "units": {"citizens": [{"id": 5409, "pos": [97, 97, 175]}]},
+        }
+
+    def _run_brew(self, reports):
+        daemon = daemon_mod.Daemon()
+        daemon.client = mock.Mock()
+        state = self._state()
+        calls = {"act": [], "job_id": [100]}
+
+        def fake_collect(client, sections=None):
+            if sections == ("jobs",):
+                return {"jobs": {"list": []}}
+            if sections == ("reports",):
+                return {"reports": {"reports": reports}}
+            return state
+
+        def fake_act(client, action_name, **kw):
+            if action_name not in actions.ACTIONS:
+                raise ValueError(f"unknown action {action_name!r}")
+            calls["act"].append((action_name, kw))
+            calls["job_id"][0] += 1
+            return actions.ActionResult(
+                ok=True, action=action_name, before={}, after={},
+                reason=f"{action_name} done",
+                detail={"job_ids": [calls["job_id"][0]]})
+
+        def fake_paused_read(client, fn):
+            return fn()
+
+        def fake_wait(client, fn, timeout):
+            return fn()
+
+        with mock.patch.object(daemon_mod.observe, "collect",
+                               side_effect=fake_collect), \
+            mock.patch.object(daemon_mod, "act",
+                              side_effect=fake_act), \
+            mock.patch("dfagent_harness.read_safety.paused_read",
+                       side_effect=fake_paused_read), \
+            mock.patch.object(actions, "_wait_for_paused",
+                              side_effect=fake_wait):
+            return daemon.run_task("brew")
+
+    def test_cancellation_at_start_tick_is_skipped(self):
+        # The stale cancellation is from the previous run: same
+        # tick as the start state, different job and dwarf. The
+        # brew completed (job left the list), so it succeeds.
+        res = self._run_brew([{
+            "text": "Mestthos Zassezuk, Herbalist cancels "
+                    "Brew drink from plant: Needs ",
+            "time": 100000}])
+        self.assertTrue(res["ok"], res)
+        self.assertIn("completed", res["reason"])
+
+    def test_cancellation_after_start_tick_fails(self):
+        # A cancellation one tick after the start state is this
+        # task's own job being cancelled: it must fail.
+        res = self._run_brew([{
+            "text": "Mestthos Zassezuk, Herbalist cancels "
+                    "Brew drink from plant: Needs ",
+            "time": 100001}])
+        self.assertFalse(res["ok"], res)
+        self.assertIn("cancelled", res["reason"])
+
+
 @unittest.skipUnless(_game_is_up(), "no live game on %s:%d" % (HOST, PORT))
 class TestTasksLive(unittest.TestCase):
     """The causal chains, live (paused reads and writes only — no

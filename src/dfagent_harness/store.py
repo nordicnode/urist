@@ -228,7 +228,12 @@ class Store:
                 ("mood_name", "TEXT NOT NULL DEFAULT 'none'"),
                 ("stress_category", "INTEGER NOT NULL DEFAULT -1"),
                 ("needs_json", "TEXT NOT NULL DEFAULT '[]'"),
-                ("relations_json", "TEXT NOT NULL DEFAULT '[]'")):
+                ("relations_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("social_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("traits_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("emotions_json", "TEXT NOT NULL DEFAULT '[]'"),
+                ("goal_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("skills_json", "TEXT NOT NULL DEFAULT '[]'")):
             if col not in cols:
                 self.conn.execute(
                     f"ALTER TABLE unit_history ADD COLUMN {col} {ddl}")
@@ -510,13 +515,20 @@ class Store:
                             mood_name: str = "none",
                             stress_category: int = -1,
                             needs: Optional[list] = None,
-                            relations: Optional[list] = None) -> None:
+                            relations: Optional[list] = None,
+                            social: Optional[list] = None,
+                            traits: Optional[list] = None,
+                            emotions: Optional[list] = None,
+                            goal: Optional[dict] = None,
+                            skills: Optional[list] = None) -> None:
         self.conn.execute(
             "INSERT INTO unit_history (unit_id, tick, pos_json, job,"
             " hunger, thirst, sleepiness, stress, wounds_json,"
             " name, profession, mood, mood_name, stress_category,"
-            " needs_json, relations_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            " needs_json, relations_json, social_json, traits_json,"
+            " emotions_json, goal_json, skills_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
+            " ?, ?, ?, ?, ?) "
             "ON CONFLICT(unit_id, tick) DO UPDATE SET "
             "pos_json=excluded.pos_json, job=excluded.job,"
             " hunger=excluded.hunger, thirst=excluded.thirst,"
@@ -527,12 +539,22 @@ class Store:
             " mood=excluded.mood, mood_name=excluded.mood_name,"
             " stress_category=excluded.stress_category,"
             " needs_json=excluded.needs_json,"
-            " relations_json=excluded.relations_json",
+            " relations_json=excluded.relations_json,"
+            " social_json=excluded.social_json,"
+            " traits_json=excluded.traits_json,"
+            " emotions_json=excluded.emotions_json,"
+            " goal_json=excluded.goal_json,"
+            " skills_json=excluded.skills_json",
             (unit_id, tick, json.dumps(pos or []), job,
              hunger, thirst, sleepiness, stress,
              json.dumps(wounds or []), name, profession, mood,
              mood_name, stress_category, json.dumps(needs or []),
-             json.dumps(relations or [])))
+             json.dumps(relations or []),
+             json.dumps(social or []),
+             json.dumps(traits or []),
+             json.dumps(emotions or []),
+             json.dumps(goal or {}),
+             json.dumps(skills or [])))
         self.conn.commit()
 
     @_locked
@@ -575,6 +597,12 @@ class Store:
             d["needs"] = json.loads(d.pop("needs_json") or "[]")
             d["relations"] = json.loads(
                 d.pop("relations_json") or "[]")
+            d["social"] = json.loads(d.pop("social_json") or "[]")
+            d["traits"] = json.loads(d.pop("traits_json") or "[]")
+            d["emotions"] = json.loads(
+                d.pop("emotions_json") or "[]")
+            d["goal"] = json.loads(d.pop("goal_json") or "{}")
+            d["skills"] = json.loads(d.pop("skills_json") or "[]")
             out.append(d)
         out.reverse()
         return out

@@ -572,9 +572,13 @@ class TestDiaryWriteRetryValidation(_HttpCase):
         self.assertEqual(status, 503, raw)
         body = json.loads(raw)
         self.assertEqual(body["error"]["code"], "DIARY_FAILED")
-        self.assertIn("diary AI entry claims",
-                      body["error"]["message"])
-        self.assertIn("wounded", body["error"]["message"])
+        # The rejection now comes from the numbers check, not the
+        # group check: the feed has no per-dwarf record (the
+        # retry's store is empty), so the group check correctly
+        # skips wound claims it cannot verify, and the numbers
+        # check catches drink "39 from 33" against the run's 68.
+        self.assertIn("drink 39", body["error"]["message"])
+        self.assertIn("68", body["error"]["message"])
         # Rejected, retried with a correction, rejected again,
         # gave up after the third attempt — never written.
         self.assertEqual(len(calls), 3)
@@ -585,6 +589,77 @@ class TestDiaryWriteRetryValidation(_HttpCase):
             for m in retry))
         self.assertFalse(
             (Path(self._tmp.name) / "diary.md").exists())
+
+
+class _OneWoundedStore(_EmptyStore):
+    """One citizen, Olon, wounded in-day: the retry route's feed
+    has a real dwarf, a real thread, and a real recent entry to
+    carry to the model."""
+
+    def unit_ids(self):
+        return [101]
+
+    def unit_history(self, uid, limit=None):
+        return [{"tick": 105700, "unit_id": 101,
+                 "name": "Olon Medtobalod", "profession": "Brewer",
+                 "mood": -1, "mood_name": "none",
+                 "stress_level": 40000, "stress_category": 3,
+                 "needs": [], "wounds": [{"id": 1}],
+                 "job": "Brewer", "relations": []}]
+
+
+class TestDiaryWriteRetryFeedCarriesEntriesAndThreads(_HttpCase):
+    """Audit R7 (route half): the retry route's feed reaches the
+    model with the last entries and the day's threads — not just
+    the rebuild's. The old retry path rebuilt the body from the
+    run log alone, so the model never saw what yesterday's entry
+    said or which threads were open."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        (Path(self._tmp.name) / "diary.md").write_text(
+            "## 125-04-01 — First day\n\nOlon was thirsty all "
+            "day, and the still was silent.\n")
+        daemon = _FakeDaemon()
+        daemon.store = _OneWoundedStore()
+        daemon.journal = _EmptyJournal()
+        daemon.state_dir = self._tmp.name
+        self._start(daemon=daemon)
+
+    def tearDown(self):
+        super().tearDown()
+        self._tmp.cleanup()
+
+    def test_retry_prompt_carries_entry_and_thread(self):
+        calls: list[list] = []
+
+        class StubClient:
+            def chat(self, messages):
+                calls.append(list(messages))
+                # Over the validator's 120-char minimum, and
+                # naming no dwarf and no number, so the only
+                # thing under test is what the prompt carried.
+                return ("The still worked through the day and the "
+                        "fort held together through the evening. "
+                        "The dwarves kept at their work, and the "
+                        "day passed without incident.")
+
+        with mock.patch(
+                "dfagent_harness.freepi.FreePiClient", StubClient):
+            status, raw = self._req(
+                "POST", "/v1/control/diary",
+                TestDiaryWriteRetryValidation.RETRY_BODY)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(len(calls), 1)
+        user = [m["content"] for m in calls[0]
+                if m["role"] == "user"][0]
+        # The previous entry reached the model (continuity).
+        self.assertIn("Olon was thirsty all day", user)
+        # The day's wounded thread reached it too.
+        self.assertIn("Olon Medtobalod: wounded — 1 wound", user)
+        # And the entry was written.
+        self.assertIn("The still worked through the day",
+                      (Path(self._tmp.name) / "diary.md").read_text())
 
 
 class TestPercentDecoding(_HttpCase):

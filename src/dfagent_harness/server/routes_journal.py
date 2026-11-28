@@ -180,6 +180,7 @@ def diary_write(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict
         # Best-effort: a failed collect falls back to the
         # driver's posted stocks, never fails the write.
         stocks_end = body.get("stocks_end") or {}
+        stocks_fresh = False
         try:
             fresh = ctx.collect_section("stocks")
             stocks = (fresh or {}).get("stocks") or {}
@@ -196,32 +197,44 @@ def diary_write(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict
                 fresh_end["population"] = len(citizens)
             if fresh_end:
                 stocks_end = fresh_end
+                stocks_fresh = True
         except Exception:  # noqa: BLE001 - best-effort
             pass
         feed = build_diary_feed(
             ctx.daemon.store, ctx.daemon.journal, day_start, fort,
-            year, state_dir=ctx.daemon.state_dir)
+            year, state_dir=ctx.daemon.state_dir,
+            watch_log_path=getattr(ctx.daemon, "watch_log", None),
+            run_logs_dir=(
+                getattr(ctx.daemon, "repo_dir", None) / "logs"
+                if getattr(ctx.daemon, "repo_dir", None) is not None
+                else None))
         merge_driver_record(
             feed["summary"],
             decisions=body.get("decisions") or [],
             stocks_start=body.get("stocks_start") or {},
             stocks_end=stocks_end)
-        # Thin-feed guard (the 04-05 retry class): a feed with no
-        # ledger stocks at all AND no dwarves AND no decisions is
-        # nothing to write from — the model would invent the day
-        # from the recent entries. Refuse it rather than letting
-        # the model write from nothing. This stops the
-        # pure-invention case only; the numbers validator in
-        # write_ai_entry is the real protection for a feed that
-        # has facts but a model that ignores them.
-        summary = feed["summary"]
-        if (not summary.get("stocks_start")
-                and not summary.get("stocks_end")
-                and not feed.get("dwarves")
-                and not summary.get("decisions")):
+        # The merged stocks are the driver's (or the fresh
+        # collect's), never the trend's: mark the provenance so
+        # the writability guard below can tell fresh stocks
+        # from the Store's single 04-01 trend sample.
+        if stocks_fresh:
+            feed["summary"]["stocks_source"] = "fresh"
+        elif body.get("stocks_start") or body.get("stocks_end"):
+            feed["summary"]["stocks_source"] = "run"
+        # Writability guard (audit R2; the 04-05 retry class):
+        # the old guard refused only a feed with NOTHING in it,
+        # so a stale feed (04-01's dwarves, trend drink 39)
+        # passed it and the model wrote from stale numbers.
+        # feed_is_writable refuses a feed with no fresh
+        # per-dwarf record, no usable lite record, no decisions
+        # and only trend stocks. The numbers validator in
+        # write_ai_entry stays the real protection for a feed
+        # that has facts but a model that ignores them.
+        from ..diary import feed_is_writable
+        writable, why = feed_is_writable(feed)
+        if not writable:
             _error(handler, 503, "DIARY_FAILED",
-                   "diary write failed: feed too thin — no stocks, "
-                   "no dwarves, no decisions")
+                   f"diary write failed: {why}")
             return
         path = write_ai_entry(FreePiClient(),
                               feed, ctx.daemon.state_dir)

@@ -74,30 +74,13 @@ def _cheb3(a: tuple[int, int, int], b: tuple[int, int, int]) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 
 
-# Job-type verbs for the citizen description. Only the common ones
-# are mapped; anything else falls back to the raw type name, never
-# an invented verb.
-_JOB_VERBS = {
-    "Dig": "digging", "FellTree": "cutting down a tree",
-    "Eat": "eating", "Drink": "drinking", "Drink2": "drinking",
-    "Sleep": "sleeping", "HaulStone": "hauling stone",
-    "HaulWood": "hauling wood", "HaulItem": "hauling an item",
-    "HaulBody": "hauling a body", "HaulFood": "hauling food",
-    "HaulFurniture": "hauling furniture",
-    "ConstructBuilding": "constructing a building",
-    "CustomReaction": "working a reaction",
-    "PrepareMeal": "cooking a meal", "MakeBarrel": "making a barrel",
-    "MakeBucket": "making a bucket", "PlantSeeds": "planting seeds",
-    "HarvestPlants": "harvesting plants",
-    "GatherPlants": "gathering plants", "Fish": "fishing",
-    "Hunt": "hunting", "TrainAnimal": "training an animal",
-    "ButcherAnimal": "butchering an animal", "MilkCreature": "milking",
-    "ShearCreature": "shearing", "Clean": "cleaning",
-    "Rest": "resting", "SeekArtifact": "seeking an artifact",
-    "StoreItemInStockpile": "storing an item",
-    "RemoveConstruction": "removing a construction",
-    "DestroyBuilding": "destroying a building",
-}
+# Job-type verbs for the citizen description. The map lives in
+# dwarves.py (JOB_VERBS, shared with the diary feed) so a new job
+# token gets plain words everywhere at once; this alias keeps the
+# existing uses below unchanged. Only the common ones are mapped;
+# anything else falls back to the raw type name, never an invented
+# verb.
+from .dwarves import JOB_VERBS as _JOB_VERBS  # noqa: E402
 
 
 def _counter_words(counters: dict[str, Any]) -> list[str]:

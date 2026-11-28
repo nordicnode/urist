@@ -83,6 +83,54 @@ def _need_words(name: Any) -> str:
     return words
 
 
+# Raw df job tokens in plain words. Moved here from attention.py
+# (2026-11-27, diary feed audit R5): the diary feed rendered the
+# raw token ("working as Fish") while instructing the model to use
+# plain words, and the model mapped it to fish-cleaning — Ral
+# "cleans fish" in three entries. Both the snapshot attention
+# lines and the diary feed now share this one map, so a new job
+# token gets plain words everywhere at once. Values are verb
+# phrases ("fishing", "constructing a building"); the diary
+# renders a mapped token bare and an unmapped one as
+# "working as <words>".
+JOB_VERBS = {
+    "Dig": "digging", "FellTree": "cutting down a tree",
+    "Eat": "eating", "Drink": "drinking", "Drink2": "drinking",
+    "Sleep": "sleeping", "HaulStone": "hauling stone",
+    "HaulWood": "hauling wood", "HaulItem": "hauling an item",
+    "HaulBody": "hauling a body", "HaulFood": "hauling food",
+    "HaulFurniture": "hauling furniture",
+    "ConstructBuilding": "constructing a building",
+    "CustomReaction": "working a reaction",
+    "PrepareMeal": "cooking a meal", "MakeBarrel": "making a barrel",
+    "MakeBucket": "making a bucket", "PlantSeeds": "planting seeds",
+    "HarvestPlants": "harvesting plants",
+    "GatherPlants": "gathering plants", "Fish": "fishing",
+    "Hunt": "hunting", "TrainAnimal": "training an animal",
+    "ButcherAnimal": "butchering an animal", "MilkCreature": "milking",
+    "ShearCreature": "shearing", "Clean": "cleaning",
+    "Rest": "resting", "SeekArtifact": "seeking an artifact",
+    "StoreItemInStockpile": "storing an item",
+    "RemoveConstruction": "removing a construction",
+    "DestroyBuilding": "destroying a building",
+}
+
+
+def job_words(token: Any) -> str:
+    """A raw df job token in plain words. Mapped tokens use
+    JOB_VERBS; an unknown token is split on CamelCase and
+    lowercased ("StoreItemInStockpile" -> "store item in
+    stockpile") — the raw token never reaches prose. "" for a
+    missing/empty token. Malformed input (non-string, digits
+    only) returns "" or the lowercased digits, never raises."""
+    if not isinstance(token, str) or not token:
+        return ""
+    if token in JOB_VERBS:
+        return JOB_VERBS[token]
+    words = re.sub(r"(?<!^)(?=[A-Z])", " ", token).strip().lower()
+    return words
+
+
 def _wound_ids(sample: dict[str, Any] | None) -> set[Any]:
     if not sample:
         return set()
@@ -128,6 +176,187 @@ def _relations_by_key(sample: dict[str, Any] | None
         if isinstance(r, dict) and r.get("type") is not None:
             out[(str(r["type"]), r.get("histfig_id"))] = r
     return out
+
+
+def _social_label(love: Any, meet_count: Any) -> str:
+    """Plain-words label for a social tie (hf_visual read), from the
+    wiki's thresholds: love >= 50 friend, >= 75 close friend,
+    >= 100 kindred spirit; <= -50 disliked, <= -75 hated, -100 pure
+    hate; 30+ meetings without that love is a long-term
+    acquaintance. Anything else is an acquaintance (they have met)
+    or, on the negative side without reaching disliked, on poor
+    terms. A missing love value falls back to the meeting count."""
+    mc = meet_count if isinstance(meet_count, int) else 0
+    if not isinstance(love, int):
+        return "long-term acquaintance" if mc >= 30 else "acquaintance"
+    if love >= 100:
+        return "kindred spirit"
+    if love >= 75:
+        return "close friend"
+    if love >= 50:
+        return "friend"
+    if love >= 0:
+        return "long-term acquaintance" if mc >= 30 \
+            else "acquaintance"
+    if love <= -100:
+        return "pure hate"
+    if love <= -75:
+        return "hated"
+    if love <= -50:
+        return "disliked"
+    return "on poor terms"
+
+
+def social_ties(sample: dict[str, Any],
+                prev_social: list[dict[str, Any]] | None = None,
+                related_states: dict[int, dict[str, Any]] | None = None
+                ) -> tuple[list[dict[str, Any]], int]:
+    """The dwarf's in-fort social ties (friendships, grudges) from
+    the sample's hf_visual read, strongest first, each with its
+    plain-words label, love value, meeting count, and whether it is
+    new today (``prev_social`` is the previous sample's social list;
+    None means first sighting, so nothing is new today — same rule
+    as relations). Returns (ties, outside_count): ``outside_count``
+    is the number of social entries whose target is NOT in the fort
+    — carried as a count only, never as a story, so the feed can
+    say a dwarf has people elsewhere without inventing who they
+    are (the 04-01 "Mestthos has a family somewhere he is not"
+    invention). Ties with no name are dropped (unresolvable)."""
+    related_states = related_states or {}
+    prev_keys = set()
+    if prev_social is not None:
+        prev_keys = {r.get("histfig_id") for r in prev_social
+                     if isinstance(r, dict)}
+    ties: list[dict[str, Any]] = []
+    outside = 0
+    for r in sample.get("social") or []:
+        if not isinstance(r, dict):
+            continue
+        if not r.get("in_fort"):
+            outside += 1
+            continue
+        name = r.get("name") or ""
+        if not name:
+            continue
+        tie: dict[str, Any] = {
+            "name": name,
+            "label": _social_label(r.get("love"),
+                                   r.get("meet_count")),
+            "love": r.get("love"),
+            "meet_count": r.get("meet_count"),
+        }
+        if prev_social is not None:
+            tie["new_today"] = r.get("histfig_id") not in prev_keys
+        else:
+            tie["new_today"] = False
+        uid = r.get("unit_id")
+        if isinstance(uid, int) and uid in related_states:
+            st = related_states[uid]
+            tie["mood"] = st.get("mood_name") or "none"
+            tie["stress"] = stress_words(st.get("stress_category"))
+            if st.get("changed"):
+                tie["changed"] = True
+        ties.append(tie)
+    ties.sort(key=lambda t: (-abs(t.get("love") or 0),
+                             -(t.get("meet_count") or 0)))
+    return ties, outside
+
+
+def salient_traits(sample: dict[str, Any], limit: int = 6
+                   ) -> list[dict[str, Any]]:
+    """Personality facets far from neutral (50): |value - 50| >= 25,
+    most deviant first, capped. The feed carries the facet name in
+    plain words plus the value and an intensity word; the diary
+    model phrases it. Facets near neutral are not character — they
+    are noise — so they never reach the feed."""
+    out: list[dict[str, Any]] = []
+    for t in sample.get("traits") or []:
+        if not isinstance(t, dict):
+            continue
+        v = t.get("value")
+        if not isinstance(v, int):
+            continue
+        dev = abs(v - 50)
+        if dev < 25:
+            continue
+        raw_facet = t.get("facet")
+        # Unresolved enum fallback ("facet_41"): the Lua name
+        # lookup failed for this sample (the 125-04-12 sample
+        # recorded before the daemon reloaded the fixed Lua). A
+        # bare index is not character — it would reach the prompt
+        # as garbage — so it never reaches the feed. Resolved
+        # facets ("LOVE_PROPENSITY") pass through.
+        if isinstance(raw_facet, str) and re.fullmatch(
+                r"facet_\d+", raw_facet):
+            continue
+        facet = str(raw_facet or "").lower().replace("_", " ")
+        if v > 50:
+            words = "very high" if dev >= 40 else "high"
+        else:
+            words = "very low" if dev >= 40 else "low"
+        out.append({"facet": facet, "value": v, "words": words})
+    out.sort(key=lambda x: -abs(x["value"] - 50))
+    return out[:limit]
+
+
+def _is_unresolved_enum(value: Any) -> bool:
+    """Is this an unresolved enum fallback, not a name? The Lua
+    name lookup yields a bare number ("14"), or the fallback
+    strings "emotion_14" / "thought_57" / "facet_41". A resolved
+    name ("ANNOYANCE", "Rain", "LOVE_PROPENSITY") is not one of
+    these. An int value is unresolved too (the JSON carries
+    strings, but a live dict may carry the raw number)."""
+    if isinstance(value, int):
+        return True
+    if not isinstance(value, str):
+        return True
+    if value.isdigit():
+        return True
+    return re.fullmatch(
+        r"(emotion|thought|facet)_\d+", value) is not None
+
+
+def recent_emotions(sample: dict[str, Any], limit: int = 5
+                    ) -> list[dict[str, Any]]:
+    """The dwarf's most recent emotions (soul.personality.emotions),
+    most recent first, capped. Each carries the emotion type and the
+    thought that caused it, in plain words, plus strength, severity,
+    and the game date it was felt. Old samples (no emotions column)
+    yield []."""
+    out: list[dict[str, Any]] = []
+    for e in sample.get("emotions") or []:
+        if not isinstance(e, dict):
+            continue
+        # Unresolved enum fallbacks (a bare number "14", or
+        # "emotion_14" / "thought_57"): the Lua name lookup
+        # failed for this sample. A bare index is not a feeling
+        # — it would reach the prompt as garbage — so the entry
+        # never reaches the feed. Resolved names ("ANNOYANCE",
+        # "Rain") pass through.
+        raw_type = e.get("type")
+        raw_thought = e.get("thought")
+        if _is_unresolved_enum(raw_type):
+            continue
+        # A missing thought is incomplete, not unresolved — keep
+        # the entry and render it without the thought suffix (the
+        # old behaviour). A present-but-unresolved thought drops
+        # the entry, like an unresolved type.
+        if raw_thought is not None \
+                and _is_unresolved_enum(raw_thought):
+            continue
+        out.append({
+            "type": str(raw_type or "").lower().replace(
+                "_", " "),
+            "strength": e.get("strength"),
+            "thought": str(raw_thought or "").lower().replace(
+                "_", " "),
+            "severity": e.get("severity"),
+            "year": e.get("year"),
+            "year_tick": e.get("year_tick"),
+        })
+    out.sort(key=lambda e: (e.get("year") or 0,
+                            e.get("year_tick") or 0), reverse=True)
+    return out[:limit]
 
 
 def diff_unit_samples(prev: dict[str, Any] | None,
@@ -247,16 +476,18 @@ def diff_unit_samples(prev: dict[str, Any] | None,
 
     # Job: the job type string ("Drink2", "Sleep", ...) is a raw
     # enum name; the record keeps it raw and the renderer puts it
-    # in plain words (attention._JOB_VERBS). A job change alone is
+    # in plain words (job_words, below). A job change alone is
     # routine — it only matters as part of a featured dwarf's day.
     pj, cj = prev.get("job") or "", curr.get("job") or ""
     if pj != cj:
         if not cj:
             add("job_changed", "went idle", SIG_ROUTINE)
         elif not pj:
-            add("job_changed", f"started {cj}", SIG_ROUTINE)
+            add("job_changed", f"started {job_words(cj)}",
+                SIG_ROUTINE)
         else:
-            add("job_changed", f"switched from {pj} to {cj}",
+            add("job_changed",
+                f"switched from {job_words(pj)} to {job_words(cj)}",
                 SIG_ROUTINE)
 
     # Relations: a new relation (by type + histfig) or a lost one.
@@ -311,7 +542,8 @@ def most_unmet_needs(sample: dict[str, Any] | None,
 def dwarf_record(sample: dict[str, Any],
                  changes: list[dict[str, Any]] | None = None,
                  related_states: dict[int, dict[str, Any]] | None = None,
-                 prev_relations: list[dict[str, Any]] | None = None
+                 prev_relations: list[dict[str, Any]] | None = None,
+                 prev_social: list[dict[str, Any]] | None = None
                  ) -> dict[str, Any]:
     """The structured per-dwarf record the diary feed and the
     snapshot's citizen section both use. ``sample`` is the latest
@@ -331,7 +563,13 @@ def dwarf_record(sample: dict[str, Any],
     dwarf is new to the record, the relations are not new today.
     Without this the diary cannot tell a devotion from before
     today (a god worshipped since embark) from a bond formed
-    today, and it presents background as today's event."""
+    today, and it presents background as today's event.
+    ``prev_social`` is the same rule for the social ties
+    (friendships/grudges from hf_visual): a tie in ``sample`` but
+    not in ``prev_social`` is new today. The record also carries
+    the dwarf's salient personality facets and most recent
+    emotions, so the feed has character to write from, not just a
+    stat line."""
     changes = changes or []
     related_states = related_states or {}
     cat = sample.get("stress_category")
@@ -365,6 +603,7 @@ def dwarf_record(sample: dict[str, Any],
             if st.get("changed"):
                 entry["changed"] = True
         rels.append(entry)
+    ties, outside = social_ties(sample, prev_social, related_states)
     sig = max((c.get("significance", 0) for c in changes),
               default=0)
     return {
@@ -381,11 +620,47 @@ def dwarf_record(sample: dict[str, Any],
         "wounds": len(_wound_ids(sample)),
         "job": sample.get("job") or "",
         "relations": rels,
+        "social": ties,
+        "social_outside": outside,
+        "traits": salient_traits(sample),
+        "emotions": recent_emotions(sample),
+        "goal": ((sample.get("goal") or {}).get("name") or "")
+        if isinstance(sample.get("goal"), dict) else "",
+        "skills": [{"skill": s.get("skill"),
+                    "rating": s.get("rating") or ""}
+                   for s in (sample.get("skills") or [])
+                   if isinstance(s, dict) and s.get("skill")],
         "changes": [{"kind": c.get("kind"), "text": c.get("text"),
                      "significance": c.get("significance", 0)}
                     for c in changes],
         "significance": sig,
     }
+
+
+def _notable_skills(skills: Any, limit: int = 6
+                    ) -> list[dict[str, Any]]:
+    """The dwarf's notable skills: Adequate or better (rating_num
+    >= 2), best first, capped. Novice/Dabbling skills are not
+    character — every dwarf has a long tail of them — so they never
+    reach the store. A skill dict without a resolved name (None)
+    is skipped, never stored as a blank."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(skills, list):
+        return out
+    for s in skills:
+        if not isinstance(s, dict):
+            continue
+        name = s.get("skill")
+        num = s.get("rating_num")
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(num, int) or num < 2:
+            continue
+        out.append({"skill": name,
+                    "rating": s.get("rating") or "",
+                    "rating_num": num})
+    out.sort(key=lambda x: -x["rating_num"])
+    return out[:limit]
 
 
 def record_citizens(store: Any, tick: int,
@@ -419,4 +694,10 @@ def record_citizens(store: Any, tick: int,
             mood_name=c.get("mood_name") or "none",
             stress_category=cat if isinstance(cat, int) else -1,
             needs=c.get("needs") or [],
-            relations=c.get("relations") or [])
+            relations=c.get("relations") or [],
+            social=c.get("social") or [],
+            traits=c.get("traits") or [],
+            emotions=c.get("emotions") or [],
+            goal=c.get("goal") if isinstance(c.get("goal"), dict)
+            else {},
+            skills=_notable_skills(c.get("skills")))

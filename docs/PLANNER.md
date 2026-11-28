@@ -133,6 +133,43 @@ partial state.
   takerequests → `Esc` → topicmeeting → `a` → requestagreement →
   `Esc` → textviewer → `Return`).
 
+## Composed tasks and recipes
+
+A composed task (`task:<name>`, daemon `TASK_DEFS`) is one action
+name the model calls; the harness runs the whole chain and verifies
+the end effect. Single-action tasks (brew, cook, make_bed,
+make_barrel, gather, farm) queue one job and wait for it to leave
+the job list; a cancelled job is a failure, not a success.
+
+A recipe is a task whose spec carries `steps`: an ordered list run
+in sequence, each step verified, a failed step stopping the recipe
+with a diagnosis naming the step, why it failed, and the fix
+(R3-P0-4, ADVANCED_MECHANICS §0). A step is one of:
+
+- `{"task": "<name>"}` — a sub-task (single-action or another
+  recipe, max 3 levels deep; a self-referential recipe fails
+  naming the nesting, never recurses forever).
+- `{"action": "<name>", "kwargs": {...}}` — one raw harness action,
+  verified by its own read-back.
+- `{"verify": "<predicate>", ...}` — a state check with no side
+  effect: `workshop_exists` (subtype), `building_exists` (type,
+  optional subtype), `stock_at_least` (kind drink/food/wood/stone,
+  units). An unknown predicate fails, never passes.
+
+Step kwargs support `$param` placeholders resolved from the recipe
+call's kwargs (a missing parameter fails the step naming it).
+`count` is ignored for recipes (a recipe runs once). The dry-run
+plan (`GET /v1/tasks/{name}/plan`) renders a recipe's real steps;
+legacy tasks render the same four lines as before.
+
+First recipe: `stock_drink` (make a barrel, then brew) — the live
+proof vehicle for the framework. The well recipe is NOT defined
+yet: `build_furniture` has no `Well` kind and there is no Well
+construction route (ADVANCED_MECHANICS §1), so a well recipe would
+fail at its build step with a named reason until that route lands.
+The well follows when its route exists; the framework is proven
+with `stock_drink`.
+
 ## What went wrong live (the honest record)
 
 - **5 citizens died of dehydration** (Kogan Mûthkatost tick 224421,
@@ -150,3 +187,94 @@ partial state.
   aborts, texture-reset aborts, load aborts), plus a cell reboot
   that wiped apt packages and all processes. The acceptance window
   was never completed crash-free. See ACCEPTANCE.md.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: the suggestion, once per tick
+
+The planner's product in the snapshot is one suggested action
+per tick, as a default, not an instruction, in this shape:
+
+```
+Suggestion: brew 2 at the still (drink 97, floor 70, 3 empty barrels).
+```
+
+The suggestion names the action, its parameters, and the
+one-line why in game terms. The priority order (§Priority order)
+and the decision rules per domain (§Decision rules per domain)
+are harness policy; the snapshot carries the outcome, never the
+rulebook. The model is told it may reject the suggestion. The
+missing-section rule (the duplicate-carpenter fix) is a planner
+rule: when a section the suggestion depends on is missing, the
+planner says so instead of suggesting from stale state.
+
+**Token cost.** At 7 dwarves, the suggestion as written above is
+70 characters: about 23 tokens by the accountant's
+3-chars-per-token rate, 17 on the wire. At 50 dwarves the
+cost is about the same, about 200 characters: about 66 tokens
+by the accountant, 50 on the wire. The suggestion is one action
+with its parameters and one why, at any population; it does not
+grow with the number of dwarves, the number of goals, or the
+number of domains. If a future change makes it grow with any
+of those, the change is refused until the suggestion is capped
+again.
+
+### Query route: the planner has no route; the catalog does
+
+The planner is not queried. The model asks GET /v1/catalog for
+what it can do, GET /v1/snapshot for the state, and the
+per-system detail routes when it needs to choose. The planner's
+priorities are not a route and are never dumped into the prompt.
+When the model rejects the suggestion and acts otherwise, the
+planner records the deviation and moves on; it does not argue.
+
+### Briefing: none from this layer
+
+The planner does not brief. Briefings come from briefings.py,
+fired by events. The planner's stall handling sharpens the
+prompt at 3 idle ticks and runs the snapshot's suggestion as a
+fallback at 6 idle ticks; both are planner behavior, not
+briefings. The model is never briefed about the planner's own
+state.
+
+### Opportunities: the planner feeds them, it is not them
+
+The opportunities section carries at most 3 entries per tick,
+each facts plus a query route, from the system docs. The
+planner's per-goal backoff applies to build and production
+goals, not to labor (§3.3 of LABOR.md), and the planner has no
+labor domain. The planner decides which facts are opportunities
+by the systems' rules; it never invents an opportunity entry of
+its own.
+
+### What the system deliberately does NOT push, and why
+
+- **The priority order.** The priority order (§Priority order)
+  is harness policy. The snapshot carries the suggestion it
+  produces, never the ordering that produced it. The model
+  decides from the fort's state, not from the planner's
+  ranking.
+- **The decision rules.** The rules per domain are harness
+  policy, versioned in this doc. The snapshot carries the
+  outcome. A rulebook dump would be a script, and the
+  presentation gives the model what it needs to decide, not a
+  script to follow (HARNESS_ROLE.md).
+- **The goals list.** The planner's goals are not pushed. The
+  snapshot carries goals only as the Goals section (assembler
+  _goals), capped like every other section. The full goal
+  hierarchy is harness state, not model input.
+- **Stall handling as a threat.** The sharpened prompt at 3
+  idle ticks and the fallback at 6 are behavior, not warnings.
+  The snapshot never says "you are stalling". The model is
+  told what the fort needs, not how it is performing as a
+  planner.

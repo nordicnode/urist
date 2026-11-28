@@ -182,5 +182,77 @@ class TestFreePiRetry(unittest.TestCase):
         self.assertEqual(freepi._retry_wait(neg, 1), 0.0)
 
 
+class TestChatFull(unittest.TestCase):
+    """chat_full returns the reply plus the usage counts the
+    driver logs per model call (EVALUATION.md driver emission
+    spec). The API returns usage (verified live 2026-11-27);
+    when it does not, usage is None, never invented."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        token_path = Path(self.tmp.name) / "jwt.txt"
+        token_path.write_text("test-token")
+        self._patcher = mock.patch.object(freepi, "JWT_PATH", token_path)
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+        self.client = freepi.FreePiClient(model="deepseek-v4.1-flash")
+
+    def _resp(self, payload):
+        return _Resp(payload)
+
+    def test_usage_and_model_kept(self):
+        payload = {
+            "model": "deepseek-v4.1-flash-1017",
+            "choices": [{"message": {"content": "hello"}}],
+            "usage": {"prompt_tokens": 37, "completion_tokens": 13,
+                      "total_tokens": 50}}
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                return_value=self._resp(payload)):
+            res = self.client.chat_full(
+                [{"role": "user", "content": "hi"}])
+        self.assertEqual(res["content"], "hello")
+        self.assertEqual(res["model"], "deepseek-v4.1-flash-1017")
+        self.assertEqual(res["usage"]["prompt_tokens"], 37)
+        self.assertEqual(res["usage"]["completion_tokens"], 13)
+        self.assertEqual(res["temperature"], 0.2)
+
+    def test_missing_usage_is_none(self):
+        payload = {"model": "deepseek-v4.1-flash-1017",
+                   "choices": [{"message": {"content": "hello"}}]}
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                return_value=self._resp(payload)):
+            res = self.client.chat_full(
+                [{"role": "user", "content": "hi"}])
+        self.assertEqual(res["content"], "hello")
+        self.assertIsNone(res["usage"])
+
+    def test_non_dict_usage_is_none(self):
+        payload = {"model": "m",
+                   "choices": [{"message": {"content": "hello"}}],
+                   "usage": "not-a-dict"}
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                return_value=self._resp(payload)):
+            res = self.client.chat_full(
+                [{"role": "user", "content": "hi"}])
+        self.assertIsNone(res["usage"])
+
+    def test_chat_still_returns_text_only(self):
+        payload = {"model": "m",
+                   "choices": [{"message": {"content": "hello"}}],
+                   "usage": {"prompt_tokens": 1,
+                             "completion_tokens": 1}}
+        with mock.patch.object(
+                freepi.urllib.request, "urlopen",
+                return_value=self._resp(payload)):
+            self.assertEqual(
+                self.client.chat([{"role": "user", "content": "hi"}]),
+                "hello")
+
+
 if __name__ == "__main__":
     unittest.main()

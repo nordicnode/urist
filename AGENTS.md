@@ -135,6 +135,39 @@ Log everything there. GOAL.md in the same goal dir is the design record.
   quarantined — they are the only exception.
 - **Do NOT modify dfkit.** It is a read-only reference at most.
 
+## Uniform acceptance criteria (Mikey, 2026-11-27 ~19:20 PT)
+
+One consistent bar across all harness work, not a different pass mark
+per area. A thing is either working, verified live against the real
+game with real mechanics, or it is not done. No weaker pass for any
+area; every closed item cites its proof. No exceptions, no "mostly
+works".
+
+- **Any code change, minimum:** (1) live verification against the
+  real game with real mechanics; (2) the offline suite green
+  (the AGENTS.md offline invocation, not an improvised one);
+  (3) the pre-push self-review gate passed and logged;
+  (4) ruff clean. A mock or a unit test alone is not verification.
+- **Diary entries:** validator pass PLUS an independent re-check
+  under both bars (dwarf-focus, events-not-stats). The validator
+  passing 13/13 means "no checkable number is wrong", not "the
+  entry is right".
+- **Design docs:** the UNVERIFIED marks with their live-verification
+  bars. A doc is design-complete when written; it is proven only
+  when its UNVERIFIED marks are cleared live.
+- **Gap items:** the "what would prove it fixed" bar from the gap
+  review, proven live. The gap register
+  (`~/workspace/goals/dwarf-fortress-0-47-05-autonomous-play-harness/hidden_files/gap-register.md`)
+  is the record: every item OPEN / IN PROGRESS / CLOSED with proof
+  cited / DEFERRED with a reason. Nothing is dropped silently; an
+  item that cannot be closed gets logged with the reason. Every
+  future gap review re-checks the previous items' status and
+  reports what changed.
+- **A claim without proof stays open.** A code reference, a commit
+  hash, or a docstring is not live proof. If the audit finds an
+  item closed on a weaker bar, it is reopened in the gap register
+  with the missing proof named.
+
 ## The M1 workflow
 
 M1 is done (a full in-game day with a brew that completed and raised

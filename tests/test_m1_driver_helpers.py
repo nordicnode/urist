@@ -751,6 +751,159 @@ def _good_snap(tick=100000, suggestion=None):
     return snap
 
 
+class _ScriptedModel:
+    """A fake model: chat_full() returns the scripted replies in
+    order, then repeats the last one. Records every messages list
+    it was called with. Replies are plain text; chat_full wraps
+    them in the response dict the driver logs (no usage, so the
+    model_call records carry None tokens)."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    def chat_full(self, messages):
+        self.calls.append(messages)
+        idx = min(len(self.calls) - 1, len(self.replies) - 1)
+        return {"content": self.replies[idx], "model": "x",
+                "usage": None, "temperature": 0.2}
+
+    def chat(self, messages):
+        return self.chat_full(messages)["content"]
+
+
+class TestModelDecideRetry(unittest.TestCase):
+    """In-tick retry of a malformed model reply (Mikey, 2026-11-27):
+    a parse failure re-prompts the model in the SAME tick with the
+    specific error instead of burning the turn. Bounded at
+    MODEL_PARSE_RETRIES; only then does the tick end idle through
+    the model-failure path. A parse that fails and then recovers
+    still counts as a model failure for scoring, but not toward
+    the consecutive-failure cap."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _driver(self, replies, daemon=None, max_ticks=2):
+        drv = m1_driver.M1Driver.__new__(m1_driver.M1Driver)
+        drv.args = SimpleNamespace(mock=False, days=1, window=150,
+                                   max_ticks=max_ticks, model="x",
+                                   out=str(Path(self._tmp.name)
+                                           / "log.jsonl"))
+        drv.out = Path(drv.args.out)
+        drv.daemon = daemon if daemon is not None else _StubDaemon()
+        drv.model = _ScriptedModel(replies)
+        drv._catalog = lambda: "{}"
+        drv.tick_no = 0
+        drv.stall_ticks = 0
+        drv.consecutive_model_failures = 0
+        drv.consecutive_snapshot_failures = 0
+        drv.query_results = []
+        drv.last_action_results = []
+        drv.actions_taken = 0
+        drv.idle_ticks = 0
+        drv.diary_decisions = []
+        drv.snap0 = None
+        drv.citizens_start_fresh = None
+        return drv
+
+    def _run(self, drv):
+        # run() clears snapshot baselines via the real Store and
+        # sleeps 5 s per snapshot failure — both stubbed out.
+        store = mock.Mock()
+        store.return_value.clear_snapshots.return_value = 0
+        with mock.patch("dfagent_harness.store.Store", store), \
+                mock.patch("dfagent_harness.store."
+                           "default_world_db_path",
+                           return_value="/tmp/nope.db"), \
+                mock.patch.object(m1_driver.time, "sleep"):
+            return drv.run()
+
+    def _log_records(self, drv):
+        out = Path(drv.args.out)
+        if not out.exists():
+            return []
+        return [json.loads(line)
+                for line in out.read_text().splitlines() if line]
+
+    def test_retry_recovers_and_counts_as_model_failure(self):
+        # Malformed first reply, valid second: the decision comes
+        # back, the re-prompt carries the parse error and the bad
+        # reply, and the recovery is logged as a model failure
+        # (recovered=True) for scoring.
+        drv = self._driver([
+            "not json at all",
+            '{"reasoning": "ok", "actions": '
+            '[{"action": "task:brew", "kwargs": {}}]}'])
+        reasoning, actions = drv._model_decide(_good_snap())
+        self.assertEqual(reasoning, "ok")
+        self.assertEqual(actions, [{"action": "task:brew",
+                                    "kwargs": {}, "reason": ""}])
+        self.assertEqual(len(drv.model.calls), 2)
+        retry = drv.model.calls[1]
+        self.assertEqual(retry[-2]["role"], "assistant")
+        self.assertEqual(retry[-2]["content"], "not json at all")
+        self.assertIn("could not be parsed", retry[-1]["content"])
+        self.assertIn("JSON object", retry[-1]["content"])
+        recs = self._log_records(drv)
+        self.assertEqual(
+            [r for r in recs if r["kind"] == "model_retry"][0]
+            ["attempt"], 1)
+        recovered = [r for r in recs
+                     if r["kind"] == "model_failure"
+                     and r.get("recovered") is True]
+        self.assertEqual(len(recovered), 1)
+        self.assertEqual(recovered[0]["attempts"], 1)
+
+    def test_retry_exhausts_after_two_reprompts(self):
+        # Three bad replies in a row: 1 + MODEL_PARSE_RETRIES
+        # model calls, one model_retry per attempt, then the
+        # ValueError escapes — run() ends the tick through the
+        # model-failure path, which logs the failure itself.
+        drv = self._driver(["garbage"] * 3)
+        with self.assertRaises(ValueError):
+            drv._model_decide(_good_snap())
+        self.assertEqual(len(drv.model.calls), 3)
+        recs = self._log_records(drv)
+        self.assertEqual(
+            len([r for r in recs if r["kind"] == "model_retry"]), 3)
+        self.assertEqual(
+            [r["attempt"] for r in recs
+             if r["kind"] == "model_retry"], [1, 2, 3])
+        self.assertFalse([r for r in recs
+                          if r["kind"] == "model_failure"])
+
+    def test_recovered_parse_does_not_burn_the_turn(self):
+        # Run-loop level: a tick whose first reply is malformed
+        # still runs the task (the turn is not burned), and the
+        # consecutive-failure counter stays at zero.
+        daemon = _ScriptDaemon(
+            [_good_snap()],
+            fresh=[_fresh_citizen(i, f"D{i}") for i in range(7)])
+        drv = self._driver([
+            "not json at all",
+            '{"reasoning": "ok", "actions": '
+            '[{"action": "task:brew", "kwargs": {}}]}'],
+            daemon=daemon, max_ticks=2)
+        drv._advance_clock = lambda target, current: target
+        self.assertEqual(self._run(drv), 0)
+        self.assertEqual(daemon.tasks_run, ["brew", "brew"])
+        self.assertEqual(drv.consecutive_model_failures, 0)
+        recs = self._log_records(drv)
+        self.assertIn("model_retry", [r["kind"] for r in recs])
+        # The recovered failure is logged by _model_decide itself,
+        # marked recovered — and the tick loop logged no failure of
+        # its own, because the tick succeeded.
+        recovered = [r for r in recs
+                     if r["kind"] == "model_failure"
+                     and r.get("recovered") is True]
+        self.assertEqual(len(recovered), 1)
+        self.assertFalse([r for r in recs
+                          if r["kind"] == "model_failure"
+                          and not r.get("recovered")])
+
+
 class TestTickLoopFailureAccounting(unittest.TestCase):
     """The M1 tick loop's failure accounting (external review
     section 8, 2026-11-27): the snapshot-retry cap (H1), the

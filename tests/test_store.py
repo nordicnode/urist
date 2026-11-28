@@ -231,6 +231,43 @@ class TestStoreUnitHistoryDeaths(unittest.TestCase):
         self.assertEqual(rows[1]["thirst"], 1000)
         self.assertEqual(rows[0]["pos"], [97, 97, 175])
 
+    def test_unit_history_goal_and_skills_round_trip(self):
+        # Goals and notable skills are personal, not stats: a
+        # dwarf's goal ("Create Great Artwork") and their best
+        # skills ride in the sample and come back out the same.
+        self.store.record_unit_history(
+            1200, 42, job="Miner",
+            goal={"type": 4, "name": "Create Great Artwork"},
+            skills=[{"skill": "MINING", "rating": "Adequate",
+                     "rating_num": 2, "experience": 0},
+                    {"skill": "DANCE", "rating": "Adequate",
+                     "rating_num": 2, "experience": 0}])
+        rows = self.store.unit_history(42)
+        self.assertEqual(rows[0]["goal"],
+                         {"type": 4, "name": "Create Great Artwork"})
+        self.assertEqual(
+            [s["skill"] for s in rows[0]["skills"]],
+            ["MINING", "DANCE"])
+
+    def test_unit_history_upsert_overwrites_goal_and_skills(self):
+        # The Store upserts on (unit_id, tick): re-recording a
+        # tick overwrites the goal/skills — this is how the
+        # 04-12 sample's garbage traits/emotions (recorded before
+        # the Lua fix) get replaced by a fresh collect.
+        self.store.record_unit_history(
+            1200, 42, job="Miner",
+            goal={"type": 4, "name": "Create Great Artwork"},
+            skills=[])
+        self.store.record_unit_history(
+            1200, 42, job="Miner",
+            goal={"type": 1, "name": "Be a Father"},
+            skills=[{"skill": "MINING", "rating": "Adequate",
+                     "rating_num": 2, "experience": 0}])
+        rows = self.store.unit_history(42)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["goal"]["name"], "Be a Father")
+        self.assertEqual(len(rows[0]["skills"]), 1)
+
     def test_unit_history_limit_returns_most_recent(self):
         # Table 4 row 7: a limit means the MOST RECENT N samples,
         # still oldest-first — not the earliest N.

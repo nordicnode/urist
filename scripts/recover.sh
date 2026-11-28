@@ -49,7 +49,13 @@ if ! command -v xdotool >/dev/null 2>&1 \
   for spec in "xdotool_:xdotool" "scrot_:scrot" "libxdo3_:libxdo3" \
               "libxtst6_:libxtst6" "libimlib2t64_:libimlib2"; do
     deb="${spec%%:*}"; dir="${spec##*:}"
-    f=$(ls /var/cache/apt/archives/${deb}*.deb 2>/dev/null | head -1)
+    f=$(ls /var/cache/apt/archives/${deb}*.deb 2>/dev/null | head -1 || true)
+    # A missing cached deb must not abort the recovery (set -e
+    # turns the failed ls into an exit 2): the extracted libs may
+    # already exist from a previous run, and apt installs the
+    # package system-wide later anyway. Observed 2026-11-27: the
+    # libgl1 deb was absent from the cache and killed recover.sh
+    # twice at the deblibs step, before DF ever launched.
     if [ -n "$f" ]; then
       dpkg-deb -x "$f" "$TOOLS/$dir" 2>/dev/null || true
     fi
@@ -95,7 +101,9 @@ if ! ldconfig -p 2>/dev/null | grep -q libSDL-1.2.so.0; then
   mkdir -p "$DEBLIBS"
   for deb in libsdl1.2debian libsdl-image1.2 libsdl-ttf2.0-0 \
              libgtk2.0-0t64 libglu1-mesa libgl1; do
-    f=$(ls /var/cache/apt/archives/${deb}_*.deb 2>/dev/null | head -1)
+    f=$(ls /var/cache/apt/archives/${deb}_*.deb 2>/dev/null | head -1 || true)
+    # Same as step 1a above: a missing cached deb (libgl1,
+    # 2026-11-27) must not abort the recovery under set -e.
     if [ -n "$f" ]; then
       dpkg-deb -x "$f" "$DEBLIBS/$deb" 2>/dev/null || true
     fi

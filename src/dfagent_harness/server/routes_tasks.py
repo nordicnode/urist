@@ -12,45 +12,17 @@ def tasks_list(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict[
     _json(handler, 200, {"tasks": sorted(TASK_DEFS)})
 
 def task_plan(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict[str, list[str]], path: str, body: Optional[dict[str, Any]]) -> None:
-    from ..daemon import TASK_DEFS
+    # The plan renders the task's REAL steps (daemon.task_plan):
+    # a recipe's step list, or the legacy four lines for a
+    # single-action task. The route used to fabricate the four
+    # lines here for every task, which lied about recipes.
+    from ..daemon import task_plan as daemon_task_plan
     name = path[len("/v1/tasks/"):-len("/plan")]
-    spec = TASK_DEFS.get(name)
-    if spec is None:
+    plan = daemon_task_plan(name)
+    if plan is None:
         _error(handler, 404, "NOT_FOUND", f"unknown task {name!r}")
         return
-    if name == "farm":
-        _json(handler, 200, {
-            "task": name,
-            "steps": [
-                "find a built farm plot",
-                "pick a crop for the plot's light, biome and "
-                "season (dark: plump helmets; light: the "
-                "surface crop with the most seeds)",
-                "set the crop (verified before writing)",
-                "wait (bounded) for PlantSeeds jobs to appear "
-                "and finish",
-                "report the planted count or a diagnosis",
-            ],
-            "preconditions": [
-                "a built farm plot exists",
-                "seeds on hand for a crop that grows there",
-            ],
-        })
-        return
-    _json(handler, 200, {
-        "task": name,
-        "steps": [
-            f"find the {spec['need']} workshop" if spec["need"]
-            else "find shrubs to gather",
-            f"queue {spec['job']}",
-            "wait (bounded) for the job to leave the job list",
-            "report completion or cancellation",
-        ],
-        "preconditions": [
-            f"a {spec['need']} workshop exists" if spec["need"]
-            else "shrubs exist on the surface",
-        ],
-    })
+    _json(handler, 200, plan)
 
 def task_run(ctx: ServerContext, handler: BaseHTTPRequestHandler, query: dict[str, list[str]], path: str, body: Optional[dict[str, Any]]) -> None:
     if ctx.daemon is None:

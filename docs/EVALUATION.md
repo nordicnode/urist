@@ -82,6 +82,10 @@ this track's live verification.
 
 ## Driver emission spec (for track 4, NOT this track's files)
 
+**Implemented 2026-11-27** (the foundation commit; see the
+coordinator log for the hash): the driver emits all four items,
+verified live against the real game the same day.
+
 The manifest fields that are null for legacy logs need the driver
 (m1_driver.py, track 4) to emit them. This spec is the handoff;
 do not implement it in evaluation files:
@@ -90,12 +94,34 @@ do not implement it in evaluation files:
   Free Pi client currently discards the response `usage` field;
   either keep it (if the API returns it, UNVERIFIED at the API
   level) or count tokens locally from prompt/reply text.
+  **Done:** Free Pi returns `usage` (verified live 2026-11-27:
+  `prompt_tokens` / `completion_tokens` / `total_tokens`); the
+  client keeps it via `FreePiClient.chat_full`, and the driver
+  logs one `model_call` record per attempt (including parse
+  retries) with the API's counts, latency, model id, and
+  temperature. Live proof: a 2-tick real-model run logged two
+  records (prompt 8668/8729, completion 715/260, latency 4.0/5.3s);
+  the manifest sums them (tokens_in 17397, tokens_out 975).
 - `run_start` gains `harness_commit` (git HEAD at run start) and
   `protocol_version` (evaluation.PROTOCOL_VERSION, currently 1).
+  **Done:** logged on every run (live proof: run_start carries
+  harness_commit 1659a96… and protocol_version 1; the manifest
+  reads them and the gaps list is empty for them).
 - A `--noop` driver mode that never acts, for the no-op baseline
   (the mock model returns canned suggestions; it is not a no-op).
+  **Done:** `--noop` skips model calls and actions entirely
+  (live proof: a 2-tick noop run logged 0 model_call, 0 action,
+  2 noop_tick, run_end max_ticks; the score still gets wealth).
 - A guidance-off flag for the Phase 6 ablation (disable the
   guidance layers; the flag does not exist today).
+  **Done:** `--guidance-off {a,b,c,d}` (HARNESS_ROLE.md §8.1
+  groups: A strips the suggestion, B is recorded with no prompt
+  change — the driver prefetches no briefings or wiki, C swaps
+  in the knowledge-permitting system prompt, D strips
+  suggestion/attention/goals/placement and skips all
+  driver-added guidance). Live proof: a `--guidance-off a`
+  2-tick run completed with a model call and an action, run_start
+  naming guidance_off 'a'.
 
 ## Why this is a benchmark worth building
 

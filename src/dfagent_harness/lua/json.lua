@@ -281,6 +281,120 @@ local function dfh_relations(u, hf_to_unit)
   return rels
 end
 
+-- Social ties from hf.info.relationships.hf_visual: the friendship /
+-- grudge layer the relationship_ids slots and histfig_links do NOT
+-- carry. Each entry is one other historical figure this dwarf has met:
+-- love (-100..100; >=50 friend, >=75 close friend, >=100 kindred
+-- spirit; <=-50 disliked, <=-75 hated, -100 pure hate), trust, fear,
+-- respect, loyalty, familiarity, meet_count, and first/last meeting
+-- years. Verified in the DFHack r8 structure definitions
+-- (HistoricalFigureRelationships.hf_visual, reached via
+-- histfig.info.relationships). Added 2026-11-27: the diary audit
+-- found the harness blind to friendships, grudges, and meet counts —
+-- exactly the material the diary needs. Every field read is guarded:
+-- a missing info pointer or an unreadable vector yields an empty
+-- list, never an error.
+local function dfh_social(u, hf_to_unit)
+  local out = dfh_arr()
+  local hf = dfh_try(function()
+    return df.historical_figure.find(u.hist_figure_id) end, nil)
+  if not hf then return out end
+  local rels = dfh_try(function()
+    return hf.info.relationships end, nil)
+  if not rels then return out end
+  local visual = dfh_try(function() return rels.hf_visual end, nil)
+  if not visual then return out end
+  for _, v in ipairs(visual) do
+    local hfid = dfh_try(function() return v.histfig_id end, nil)
+    if hfid ~= nil and hfid ~= -1 then
+      local target = hf_to_unit and hf_to_unit[hfid] or nil
+      local name = nil
+      if target then
+        name = dfhack.TranslateName(dfhack.units.getVisibleName(target))
+      else
+        local thf = dfh_try(function()
+          return df.historical_figure.find(hfid) end, nil)
+        if thf then name = dfhack.TranslateName(thf.name) end
+      end
+      out[#out+1] = {
+        histfig_id = hfid,
+        unit_id = target and target.id or nil,
+        name = name,
+        in_fort = target ~= nil,
+        love = dfh_try(function() return v.love end, nil),
+        trust = dfh_try(function() return v.trust end, nil),
+        fear = dfh_try(function() return v.fear end, nil),
+        respect = dfh_try(function() return v.respect end, nil),
+        loyalty = dfh_try(function() return v.loyalty end, nil),
+        familiarity = dfh_try(function() return v.familiarity end, nil),
+        meet_count = dfh_try(function() return v.meet_count end, nil),
+        last_meet_year = dfh_try(
+          function() return v.last_meet_year end, nil),
+        first_year = dfh_try(function() return v.first_year end, nil),
+      }
+    end
+  end
+  return out
+end
+
+-- Personality facets from soul.personality.traits: the 50 int16
+-- values (df-structures UnitPersonality, static_array 50), 0-100 with
+-- 50 neutral. The facet name comes from the df.personality_facet_type
+-- enum; a missing enum yields the numeric fallback "facet_<i>".
+-- Every element read is guarded.
+local function dfh_traits(u)
+  local out = dfh_arr()
+  local soul = dfh_try(function() return u.status.current_soul end, nil)
+  if not soul then return out end
+  local traits = dfh_try(function()
+    return soul.personality.traits end, nil)
+  if not traits then return out end
+  for i = 0, 49 do
+    local val = dfh_try(function() return traits[i] end, nil)
+    if val ~= nil then
+      local fname = dfh_try(function()
+        return tostring(df.personality_facet_type[i]) end, nil)
+      out[#out+1] = {facet = fname or ("facet_" .. tostring(i)),
+                      value = val}
+    end
+  end
+  return out
+end
+
+-- Recent emotions from soul.personality.emotions: each entry is one
+-- felt emotion (type, strength, thought, severity, year, year_tick).
+-- The list is short (a handful at most) and is emitted whole; the
+-- Python side caps what the diary feed renders. Guarded throughout.
+local function dfh_emotions(u)
+  local out = dfh_arr()
+  local soul = dfh_try(function() return u.status.current_soul end, nil)
+  if not soul then return out end
+  local emos = dfh_try(function()
+    return soul.personality.emotions end, nil)
+  if not emos then return out end
+  for _, e in ipairs(emos) do
+    -- type/thought arrive as raw numbers; resolve them through the
+    -- enum tables (the units.lua pattern). tostring of the indexed
+    -- value is the plain name ("ANNOYANCE", "Rain"). Live-verified
+    -- 2026-11-27: df.emotion_type and df.unit_thought_type exist;
+    -- strength/severity read 0 on every live emotion, so the feed
+    -- renders type + thought only, never a strength.
+    local etype = dfh_try(function()
+      return tostring(df.emotion_type[e.type]) end, nil)
+    local thought = dfh_try(function()
+      return tostring(df.unit_thought_type[e.thought]) end, nil)
+    out[#out+1] = {
+      type = etype or ("emotion_" .. tostring(e.type)),
+      strength = dfh_try(function() return e.strength end, nil),
+      thought = thought or ("thought_" .. tostring(e.thought)),
+      severity = dfh_try(function() return e.severity end, nil),
+      year = dfh_try(function() return e.year end, nil),
+      year_tick = dfh_try(function() return e.year_tick end, nil),
+    }
+  end
+  return out
+end
+
 -- Generic scalar dump of a DF struct: all number/string/boolean fields.
 -- Used for structs with no live instance to probe (manager orders,
 -- announcements, reports are empty on a fresh fort).

@@ -60,14 +60,33 @@ def _retry_wait(exc: object, attempt: int) -> float:
 class FreePiClient:
     """OpenAI-compatible chat completions via Free Pi."""
 
+    #: The sampling temperature sent on every chat call. The
+    #: driver records it on each model_call log record so a run
+    #: log shows the model parameters, not just the model id.
+    TEMPERATURE = 0.2
+
     def __init__(self, model: str = DEFAULT_MODEL):
         self.model = model
         self.base = FREEPI_BASE
         self.token = JWT_PATH.read_text().strip()
 
     def chat(self, messages: list[dict], timeout: int = 180) -> str:
+        """The reply text only. Use chat_full when the caller
+        needs the usage counts (the driver logs them per call)."""
+        return self.chat_full(messages, timeout=timeout)["content"]
+
+    def chat_full(self, messages: list[dict],
+                  timeout: int = 180) -> dict:
+        """The full completion: reply text plus the response
+        metadata the driver logs per model call. Returns
+        {"content": str, "model": str | None, "usage": dict | None,
+        "temperature": float}. ``usage`` is the API's token counts
+        (verified live 2026-11-27: Free Pi returns usage with
+        prompt_tokens / completion_tokens / total_tokens); it is
+        None when the API omits it, never invented. ``model`` is
+        the response's model field (authoritative) or None."""
         body = {"model": self.model, "messages": messages,
-                "temperature": 0.2}
+                "temperature": self.TEMPERATURE}
         req = urllib.request.Request(
             self.base + "/v1/chat/completions",
             data=json.dumps(body).encode(),
@@ -115,7 +134,11 @@ class FreePiClient:
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"Free Pi chat: no choices in {data}")
-        return choices[0]["message"]["content"]
+        usage = data.get("usage")
+        return {"content": choices[0]["message"]["content"],
+                "model": data.get("model"),
+                "usage": usage if isinstance(usage, dict) else None,
+                "temperature": self.TEMPERATURE}
 
     def list_models(self) -> list[str]:
         # Free Pi exposes no /models endpoint (404 on /models,

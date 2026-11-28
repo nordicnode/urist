@@ -49,7 +49,7 @@ unpaused with no driver):
 Usage:
     .venv/bin/python scripts/m1_driver.py [--days 1] [--window 150]
         [--max-ticks N] [--mock] [--model ID] [--out logs/m1-<ts>.jsonl]
-        [--resume]
+        [--resume] [--noop] [--guidance-off {a,b,c,d}]
 """
 import argparse
 import json
@@ -59,6 +59,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 HARNESS = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HARNESS / "src"))
@@ -74,6 +75,18 @@ DEFAULT_WINDOW = 150  # game ticks advanced per driver tick
 MAX_ACTIONS_PER_TICK = 2
 STALL_ESCALATE_TICKS = 3   # no actions -> sharper prompt
 STALL_FALLBACK_TICKS = 6   # still stalled -> run the suggestion
+MODEL_PARSE_RETRIES = 2  # bad JSON -> re-prompt in-tick, then fail
+# the tick (Mikey, 2026-11-27: an invalid model reply must not burn
+# the turn). Total model calls per tick: 1 + MODEL_PARSE_RETRIES.
+
+# Sent to the model after a malformed reply, in the same tick, with
+# the specific parse error. It asks for just the valid JSON object —
+# the same format as the original prompt — and nothing else.
+_PARSE_RETRY_PROMPT = (
+    "Your last reply could not be parsed as JSON: {error}. "
+    "Reply again with just the valid JSON object in the same format "
+    "as before (an object with \"reasoning\" and \"actions\") and "
+    "nothing else — no prose, no fences, no extra keys.")
 # GUARD 3 — pre-flight drink floor. A run needs ~5 drink/day (measured
 # M1 burn); 10 is ~2 days of headroom. Refuse to start below it.
 MIN_DRINK = 10
@@ -96,6 +109,90 @@ PRIORITIES (in order)
 
 The catalog below lists every action you can take, with its parameters and legal values. A mistake in a parameter is recoverable: the harness tells you the legal values.
 """
+
+# The guidance-off system prompt (HARNESS_ROLE.md §8.1 group C):
+# the model is told it MAY use its own Dwarf Fortress knowledge.
+# Built from SYSTEM_PROMPT by replacing only the know-nothing
+# paragraph, so the rest of the prompt is byte-identical. If the
+# replacement ever fails to match (SYSTEM_PROMPT edited), the
+# fallback below keeps the know-nothing text rather than silently
+# emitting a half-edited prompt — the test asserts the replacement
+# took, so a drift fails loudly in CI, not live.
+_SYSTEM_PROMPT_KNOWLEDGE = SYSTEM_PROMPT.replace(
+    "You know NOTHING about Dwarf Fortress or its mechanics. "
+    "Do not use any prior knowledge of the game. "
+    "Everything you need is in the observation below and the action catalog.",
+    "You may use your own knowledge of Dwarf Fortress mechanics to "
+    "decide what to do. The observation below and the action catalog "
+    "are the authoritative record of THIS fort — use them for the "
+    "fort's actual state, coordinates, and legal actions, and your "
+    "own knowledge for how the game works.",
+    1)
+SYSTEM_PROMPT_KNOWLEDGE = (
+    _SYSTEM_PROMPT_KNOWLEDGE
+    if _SYSTEM_PROMPT_KNOWLEDGE != SYSTEM_PROMPT
+    else SYSTEM_PROMPT)
+
+
+# Guidance-off groups (HARNESS_ROLE.md §8.1, EVALUATION.md Phase 6).
+# A: suggestion off — no suggestion in the snapshot; attention,
+# catalog, and wiki stay. B: briefings and wiki prefetch off —
+# events arrive bare; the wiki stays queryable on demand. The
+# driver performs no briefing or wiki prefetch today, so B changes
+# nothing in the prompt; it is still a recorded variant (the
+# run_start record names it) for the ablation matrix. C: the
+# "know nothing" instruction off — the model may use its own DF
+# knowledge. D: all guidance off — the bare protocol (snapshot,
+# catalog, actions, events).
+GUIDANCE_OFF_GROUPS = ("a", "b", "c", "d")
+# Snapshot sections stripped from the prompt per group. Only the
+# directive sections go: the raw observation sections (header,
+# status, stocks, materials, units, entities, buildings, jobs,
+# reports, areas, events, history) always stay. Group B strips
+# nothing (see above); group C strips nothing either (it only
+# changes the system prompt).
+_GUIDANCE_STRIP: dict[str, frozenset] = {
+    "a": frozenset({"suggestion"}),
+    "d": frozenset({"suggestion", "attention", "goals", "placement"}),
+}
+
+
+def guidance_stripped_sections(group: str | None) -> frozenset:
+    """Snapshot sections the prompt omits for a guidance-off group
+    (empty when guidance is on, or for groups that strip nothing).
+    Malformed input (not a group) yields empty, never raises."""
+    if not isinstance(group, str):
+        return frozenset()
+    return _GUIDANCE_STRIP.get(group.lower(), frozenset())
+
+
+def system_prompt_for(group: str | None) -> str:
+    """The system prompt for a guidance-off group: the knowledge
+    variant for C and D (the model may use its own DF knowledge),
+    the standard know-nothing prompt otherwise."""
+    if isinstance(group, str) and group.lower() in ("c", "d"):
+        return SYSTEM_PROMPT_KNOWLEDGE
+    return SYSTEM_PROMPT
+
+
+def observation_text(snap: dict | None, strip: frozenset = frozenset()
+                     ) -> str:
+    """The observation text the model sees: the snapshot's sections
+    in their rendered order, minus the stripped (guidance) ones,
+    joined the way the assembler joins them. Falls back to the
+    snapshot's pre-rendered text when there are no sections (a
+    legacy or minimal snapshot). Malformed input yields the text
+    or "", never raises."""
+    if not isinstance(snap, dict):
+        return ""
+    sections = snap.get("sections")
+    if isinstance(sections, dict) and sections:
+        parts = [str(t) for n, t in sections.items()
+                 if n not in strip and t]
+        if parts:
+            return "\n\n".join(parts)
+    text = snap.get("text")
+    return text if isinstance(text, str) else ""
 
 
 def log_line(path: Path, obj: dict) -> None:
@@ -169,6 +266,16 @@ class DaemonClient:
     def run_task(self, name: str) -> dict:
         return self.post(f"/v1/tasks/{name}", {})
 
+    def memory_summary(self) -> dict:
+        """Run-start re-grounding data (R3-P0-3): deaths, trends,
+        recent decisions/events and failures from the journal +
+        store. No game read — works while the game is paused."""
+        return self.get("/v1/memory/summary", timeout=30)
+
+    def goals_list(self) -> dict:
+        """Open goals from the journal (R3-P0-3): {"goals": [...]}."""
+        return self.get("/v1/goals", timeout=30)
+
     def pause_daemon_loop(self) -> dict:
         return self.post("/v1/control/daemon/pause")
 
@@ -200,6 +307,10 @@ class DaemonClient:
 # FreePiClient lives in the package now (dfagent_harness.freepi)
 # so the daemon's diary writer can use the same model.
 from dfagent_harness.freepi import FreePiClient  # noqa: E402
+# The evaluation manifest reads these off the run log; the driver
+# is the only thing that can record them at run time.
+from dfagent_harness.evaluation import (  # noqa: E402
+    PROTOCOL_VERSION, current_harness_commit)
 
 
 def parse_model_reply(text: str) -> tuple[str, list[dict]]:
@@ -229,11 +340,14 @@ def parse_model_reply(text: str) -> tuple[str, list[dict]]:
         if not isinstance(a, dict) or "action" not in a:
             continue
         # Validate the whole action: a non-string name or a
-        # non-dict kwargs must fail the parse (and end the TICK
-        # via the model-failure path), never reach the run loop —
-        # a list kwargs once reached the query route extraction
-        # outside its try and killed the whole run with an
-        # AttributeError (2026-11-27, external review C5).
+        # non-dict kwargs must fail the parse, never reach the run
+        # loop — a list kwargs once reached the query route
+        # extraction outside its try and killed the whole run with
+        # an AttributeError (2026-11-27, external review C5). A
+        # ValueError here is retried in-tick by _model_decide
+        # (bounded re-prompt with the parse error); it ends the
+        # tick through the model-failure path only when the
+        # retries are exhausted.
         if not isinstance(a["action"], str):
             raise ValueError(
                 "model reply action name is not a string: "
@@ -460,6 +574,126 @@ def parse_fort_name(snap: dict | None) -> str:
     return m.group(1).strip() if m else ""
 
 
+def render_regrounding(summary: Any, goals: Any,
+                       threads: Any) -> str:
+    """Run-start re-grounding, rendered for the tick-1 prompt
+    (R3-P0-3). Names the previous run's open problems and recent
+    failures, pulled from the journal/store — so the run does not
+    start amnesiac. All three inputs are server/store data, so
+    every shape is validated defensively: a wrong type renders as
+    "nothing there", never raises. Each group is capped at 5 lines
+    (with an "and N more" tail) so a long history cannot flood the
+    prompt. An empty grounding still renders one line — it proves
+    the pull happened and tells the model there is no baggage."""
+    def _short(value: Any, limit: int = 150) -> str:
+        return str(value or "")[:limit].strip()
+
+    def _items(value: Any) -> list[dict]:
+        if not isinstance(value, list):
+            return []
+        return [v for v in value if isinstance(v, dict)]
+
+    lines = ["--- WHERE THE LAST RUN LEFT OFF (re-grounding) ---",
+             "What the journal and the store say about the fort "
+             "before this run started. Treat this as prior context, "
+             "not as today's news: do not re-report it as something "
+             "that just happened, and check the observation before "
+             "acting on a problem — it may already be fixed."]
+    shown = 0
+
+    # Open problems: goals the journal still lists as not done.
+    open_goals = [g for g in _items(goals) if not g.get("done")]
+    if open_goals:
+        lines.append("Open problems (goals not done):")
+        for g in open_goals[:5]:
+            name = _short(g.get("name") or "unnamed goal")
+            expr = _short(g.get("expression") or "")
+            task = _short(g.get("task") or "")
+            tail = f" — {expr}" if expr else ""
+            tail += f" (task: {task})" if task else ""
+            lines.append(f"- {name}{tail}")
+            shown += 1
+        if len(open_goals) > 5:
+            lines.append(f"- ...and {len(open_goals) - 5} more")
+
+    # Recent failures: decisions the journal records as not ok.
+    failures = []
+    if isinstance(summary, dict):
+        failures = _items(summary.get("failures"))
+    if failures:
+        lines.append("Recent failures (last run):")
+        for f in failures[:5]:
+            decision = _short(f.get("decision") or f.get("action")
+                              or "a decision")
+            result = _short(f.get("result") or "")
+            tail = f" — {result}" if result else ""
+            lines.append(f"- {decision}{tail}")
+            shown += 1
+        if len(failures) > 5:
+            lines.append(f"- ...and {len(failures) - 5} more")
+
+    # Recent deaths, from the store.
+    deaths = []
+    if isinstance(summary, dict):
+        deaths = _items(summary.get("deaths"))
+    if deaths:
+        lines.append("Recent deaths:")
+        for d in deaths[:5]:
+            who = _short(d.get("name") or
+                         f"unit {d.get('unit_id', '?')}")
+            cause = _short(d.get("cause") or "unknown cause")
+            lines.append(f"- {who}: {cause}")
+            shown += 1
+        if len(deaths) > 5:
+            lines.append(f"- ...and {len(deaths) - 5} more")
+
+    # Trends running out: a stock with <= 2 days left at the
+    # current burn is an open problem, not background.
+    trends = {}
+    if isinstance(summary, dict):
+        raw = summary.get("trends")
+        trends = raw if isinstance(raw, dict) else {}
+    low = []
+    for metric, vals in trends.items():
+        if not isinstance(vals, dict):
+            continue
+        days = vals.get("days_remaining")
+        if isinstance(days, (int, float)) and days <= 2:
+            low.append((str(metric), vals.get("latest"), days))
+    if low:
+        lines.append("Running low:")
+        for metric, latest, days in sorted(low)[:5]:
+            lines.append(f"- {metric}: {latest} left, "
+                         f"~{days} day(s) at current burn")
+            shown += 1
+
+    # Active threads: wounded / stressed / strange-mood dwarves
+    # and unmet needs, from the store's per-dwarf samples.
+    thread_items = _items(threads)
+    if thread_items:
+        lines.append("Open threads:")
+        for t in thread_items[:5]:
+            subject = _short(t.get("subject") or "a dwarf")
+            kind = _short(t.get("kind") or "")
+            detail = _short(t.get("detail") or "")
+            since = _short(t.get("since") or "")
+            tail = f" — {detail}" if detail else ""
+            if since:
+                when = ("first recorded " if t.get("first_sighting")
+                        else "since ")
+                tail += f" ({when}{since})"
+            lines.append(f"- {subject}: {kind}{tail}")
+            shown += 1
+        if len(thread_items) > 5:
+            lines.append(f"- ...and {len(thread_items) - 5} more")
+
+    if shown == 0:
+        lines.append("Nothing open: no unfinished goals, no recent "
+                     "failures, no recent deaths, no open threads. "
+                     "The last run left the fort clean.")
+    return "\n".join(lines)
+
+
 def build_diary_body(*, start_tick: int, year: int, fort_name: str,
                      decisions: list, stocks_start: dict,
                      stocks_end: dict, citizens: list,
@@ -545,6 +779,10 @@ class M1Driver:
         # wrong action name, a missing parameter, a verification
         # failure) instead of repeating them blind.
         self.last_action_results: list[str] = []
+        # Run-start re-grounding text (R3-P0-3): rendered once in
+        # run() from the journal/store, shown to the model only on
+        # tick 1. None until _reground() runs.
+        self.regrounding_text: str | None = None
         # Calibrated game-tick rate (ticks per wall second), used by
         # _advance_clock. Starts at a measured-typical 200/s and is
         # re-estimated from every window actually run. The old
@@ -608,6 +846,9 @@ class M1Driver:
         failed diary write is logged, never fatal to the run. Mock
         runs skip it (their decisions are the harness's, not the
         model's)."""
+        if getattr(self.args, "noop", False):
+            self._log("diary", skipped="noop run")
+            return
         if self.args.mock:
             self._log("diary", skipped="mock run")
             return
@@ -695,22 +936,106 @@ class M1Driver:
             self.catalog_text = text
         return self.catalog_text
 
+    def _reground(self) -> None:
+        """Fetch run-start re-grounding (R3-P0-3): the previous
+        run's open problems and recent failures, pulled from the
+        journal/store and rendered for the tick-1 prompt. The three
+        sources are independent — a failed fetch logs and leaves
+        that source empty, never refuses the run (preflight already
+        passed). The rendered text is logged whole as a
+        "regrounding" record: that record is the auditable proof
+        the first tick named the open problems and failures."""
+        summary: dict = {}
+        goals: list = []
+        threads: list = []
+        try:
+            res = self.daemon.memory_summary()
+            if isinstance(res, dict):
+                summary = res
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self._log("regrounding",
+                      error=f"memory summary failed: {exc}"[:200])
+        try:
+            res = self.daemon.goals_list()
+            if isinstance(res, dict) and isinstance(
+                    res.get("goals"), list):
+                goals = res["goals"]
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self._log("regrounding",
+                      error=f"goals failed: {exc}"[:200])
+        try:
+            from dfagent_harness.diary import open_threads
+            from dfagent_harness.store import (
+                Store, default_world_db_path)
+            date = (self.snap0 or {}).get("date") or ""
+            try:
+                year = int(str(date).split("-")[0])
+            except (ValueError, IndexError):
+                year = 0
+            day_start = 0
+            if self.start_tick is not None:
+                day_start = (self.start_tick // TICKS_PER_DAY
+                             * TICKS_PER_DAY)
+            res = open_threads(Store(default_world_db_path()),
+                               day_start, year)
+            if isinstance(res, list):
+                threads = res
+        except Exception as exc:  # noqa: BLE001 - best-effort
+            self._log("regrounding",
+                      error=f"open threads failed: {exc}"[:200])
+        self.regrounding_text = render_regrounding(
+            summary, goals, threads)
+        self._log("regrounding", text=self.regrounding_text,
+                  open_goals=len([g for g in goals
+                                  if isinstance(g, dict)
+                                  and not g.get("done")]),
+                  failures=len(summary.get("failures") or [])
+                  if isinstance(summary, dict) else 0,
+                  threads=len(threads))
+
+    def _guidance_off(self) -> str | None:
+        """The guidance-off group for this run (None = guidance on).
+        Read with getattr so older call sites that build an args
+        namespace without the flag still work."""
+        group = getattr(self.args, "guidance_off", None)
+        return group if isinstance(group, str) else None
+
+    def _suggestion_available(self) -> bool:
+        """False when the guidance-off group strips the suggestion
+        (A or D): the model never sees it, so the stall escalation
+        and fallback (both of which point at it) must not run
+        either — they would smuggle the ablated guidance back in."""
+        return ("suggestion" not in guidance_stripped_sections(
+            self._guidance_off()))
+
     def _prompt(self, snap: dict) -> list[dict]:
-        snap_text = snap.get("text", "")
+        group = self._guidance_off()
+        strip = guidance_stripped_sections(group)
+        snap_text = observation_text(snap, strip)
         user_parts = [
             f"--- ACTION CATALOG ---\n{self._catalog()}",
             f"--- OBSERVATION (game tick {snap.get('tick')}) ---\n"
             f"{snap_text}"]
-        if self.query_results:
-            user_parts.append("--- QUERY RESULTS (from your last turn) ---\n"
-                              + "\n".join(self.query_results[-3:]))
-            self.query_results = []
-        if self.last_action_results:
-            user_parts.append(
-                "--- LAST TURN'S ACTION OUTCOMES ---\n"
-                + "\n".join(self.last_action_results[-4:]))
-            self.last_action_results = []
-        if self.stall_ticks >= STALL_ESCALATE_TICKS:
+        # Group D is all guidance off: no re-grounding, no query
+        # results, no last-turn outcomes, no stall escalation —
+        # the bare protocol (snapshot, catalog, actions, events).
+        # The other groups keep the driver-added guidance that
+        # is not the ablated layer (A strips only the suggestion).
+        if group != "d":
+            if self.tick_no == 1 and self.regrounding_text:
+                user_parts.append(self.regrounding_text)
+            if self.query_results:
+                user_parts.append(
+                    "--- QUERY RESULTS (from your last turn) ---\n"
+                    + "\n".join(self.query_results[-3:]))
+                self.query_results = []
+            if self.last_action_results:
+                user_parts.append(
+                    "--- LAST TURN'S ACTION OUTCOMES ---\n"
+                    + "\n".join(self.last_action_results[-4:]))
+                self.last_action_results = []
+        if (self.stall_ticks >= STALL_ESCALATE_TICKS
+                and self._suggestion_available()):
             user_parts.append(
                 "--- ESCALATION ---\n"
                 f"You have returned no actions for {self.stall_ticks} "
@@ -719,7 +1044,7 @@ class M1Driver:
                 "suggestion — it names the single most urgent problem "
                 "and the exact action to take. Do that action now, "
                 "with the parameters the suggestion gives.")
-        return [{"role": "system", "content": SYSTEM_PROMPT},
+        return [{"role": "system", "content": system_prompt_for(group)},
                 {"role": "user", "content": "\n\n".join(user_parts)}]
 
     def _preflight(self, snap: dict) -> list[str]:
@@ -796,11 +1121,57 @@ class M1Driver:
                             f"(loop_paused={loop_paused})")
         return failures
 
+    def _model_call(self, messages: list[dict]) -> str:
+        """One model call attempt, timed and logged as a
+        ``model_call`` record (EVALUATION.md driver emission spec):
+        prompt/completion tokens from the API's usage field,
+        latency, model, temperature. The record is per ATTEMPT —
+        a parse retry is a second call with its own record. The
+        usage counts are the API's (verified live 2026-11-27);
+        when the API omits usage the tokens are None, never
+        invented. A transport error raises (the caller's
+        model-failure path) and no record is logged for it."""
+        started = time.monotonic()
+        res = self.model.chat_full(messages)
+        latency = time.monotonic() - started
+        usage = res.get("usage") if isinstance(res, dict) else None
+        prompt_tokens = completion_tokens = None
+        if isinstance(usage, dict):
+            try:
+                prompt_tokens = int(usage["prompt_tokens"])
+            except (KeyError, TypeError, ValueError):
+                prompt_tokens = None
+            try:
+                completion_tokens = int(usage["completion_tokens"])
+            except (KeyError, TypeError, ValueError):
+                completion_tokens = None
+        model_id = None
+        if isinstance(res, dict):
+            model_id = res.get("model") or self.args.model
+        temperature = None
+        if isinstance(res, dict):
+            temperature = res.get("temperature")
+        self._log("model_call",
+                  model=model_id, temperature=temperature,
+                  prompt_tokens=prompt_tokens,
+                  completion_tokens=completion_tokens,
+                  latency_s=round(latency, 3))
+        content = res.get("content") if isinstance(res, dict) else None
+        if not isinstance(content, str):
+            raise RuntimeError(
+                "model call returned no text content")
+        return content
+
     def _model_decide(self, snap: dict) -> tuple[str, list[dict]]:
         if self.args.mock:
             # Plumbing test only: run the snapshot's suggestion (a
             # task or a query), never a raw action. If there is no
-            # suggestion, take no action.
+            # suggestion, take no action. Under guidance-off A/D
+            # the suggestion is stripped from the prompt, so the
+            # mock has nothing to run — it idles, like a model
+            # that was never told what to do.
+            if not self._suggestion_available():
+                return "mock: no suggestion (guidance off)", []
             parsed = parse_suggestion(snap.get("suggestion"))
             if parsed is None:
                 return "mock: no suggestion", []
@@ -812,8 +1183,44 @@ class M1Driver:
             return "mock: suggestion query", [
                 {"action": "query", "kwargs": {"route": name},
                  "reason": "mock suggestion"}]
-        text = self.model.chat(self._prompt(snap))
-        return parse_model_reply(text)
+        messages = self._prompt(snap)
+        text = self._model_call(messages)
+        attempts = 0
+        while True:
+            try:
+                reasoning, actions = parse_model_reply(text)
+            except ValueError as exc:
+                # A malformed reply must not burn the turn (Mikey,
+                # 2026-11-27): re-prompt in the SAME tick with the
+                # specific parse error and ask for just the valid
+                # JSON. Bounded: MODEL_PARSE_RETRIES re-prompts,
+                # then the ValueError escapes and run() ends the
+                # tick through the existing model-failure path.
+                # Only a parse error retries here — a transport
+                # error from chat() is not caught, so it takes the
+                # existing path unchanged.
+                attempts += 1
+                self._log("model_retry", attempt=attempts,
+                          error=str(exc)[:300])
+                if attempts > MODEL_PARSE_RETRIES:
+                    raise
+                messages = messages + [
+                    {"role": "assistant", "content": text},
+                    {"role": "user", "content":
+                        _PARSE_RETRY_PROMPT.format(
+                            error=str(exc)[:300])}]
+                text = self._model_call(messages)
+                continue
+            if attempts:
+                # A parse that failed and then recovered still
+                # counts as a model failure for scoring (score_run
+                # counts "model_failure" records), but it does NOT
+                # count toward the consecutive-failure cap: the
+                # tick succeeded, so run() resets the counter.
+                self._log("model_failure",
+                          error="parse failed then recovered",
+                          recovered=True, attempts=attempts)
+            return reasoning, actions
 
     def _advance_clock(self, target_tick: int, current_tick: int) -> int:
         """Unpause for a wall-clock estimate of the window, re-pause,
@@ -904,9 +1311,20 @@ class M1Driver:
         except Exception as exc:
             print(f"m1: baseline clear failed (continuing): {exc}",
                   flush=True)
+        # The run manifest's reproducibility record (EVALUATION.md
+        # driver emission spec): the harness commit and protocol
+        # version the run actually ran under, plus the variant
+        # (noop / guidance-off group) so a baseline or ablation
+        # run is attributable from the log alone. The commit is
+        # best-effort (None when git cannot answer); it is never
+        # inferred from the checkout at scoring time.
         self._log("run_start", days=self.args.days,
                   window=self.args.window, model=self.args.model,
-                  mock=self.args.mock)
+                  mock=self.args.mock,
+                  noop=getattr(self.args, "noop", False),
+                  guidance_off=self._guidance_off(),
+                  harness_commit=current_harness_commit(),
+                  protocol_version=PROTOCOL_VERSION)
         try:
             snap0 = self.daemon.snapshot()
         except Exception as exc:
@@ -940,20 +1358,35 @@ class M1Driver:
         print("m1: pre-flight OK — game paused, drink >= "
               f"{MIN_DRINK}, citizens > 0, daemon loop paused",
               flush=True)
+        # R3-P0-3 — run-start re-grounding: pull the previous run's
+        # open problems and recent failures from the journal/store
+        # and put them in the tick-1 prompt, so the run does not
+        # start amnesiac. Best-effort inside _reground (a failed
+        # fetch logs and leaves no section); preflight already
+        # passed, so a grounding failure never refuses the run.
+        # A noop run has no model to ground, so it skips this.
+        if not getattr(self.args, "noop", False):
+            self._reground()
         # The diary feed's run-start per-dwarf sample: a fresh full
         # units collect now, while the game is paused at the run's
         # start tick. (The snapshot's units section is diffed away
         # by run end, and snap0's can be stale — neither is a
         # reliable sample. See _write_diary.) _preflight already
         # fetched it (the fresh collect that gates the run); reuse
-        # it instead of collecting twice.
-        if not self.args.mock:
+        # it instead of collecting twice. A noop run writes no
+        # diary entry, so it takes no sample either — but the
+        # scoring system's run-start fortress value is still
+        # fetched: the no-op baseline's score needs it.
+        if not self.args.mock and not getattr(self.args, "noop", False):
             if self.citizens_start_fresh is None:
                 self.citizens_start_fresh = self._fetch_fresh_citizens(
                     "start")
+        if not self.args.mock:
             # The scoring system's run-start fortress value: a fresh
             # collect now, while the game is paused at the run's
-            # start tick (same moment as the citizen sample).
+            # start tick (same moment as the citizen sample). A
+            # noop run still fetches it: the no-op baseline's score
+            # needs the wealth change.
             self._fetch_wealth("start")
         self._log("start_tick", start_tick=self.start_tick,
                   end_tick=self.end_tick,
@@ -1014,6 +1447,21 @@ class M1Driver:
             if _m is not None and int(_m.group(1)) == 0:
                 self._log("run_end", reason="fort dead", tick=tick)
                 return 1
+            if getattr(self.args, "noop", False):
+                # The no-op baseline: never call the model, never
+                # act. The fort runs on its own for the day; the
+                # score is what happens when nothing is done. The
+                # tick still advances the clock like any other.
+                self.idle_ticks += 1
+                self._log("noop_tick", tick=tick)
+                try:
+                    self._advance_clock(tick + self.args.window, tick)
+                except Exception as exc:
+                    self._log("run_end",
+                              reason="game unreachable during clock "
+                                     f"advance: {exc}")
+                    return 1
+                continue
             try:
                 reasoning, actions = self._model_decide(snap)
                 self.consecutive_model_failures = 0
@@ -1072,8 +1520,12 @@ class M1Driver:
                 self.idle_ticks += 1
                 self._log("idle_tick", reasoning=reasoning[:200],
                           stall_ticks=self.stall_ticks)
-                if self.stall_ticks >= STALL_FALLBACK_TICKS:
+                if (self.stall_ticks >= STALL_FALLBACK_TICKS
+                        and self._suggestion_available()):
                     # Fallback: run the snapshot's suggestion.
+                    # Skipped when the suggestion is stripped
+                    # (guidance-off A/D): running it would smuggle
+                    # the ablated guidance back into the run.
                     parsed = parse_suggestion(snap.get("suggestion"))
                     if parsed is not None:
                         kind, name = parsed
@@ -1182,6 +1634,17 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--out", default=None)
+    # The no-op baseline (EVALUATION.md): never call the model,
+    # never act — the fort runs on its own for the day. Takes
+    # precedence over --mock (a mock that never acts is a noop).
+    ap.add_argument("--noop", action="store_true")
+    # Guidance ablation (EVALUATION.md Phase 6, HARNESS_ROLE.md
+    # §8.1): a = suggestion off, b = briefings/wiki prefetch off
+    # (recorded; the driver prefetches neither, so no prompt
+    # change), c = "know nothing" off (the model may use its own
+    # DF knowledge), d = all guidance off (the bare protocol).
+    ap.add_argument("--guidance-off", default=None,
+                    choices=list(GUIDANCE_OFF_GROUPS))
     args = ap.parse_args()
     if args.out is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")

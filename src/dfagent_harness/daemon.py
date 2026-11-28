@@ -226,10 +226,201 @@ TASK_DEFS: dict[str, dict[str, Any]] = {
              "need": None, "wait_job": "PlantSeeds"},
 }
 
+#: Multi-step recipes (R3-P0-4, ADVANCED_MECHANICS §0): a task whose
+#: spec carries "steps" runs them in order, each step verified, and
+#: a failed step stops the recipe with a diagnosis naming the step.
+#: The single-action form above stays as a one-step task.
+#: "need"/"wait_job" are None for a recipe — no single workshop or
+#: job to wait for; each step verifies itself. "action": "recipe"
+#: marks the form (the offline TASK_DEFS test requires the keys).
+RECIPE_DEFS: dict[str, dict[str, Any]] = {
+    # Stock drink: make a barrel at the Carpenter's, then brew at
+    # the Still. The first runnable recipe — both steps exist as
+    # verified single tasks, and the fort has both workshops. The
+    # live-proof vehicle for the framework (R3-P0-4 bar).
+    "stock_drink": {"action": "recipe", "need": None,
+                    "wait_job": None,
+                    "steps": [{"task": "make_barrel"},
+                              {"task": "brew"}],
+                    "preconditions": [
+                        "a Carpenters workshop; 1 wood",
+                        "a Still workshop; 1 brewable plant + "
+                        "1 empty barrel"]},
+}
+
+# Recipes live in TASK_DEFS alongside the single-action tasks so
+# the catalog, the /v1/tasks routes and run_task see one registry.
+TASK_DEFS.update(RECIPE_DEFS)
+
 #: Surface crops the farm task knows, verified live 2026-11-27
 #: (depth 0-0, biome flags + seasons from the plant raws).
 #: Underground plots always plant plump helmets.
 _FARM_SURFACE_CROPS = ("REED_ROPE", "GRASS_LONGLAND")
+
+
+#: Maximum recipe nesting: a recipe step may run another recipe,
+#: but a recipe that (directly or indirectly) contains itself must
+#: stop with a named failure, never recurse forever.
+_MAX_RECIPE_DEPTH = 3
+
+
+def _step_label(step: Any) -> str:
+    """One step as a short label ("task:brew", "build_furniture",
+    "verify workshop_exists"). Malformed steps label as such — the
+    label names the step in the failure, so it must never raise."""
+    if not isinstance(step, dict):
+        return "malformed step"
+    if isinstance(step.get("task"), str):
+        return f"task:{step['task']}"
+    if isinstance(step.get("action"), str):
+        return str(step["action"])
+    if isinstance(step.get("verify"), str):
+        return f"verify {step['verify']}"
+    return "malformed step"
+
+
+def _step_plan_line(step: Any) -> str:
+    """One step as a dry-run plan line (GET /v1/tasks/{name}/plan)."""
+    if not isinstance(step, dict):
+        return "malformed step (needs exactly one of task/action/verify)"
+    if isinstance(step.get("task"), str):
+        return (f"run the {step['task']} task (its own end effect "
+                "is verified)")
+    if isinstance(step.get("action"), str):
+        kwargs = step.get("kwargs") or {}
+        params = " ".join(f"{k}={v}" for k, v in kwargs.items()
+                          if isinstance(kwargs, dict))
+        tail = f" {params}" if params else ""
+        return f"run action {step['action']}{tail} (verified)"
+    if isinstance(step.get("verify"), str):
+        return f"verify {step['verify']} (state re-read, no action)"
+    return "malformed step (needs exactly one of task/action/verify)"
+
+
+def _resolve_kwargs(kwargs: Any,
+                    params: dict[str, Any]) -> tuple[dict[str, Any],
+                                                     str | None]:
+    """Resolve a step's "$param" placeholders from the recipe
+    call's kwargs. Only top-level string values starting with "$"
+    are substituted; anything else passes through unchanged.
+    Returns (resolved kwargs, missing parameter name or None).
+    A missing parameter is a step failure, never a silent skip."""
+    if not isinstance(kwargs, dict):
+        return {}, "kwargs"
+    resolved: dict[str, Any] = {}
+    for key, value in kwargs.items():
+        if isinstance(value, str) and value.startswith("$"):
+            name = value[1:]
+            if name not in params:
+                return {}, name
+            resolved[key] = params[name]
+        else:
+            resolved[key] = value
+    return resolved, None
+
+
+def _verify_predicate(name: str, step: dict[str, Any],
+                      state: dict[str, Any]) -> tuple[bool, str,
+                                                      str | None]:
+    """Evaluate one verify step against a fresh state read.
+    Returns (ok, reason, fix). A failed check names what was
+    expected and what the state actually holds; the fix names the
+    corrective action. An unknown predicate fails, never passes —
+    a check that cannot be evaluated must not green-light a step."""
+    buildings = (state.get("buildings") or {}).get("list") or []
+    if name == "workshop_exists":
+        subtype = step.get("subtype")
+        if not isinstance(subtype, str) or not subtype:
+            return (False, "verify workshop_exists needs a "
+                    "'subtype' string", None)
+        for b in buildings:
+            if (isinstance(b, dict) and b.get("type") == "Workshop"
+                    and b.get("subtype") == subtype):
+                return (True, f"{subtype} workshop exists", None)
+        return (False, f"no {subtype} workshop exists",
+                f"Fix: build a {subtype} workshop first.")
+    if name == "building_exists":
+        btype = step.get("type")
+        subtype = step.get("subtype")
+        if not isinstance(btype, str) or not btype:
+            return (False, "verify building_exists needs a "
+                    "'type' string", None)
+        for b in buildings:
+            if not isinstance(b, dict) or b.get("type") != btype:
+                continue
+            if subtype is not None and b.get("subtype") != subtype:
+                continue
+            return (True, f"{btype} building exists", None)
+        want = btype if subtype is None else f"{subtype} {btype}"
+        return (False, f"no {want} building exists",
+                f"Fix: build a {want} first.")
+    if name == "stock_at_least":
+        kind = step.get("kind")
+        units = step.get("units")
+        if kind not in ("drink", "food", "wood", "stone"):
+            return (False, "verify stock_at_least needs kind in "
+                    "drink/food/wood/stone", None)
+        if not isinstance(units, int) or isinstance(units, bool):
+            return (False, "verify stock_at_least needs an integer "
+                    "'units'", None)
+        have = (state.get("stocks") or {}).get(f"{kind}_units")
+        if not isinstance(have, int):
+            return (False, f"{kind} stock is unreadable "
+                    "(no fresh stocks section)", None)
+        if have >= units:
+            return (True, f"{kind} stock {have} >= {units}", None)
+        return (False, f"{kind} stock {have} < {units} needed",
+                f"Fix: get {units - have} more {kind} first.")
+    return (False, f"unknown verify predicate {name!r}", None)
+
+
+def task_plan(name: str) -> dict[str, Any] | None:
+    """The dry-run plan for a task (GET /v1/tasks/{name}/plan):
+    real steps + preconditions. None when unknown. Steps-form
+    tasks render their real steps; legacy single-action tasks
+    render the same four lines the route used to fabricate, so
+    existing readers see no change."""
+    spec = TASK_DEFS.get(name)
+    if spec is None:
+        return None
+    steps = spec.get("steps")
+    if isinstance(steps, list) and steps:
+        return {"task": name,
+                "steps": [_step_plan_line(s) for s in steps],
+                "preconditions": list(
+                    spec.get("preconditions") or [])}
+    if name == "farm":
+        return {
+            "task": name,
+            "steps": [
+                "find a built farm plot",
+                "pick a crop for the plot's light, biome and "
+                "season (dark: plump helmets; light: the "
+                "surface crop with the most seeds)",
+                "set the crop (verified before writing)",
+                "wait (bounded) for PlantSeeds jobs to appear "
+                "and finish",
+                "report the planted count or a diagnosis",
+            ],
+            "preconditions": [
+                "a built farm plot exists",
+                "seeds on hand for a crop that grows there",
+            ],
+        }
+    return {
+        "task": name,
+        "steps": [
+            f"find the {spec['need']} workshop" if spec["need"]
+            else "find shrubs to gather",
+            f"queue {spec['job']}",
+            "wait (bounded) for the job to leave the job list",
+            "report completion or cancellation",
+        ],
+        "preconditions": [
+            f"a {spec['need']} workshop exists" if spec["need"]
+            else "shrubs exist on the surface",
+        ],
+    }
 
 
 def _find_workshop(state: dict[str, Any],
@@ -673,15 +864,54 @@ class Daemon:
         if sampled and isinstance(tick, int) and tick >= TICKS_PER_DAY:
             try:
                 from .diary import (TICKS_PER_DAY as _TPD,
-                                    build_diary_feed, write_ai_entry)
+                                    build_diary_feed,
+                                    feed_is_writable,
+                                    merge_driver_record,
+                                    write_ai_entry)
                 from .freepi import FreePiClient
                 prev_start = (tick // _TPD - 1) * _TPD
                 fort = (state.get("status") or {}).get("fort_name") or ""
                 year = (state.get("status") or {}).get("year") or 0
                 feed = build_diary_feed(
                     self.store, self.journal, prev_start, fort, year,
-                    state_dir=self.state_dir)
-                write_ai_entry(FreePiClient(), feed, self.state_dir)
+                    state_dir=self.state_dir,
+                    watch_log_path=self.watch_log,
+                    run_logs_dir=self.repo_dir / "logs")
+                # Fresh stocks from this tick's full paused collect
+                # (audit R8): the trigger has no driver stocks to
+                # merge, so without this the entry's numbers come
+                # from the Store's single 04-01 trend sample for
+                # every later day. Best-effort: a missing stocks
+                # section leaves the trend in place, and the
+                # writability guard below judges it.
+                stocks = state.get("stocks") or {}
+                fresh_end: dict[str, Any] = {}
+                for key, field in (
+                        ("drink", "drink_units"),
+                        ("food", "food_units"),
+                        ("wood", "wood_units"),
+                        ("stone", "stone_units")):
+                    val = stocks.get(field)
+                    if isinstance(val, int):
+                        fresh_end[key] = val
+                pop = (state.get("status") or {}).get("population")
+                if isinstance(pop, int):
+                    fresh_end["population"] = pop
+                if fresh_end:
+                    merge_driver_record(
+                        feed["summary"], stocks_end=fresh_end)
+                    feed["summary"]["stocks_source"] = "fresh"
+                # Skip, never write from stale (audit R2): a day
+                # with no fresh per-dwarf record, no usable lite
+                # record, no decisions and only trend stocks is
+                # logged and skipped, not handed to the model.
+                writable, why = feed_is_writable(feed)
+                if not writable:
+                    self.journal.log_event(
+                        "diary_error", f"diary write skipped: {why}")
+                else:
+                    write_ai_entry(FreePiClient(), feed,
+                                   self.state_dir)
             except Exception as exc:  # noqa: BLE001 - never kill tick
                 self.journal.log_event(
                     "diary_error", f"diary write failed: {exc}")
@@ -1263,11 +1493,23 @@ class Daemon:
                 "took_ms": took_ms}
 
     def run_task(self, name: str, wait: float = 120.0,
-                 count: int = 1, **kwargs: Any) -> dict[str, Any]:
+                 count: int = 1, _depth: int = 0,
+                 **kwargs: Any) -> dict[str, Any]:
         """Run a composed task (PROTOCOL.md §4.3): queue the work,
         then wait (bounded) for the queued job to leave the job list
         — disappearance means it was worked (or cancelled, which the
         newest report reveals). Returns an action envelope.
+
+        A spec with "steps" (a recipe, R3-P0-4) runs its steps in
+        order instead: each step is a sub-task, a raw action, or a
+        state check, each verified, and a failed step stops the
+        recipe with a diagnosis naming the step. A spec without
+        steps takes the legacy single-action path below
+        (:meth:`_run_single_task`), unchanged in behavior.
+        ``count`` is ignored for recipes (a recipe runs once).
+        ``_depth`` is the recipe-nesting guard (private): a recipe
+        deeper than _MAX_RECIPE_DEPTH fails naming the nesting,
+        never recurses forever.
 
         The envelope carries "reason" (the human-readable outcome,
         the standard field every action envelope and the driver read)
@@ -1292,6 +1534,170 @@ class Daemon:
                     "detail": "daemon has no DFHack client",
                     "evidence": None,
                     "took_ms": 0}
+        steps = spec.get("steps")
+        if steps is not None:
+            if _depth > _MAX_RECIPE_DEPTH:
+                msg = (f"recipe {name!r} nests deeper than "
+                       f"{_MAX_RECIPE_DEPTH} levels")
+                return {"ok": False, "action": f"task:{name}",
+                        "reason": msg, "detail": msg,
+                        "evidence": None,
+                        "took_ms": round((time.monotonic() - started)
+                                         * 1000)}
+            if not isinstance(steps, list) or not steps:
+                msg = f"task {name!r} has no steps"
+                return {"ok": False, "action": f"task:{name}",
+                        "reason": msg, "detail": msg,
+                        "evidence": None, "took_ms": 0}
+            return self._run_steps(name, steps, started, wait,
+                                   kwargs, _depth)
+        return self._run_single_task(name, spec, started, wait,
+                                     count, kwargs)
+
+    def _run_steps(self, name: str, steps: list[Any],
+                   started: float, wait: float,
+                   recipe_kwargs: dict[str, Any],
+                   depth: int) -> dict[str, Any]:
+        """Run a recipe's steps in order (R3-P0-4). Each step is
+        verified by its own end effect (a sub-task's run, an
+        action's read-back, or an explicit state check). A failed
+        step stops the recipe at once: the later steps never run,
+        and the envelope names the failed step, why it failed, and
+        the fix. Returns an action envelope with the per-step
+        outcomes as evidence."""
+        outcomes: list[dict[str, Any]] = []
+        for i, step in enumerate(steps, 1):
+            label = _step_label(step)
+            res = self._run_step(step, started, wait, recipe_kwargs,
+                                 depth)
+            outcomes.append({"step": i, "label": label,
+                             "ok": bool(res.get("ok")),
+                             "reason": str(res.get("reason") or "")})
+            if not res.get("ok"):
+                msg = (f"step {i}/{len(steps)} ({label}) failed: "
+                       f"{res.get('reason')}")
+                out: dict[str, Any] = {
+                    "ok": False, "action": f"task:{name}",
+                    "reason": msg, "detail": msg,
+                    "evidence": {"failed_step": i, "steps": outcomes},
+                    "took_ms": round((time.monotonic() - started)
+                                     * 1000)}
+                if res.get("fix"):
+                    out["fix"] = res["fix"]
+                return out
+        reason = (f"recipe {name}: " + "; ".join(
+            f"step {o['step']} ({o['label']}): {o['reason']}"
+            for o in outcomes))
+        return {"ok": True, "action": f"task:{name}",
+                "reason": reason, "detail": reason,
+                "evidence": {"steps": outcomes},
+                "took_ms": round((time.monotonic() - started) * 1000)}
+
+    def _run_step(self, step: Any, started: float, wait: float,
+                  recipe_kwargs: dict[str, Any],
+                  depth: int) -> dict[str, Any]:
+        """Run one recipe step. Exactly one of "task", "action" or
+        "verify" must be present; anything else fails naming the
+        step, never silently passes or runs the wrong thing.
+        Step kwargs support "$param" placeholders resolved from
+        the recipe call's kwargs (a missing parameter fails the
+        step naming it)."""
+        took = lambda: round((time.monotonic() - started) * 1000)
+        if not isinstance(step, dict):
+            msg = "malformed step (not an object)"
+            return {"ok": False, "action": "step",
+                    "reason": msg, "detail": msg,
+                    "evidence": None, "took_ms": took()}
+        kinds = [k for k in ("task", "action", "verify")
+                 if step.get(k) is not None]
+        if len(kinds) != 1:
+            msg = ("malformed step: needs exactly one of "
+                   "task/action/verify")
+            return {"ok": False, "action": "step",
+                    "reason": msg, "detail": msg,
+                    "evidence": None, "took_ms": took()}
+        kind = kinds[0]
+        raw_kwargs = step.get("kwargs")
+        if raw_kwargs is None:
+            raw_kwargs = {}
+        resolved, missing = _resolve_kwargs(raw_kwargs, recipe_kwargs)
+        if missing is not None:
+            msg = (f"step needs recipe parameter ${missing}, "
+                   "which the caller did not pass")
+            return {"ok": False, "action": "step",
+                    "reason": msg, "detail": msg,
+                    "evidence": None, "took_ms": took()}
+        if kind == "task":
+            task_name = step.get("task")
+            if not isinstance(task_name, str) or not task_name:
+                msg = "task step needs a task name string"
+                return {"ok": False, "action": "step",
+                        "reason": msg, "detail": msg,
+                        "evidence": None, "took_ms": took()}
+            return self.run_task(task_name, wait=wait,
+                                 _depth=depth + 1, **resolved)
+        if kind == "action":
+            action_name = step.get("action")
+            if not isinstance(action_name, str) or not action_name:
+                msg = "action step needs an action name string"
+                return {"ok": False, "action": "step",
+                        "reason": msg, "detail": msg,
+                        "evidence": None, "took_ms": took()}
+            try:
+                with self.lock:
+                    from .read_safety import ReadRefused, paused_read
+                    state = paused_read(
+                        self.client,
+                        lambda: observe.collect(self.client))
+            except ReadRefused as exc:
+                msg = f"read refused: {exc}"
+                return {"ok": False, "action": action_name,
+                        "reason": msg, "detail": msg,
+                        "evidence": None, "took_ms": took()}
+            try:
+                result = act(self.client, action_name, state=state,
+                             **resolved)
+            except ValueError as exc:
+                msg = str(exc)
+                return {"ok": False, "action": action_name,
+                        "reason": msg, "detail": msg,
+                        "evidence": None, "took_ms": took()}
+            return result.to_dict()
+        # kind == "verify": a state check with no side effect.
+        pred = step.get("verify")
+        if not isinstance(pred, str) or not pred:
+            msg = "verify step needs a predicate name string"
+            return {"ok": False, "action": "step",
+                    "reason": msg, "detail": msg,
+                    "evidence": None, "took_ms": took()}
+        try:
+            with self.lock:
+                from .read_safety import ReadRefused, paused_read
+                state = paused_read(
+                    self.client,
+                    lambda: observe.collect(self.client))
+        except ReadRefused as exc:
+            msg = f"read refused: {exc}"
+            return {"ok": False, "action": f"verify:{pred}",
+                    "reason": msg, "detail": msg,
+                    "evidence": None, "took_ms": took()}
+        ok, reason, fix = _verify_predicate(pred, step, state)
+        out: dict[str, Any] = {
+            "ok": ok, "action": f"verify:{pred}",
+            "reason": reason, "detail": reason,
+            "evidence": None, "took_ms": took()}
+        if fix:
+            out["fix"] = fix
+        return out
+
+    def _run_single_task(self, name: str, spec: dict[str, Any],
+                         started: float, wait: float, count: int,
+                         kwargs: dict[str, Any]) -> dict[str, Any]:
+        """The legacy single-action task path (PROTOCOL.md §4.3):
+        read state, run the one action (or the gather/farm special
+        case), wait for the job to leave the list, check for a
+        cancellation. Unchanged in behavior — the steps form above
+        dispatches here for specs without "steps"."""
         # Read safety (world-model design §8): pause (verified)
         # before the initial collect; a refused read fails the task
         # (outcome unknown), never reads while running.

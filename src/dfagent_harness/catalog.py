@@ -456,6 +456,13 @@ _TASK_NOTES: dict[str, dict[str, str]] = {
         "needs": ("a built farm plot; seeds on hand for a crop "
                   "that grows there"),
     },
+    "stock_drink": {
+        "about": ("Stock drink, two steps: make a barrel at the "
+                  "Carpenter's, then brew at the Still. Each step "
+                  "is verified; a failed step stops the recipe."),
+        "needs": ("a Carpenters workshop; 1 wood; a Still "
+                  "workshop; 1 brewable plant + 1 empty barrel"),
+    },
 }
 
 

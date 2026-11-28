@@ -816,3 +816,164 @@ Harness sources, read from the repo on 2026-11-27:
 - `src/dfagent_harness/lua/wealth.lua`: live item valuation.
 - `tests/fixtures/runtime-enums-0.47.05-r8.json`: `TradeDepot` in the
   building enum.
+
+## 13. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 13.1 Snapshot: the Trade section
+
+The per-tick snapshot gains a short Trade section, built from the
+fresh collect, in plain words. Three lines, in this shape:
+
+```
+Trade: no depot. No caravan. Broker: none appointed.
+Buy: flux stone 20 (0 in stock), clay 15 (0 in stock), silk thread 10 (0 in stock).
+Sell: 0 trade goods ready.
+```
+
+What is in it, and what is not:
+
+- **Line 1, state.** Whether a depot exists (and its id when it
+  does), whether a caravan is present, and whether a broker is
+  appointed. The common case on a fort with no trade yet is the
+  example above: three short absences, not silence. A missing
+  depot is an exception, not a blank: the line names the fix,
+  "No depot. Build one: wagon-accessible, near the stockpiles."
+- **Line 2, buy list.** The top three buy-list items from §4,
+  each with the quantity wanted and the quantity in stock. The
+  buy list is computed by the harness from have/need, never
+  invented by the agent, and the snapshot carries only the top
+  three with a one-line why each. When the caravan is gone and
+  the next one is months away, the line still shows the top
+  three, because the fort prepares between caravans.
+- **Line 3, sell readiness.** How many trade goods are ready
+  and their total computed value, capped at one clause. When
+  nothing is ready, the line says "0 trade goods ready" and
+  names the cheapest fix from §6 (for example, "2 mugs queued
+  at the craftsdwarf's workshop").
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("trade: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when trade state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+163 characters: about 54 tokens by the accountant's
+3-chars-per-token rate, 40 on the wire. At 50 dwarves, with
+a depot, a broker, and a caravan present, it is about 380
+characters: about 126 tokens by the accountant, 95 on the wire.
+The cost grows by about 50 tokens from 7 dwarves to 50, because
+the section is capped: 3 buy-list items maximum, 1 sell clause,
+1 depot clause. It does not grow with population, with the size
+of the buy list, or with the number of goods in the trade
+stockpile. If a future change makes it grow with any of those,
+the change is refused until the section is capped again.
+
+### 13.2 Query route: GET /v1/trading (UNVERIFIED)
+
+GET /v1/trading returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §9, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- The full buy list, ranked, with have/need per item and the
+  reason each item is on the list (§4).
+- The full sell list: surplus goods by category with computed
+  values, the never-sell list with reasons, and the export
+  mandates in force (§5).
+- Depot state: whether one exists, its id, position, wagon
+  accessibility, and what is in the trade stockpile.
+- Caravan state: whether one is present, which civilization it
+  is from, what it brought (by category, not per item), and
+  when it leaves.
+- Broker state: who the broker is, their appraiser and
+  negotiator skill, and whether a trade agreement exists.
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to choose
+what to buy or sell, never as a matter of routine. Until the
+route exists, the same detail is behind GET /v1/stocks,
+GET /v1/wealth, and GET /v1/buildings, which do exist today.
+
+### 13.3 Briefing: what arrives just in time
+
+Trading has one standing briefing, and it already exists in
+`briefings.py`: the caravan briefing, served when a caravan
+event fires. It covers what a caravan is, what usually matters,
+the options, and the cost of ignoring it. Cost: about 150 tokens
+by the accountant (UNVERIFIED: the briefing text has not been
+measured against the live briefing system). One gap the doc
+records: caravan detection itself does not exist yet, because no
+caravan has ever reached a depot on either fort, so the briefing
+has never fired live. The briefing is not invented until the
+detection lands; the trigger is the caravan event, not a guess.
+
+A second briefing fires when the liaison arrives with a trade
+agreement to offer, once trade exists: it covers what the
+agreement asks for and what the fort gains. Until trade exists,
+the liaison meeting is ended programmatically by the dipscript
+jump (DIALOGS.md), because the meeting freezes the clock and
+there is nothing to gain from it. No other trading event briefs
+the model. A depot finishing construction, a broker being
+appointed, or a trade good being finished are attention entries
+and opportunities entries, not briefings.
+
+### 13.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 trading entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Trade: no depot, caravan due in 2 months. Query /v1/trading
+  for the buy list."
+- "Flux stone 0 in stock, 20 wanted. Query /v1/trading for the
+  buy list."
+- "12 mugs in the trade stockpile, value 240. Query /v1/trading
+  for the sell list."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A depot that
+exists with nothing to sell is not an opportunity; it is the
+snapshot doing its job. The entry never names the action to take
+and never carries a cost estimate. The model decides.
+
+### 13.5 What the system deliberately does NOT push, and why
+
+- **The full buy list.** The snapshot names 3 items; the full
+  ranked list is behind GET /v1/trading. A list of every want
+  every tick is a dump, and the model cannot act on the 12th
+  buy-list item anyway.
+- **Per-item caravan goods.** What the caravan brought, item by
+  item, is behind the query route. The snapshot says a caravan
+  is present and its civilization. The per-item list would grow
+  with the caravan's stock.
+- **Offer construction arithmetic.** The value of each offer, the
+  haggling math, and the export mandates are behind the route.
+  The snapshot says how many goods are ready and their total
+  value. The arithmetic is there when the model asks to build
+  an offer.
+- **The broker's full record.** The snapshot names the broker.
+  Their skill history and every past agreement are journal
+  data, pulled when the model asks why a negotiation went the
+  way it did.
+- **Trade screen contents.** The trade screen is game-committing
+  and the harness refuses it (DIALOGS.md). No presentation ever
+  pushes the model toward choosing on that screen; the harness
+  names the modal and returns it as a failure.

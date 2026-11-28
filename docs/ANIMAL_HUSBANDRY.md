@@ -780,3 +780,166 @@ model acts on a named animal option from the snapshot alone.
   (SlaughterAnimal, GeldAnimal, MilkCreature, ShearCreature,
   ButcherAnimal, TrainAnimal, TameAnimal): the harness state this plan
   was written against, verified 2026-11-27.
+
+## 17. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 17.1 Snapshot: the Animals section
+
+The per-tick snapshot gains a short Animals section, built from
+the fresh collect, in plain words. Three lines, in this shape:
+
+```
+Animals: 4 tame (2 dogs, 1 cat, 1 horse). 0 in pasture, 0 caged.
+Milk: 0 milkable. Wool: 0 shearable. Eggs: 0 layers.
+```
+
+What is in it, and what is not:
+
+- **Line 1, counts.** How many tame animals the fort has, by
+  race, capped at 4 races, then how many are in a pasture and
+  how many are caged. These are counts, not a list: the fort
+  may hold dozens of animals and the snapshot never names all
+  of them. The counts come from GET /v1/units?kind=livestock,
+  which works live today but is count-only: id, name, race,
+  position, kind, role. No sex, no age, no training level, no
+  pregnancy, no pasture assignment, no cage state. Until the
+  observation fix in §3 lands, the snapshot says what the
+  collect actually knows, and names what it does not: "Animals:
+  4 tame. Sex, age, and training unknown (observation gap)."
+  A gap stated is better than a count that pretends to know.
+- **Line 2, yields.** How many animals are milkable, shearable,
+  or laying right now, in counts. When the observation gap
+  means the harness cannot tell, the line says so instead of
+  guessing: "Milk: unknown (observation gap)."
+- **Line 3, only when something is wrong.** A third line appears
+  only as an exception: an animal starving, a pasture over
+  capacity, a caged animal with no food, a pregnant animal with
+  no pasture. When nothing is wrong, there is no third line.
+  A quiet fort costs two lines.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("animals: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when animal state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+117 characters: about 39 tokens by the accountant's
+3-chars-per-token rate, 29 on the wire. At 50 dwarves, with
+a larger herd, it is about 300 characters: about 100 tokens by
+the accountant, 75 on the wire. The cost grows by about 35
+tokens from 7 dwarves to 50, because the section is capped: 4
+race counts maximum, 3 yield counts, 1 exception line. It does
+not grow with population, with the number of animals, or with
+the number of races on the map. If a future change makes it
+grow with any of those, the change is refused until the section
+is capped again.
+
+### 17.2 Query route: GET /v1/animals (UNVERIFIED)
+
+GET /v1/animals returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §14, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- Per animal: id, name, race, sex, age, tame and training
+  level, owner, pregnancy, pasture assignment, cage state,
+  wounds, and current job. The fields the live collect cannot
+  read yet (§3) are listed by the route as unknown, never
+  guessed.
+- Per pasture: id, position, size, capacity, which animals are
+  assigned, and whether it is over capacity or has no grass.
+- Yields: which animals are milkable, shearable, or laying,
+  and when each was last milked, sheared, or collected from.
+- Breeding: breeding pairs, pregnant animals with due dates,
+  and the population-control state from §5.
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to choose an
+animal to breed, milk, shear, or butcher, never as a matter of
+routine. Until the route exists, the same detail is behind
+GET /v1/units?kind=livestock (count-only, live today) and
+GET /v1/unit/<id> (one animal, live today), which do exist.
+
+### 17.3 Briefing: what arrives just in time
+
+Animals have no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **New animal arrives.** Trigger: a tame animal joins the
+  fort (migrant pet, bought animal, or tamed wild animal).
+  Cost: about 55 tokens by the accountant (UNVERIFIED: the
+  briefing text has not been measured against the live
+  briefing system). It covers the race and count, and whether
+  the fort has a pasture for it. It leaves the pasture
+  assignment to §4, which cannot be done programmatically
+  yet.
+- **Animal starving.** Trigger: a tame animal is starving or
+  has no pasture and no food. Cost: about 50 tokens. It covers
+  which animal and what it lacks. It leaves the fix to §11.
+
+No other animal event briefs the model. A birth, a shearing,
+or a milking are attention entries and opportunities entries,
+not briefings. A briefing is for something the model needs to
+understand right now, not for something it can read in the
+snapshot.
+
+### 17.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 animal entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Animals: 2 dogs, no pasture assigned. Query /v1/animals for
+  the herd."
+- "Milk: 1 goat milkable. Query /v1/animals for the yields."
+- "Caged: 1 horse, no food. Query /v1/animals for the cages."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A herd grazing
+in a pasture is not an opportunity; it is the snapshot doing
+its job. The entry never names the action to take and never
+carries a cost estimate. The model decides.
+
+### 17.5 What the system deliberately does NOT push, and why
+
+- **Every animal by name.** The snapshot names 4 race counts;
+  the full herd is behind GET /v1/animals. A list of every
+  animal every tick is a dump, and the model cannot act on the
+  15th animal anyway.
+- **Sex, age, and training before the observation fix.** The
+  snapshot says what the collect knows and names what it does
+  not. Pushing a guess (for example, treating the `role: pet`
+  label as adoption) is the error §3 records: the label means
+  "tame", not "adopted". The presentation never guesses.
+- **Per-animal history.** A dwarf's wounds, needs, and
+  relations are tracked per day; an animal's life is not
+  tracked at all (§3). Until the store keeps per-animal
+  history, there is nothing to push, and the snapshot says so.
+- **The whole job queue.** The snapshot says how many animals
+  are being milked or shorn. The full queue, with job ids and
+  positions, is behind the route. A queue dump would grow with
+  every job the fort queues.
+- **Butchering as a suggestion.** The snapshot never says
+  "butcher this animal". Butchering is §7, and the model asks
+  for the animal detail when it decides. The presentation gives
+  the model what it needs to decide, not a script to follow
+  (HARNESS_ROLE.md).

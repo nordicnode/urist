@@ -641,3 +641,172 @@ classification), embark.py M2 profile (water: Min River Brook). Companion
 design docs: docs/FARMING.md (the staple food source), docs/TRADING.md
 (processed fish from caravans), docs/SITE_SELECTION.md (scored placement;
 queued work at the time of writing, not yet existing).
+
+## 13. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 13.1 Snapshot: the Fishing section
+
+The per-tick snapshot gains a short Fishing section, built from
+the fresh collect, in plain words. Three lines, in this shape:
+
+```
+Fishing: 1 fisher (Ral). Fishery: none. Zone: none.
+Catch: 0 raw fish. Cleaning: 0 waiting.
+```
+
+What is in it, and what is not:
+
+- **Line 1, fishers and buildings.** How many citizens have the
+  Fishing labor enabled (named when there are 3 or fewer),
+  whether a fishery workshop exists, and whether a fishing zone
+  is designated. The Fish job type and the Fishing, Fish
+  cleaner, and Fish dissector labors all exist in the live
+  runtime enums, and the fishing zone kind exists with
+  create_zone verified live, so the line names real state. The
+  common case on a fort with no fishing yet is the example
+  above: three short absences, not silence. A missing fishery
+  is an exception, not a blank: no fishery build has been
+  verified live yet (UNVERIFIED), so the line says "Fishery:
+  none" until one is built and a "Prepare a raw fish" job
+  completes in it.
+- **Line 2, catch and cleaning.** How many raw fish are in stock
+  and how many are waiting to be cleaned. When the have/need
+  machinery cannot count fish as food (it does not today, §3),
+  the line says the counts from stocks and names the gap:
+  "Fish not counted as food by have/need (gap)." A gap stated
+  is better than a count that pretends to know.
+- **Line 3, only when something is wrong.** A third line appears
+  only as an exception: a fish backlog with no cleaner, a
+  fishing zone with no water, water frozen at the zone. When
+  nothing is wrong, there is no third line. A quiet fort costs
+  two lines.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("fishing: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when fishing state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+91 characters: about 30 tokens by the accountant's
+3-chars-per-token rate, 22 on the wire. At 50 dwarves, with
+more fishers and more zones, it is about 290 characters: about
+96 tokens by the accountant, 72 on the wire. The cost grows by
+about 30 tokens from 7 dwarves to 50, because the section is
+capped: 3 fisher names maximum, 1 zone clause, 1 catch clause.
+It does not grow with population, with the number of fish in
+stock, or with the amount of water on the map. If a future
+change makes it grow with any of those, the change is refused
+until the section is capped again.
+
+### 13.2 Query route: GET /v1/fishing (UNVERIFIED)
+
+GET /v1/fishing returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §10, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- Water: the water survey from §4, each water body with its
+  kind (river, brook, murky pool, cavern lake), whether it is
+  fish-bearing, whether it is frozen, and where the fishing
+  zones are. The harness can see water today but cannot
+  classify it (§3); classification is a phase 1 route, and
+  until it lands the route lists water bodies as unclassified,
+  never guessed.
+- Fishers: each citizen with the Fishing labor, their fishing
+  skill, and their current job.
+- Fishery: the workshop state, the cleaning queue, and the
+  cleaner-to-fisher ratio from §5.
+- Catch: raw fish in stock by kind, prepared fish, shells, and
+  the backlog guard state from §5.
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to choose
+where to fish or whether fishing is worth it (§6, §7), never as
+a matter of routine. Until the route exists, the same detail is
+behind GET /v1/units (fishers are citizens), GET /v1/buildings
+(the fishery is a building), and GET /v1/stocks (fish are
+stocks), which do exist today.
+
+### 13.3 Briefing: what arrives just in time
+
+Fishing has no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **Food short, water near.** Trigger: food below the floor and
+  fishable water in range. Cost: about 65 tokens by the
+  accountant (UNVERIFIED: the briefing text has not been
+  measured against the live briefing system). It covers that
+  food is short and that water is near. It leaves the
+  worth-it judgement to §6 and §7.
+- **Fish backlog.** Trigger: raw fish waiting with no cleaner
+  assigned. Cost: about 50 tokens. It covers how many fish are
+  waiting and that they rot uncleaned. It leaves the ratio fix
+  to §5.
+
+No other fishing event briefs the model. A fishery being built,
+a zone being designated, or a catch coming in are attention
+entries and opportunities entries, not briefings. A briefing is
+for something the model needs to understand right now, not for
+something it can read in the snapshot.
+
+### 13.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 fishing entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Fishing: brook in range, 0 fishers. Query /v1/fishing for
+  the water survey."
+- "Raw fish 12 waiting, 0 cleaners. Query /v1/fishing for the
+  cleaning queue."
+- "Fishery: none built. Query /v1/fishing for the workshop."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A fisher
+already fishing is not an opportunity; it is the snapshot doing
+its job. The entry never names the action to take and never
+carries a cost estimate. The model decides.
+
+### 13.5 What the system deliberately does NOT push, and why
+
+- **Every water tile.** The snapshot names the fishing zones
+  and their state; the full water map is behind GET /v1/fishing
+  and the survey. A list of water tiles every tick is a dump,
+  and the model cannot act on the 40th water tile anyway.
+- **Water classification before the route exists.** The harness
+  can see water but cannot classify it (§3). The snapshot says
+  "water unclassified" until phase 1 establishes the route.
+  Pushing a classification the harness cannot support would be
+  a guess.
+- **Per-fish records.** Which fish was caught, by whom, and
+  when, is journal data. The snapshot says how many raw fish
+  are in stock. The record is there when the model asks why a
+  fisher is idle.
+- **Fishing as a suggestion.** The snapshot never says "fish the
+  brook". Whether fishing is worth it is §6 and §7, and the
+  model asks for the fishing detail when it decides. The
+  presentation gives the model what it needs to decide, not a
+  script to follow (HARNESS_ROLE.md).
+- **Fish as food before have/need counts it.** The have/need
+  machinery does not count raw or prepared fish as food today
+  (§3). Until it does, the snapshot never claims fish cover
+  the food floor. The gap is stated, not papered over.

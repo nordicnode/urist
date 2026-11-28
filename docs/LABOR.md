@@ -353,3 +353,165 @@ DFHack 0.47.05-r8 plugin docs, read from the local install:
 Harness state, verified against the repo:
 
 - `src/dfagent_harness/actions.py` (`labor_toggle`, noble position ids, `manager_order_create`), `src/dfagent_harness/lua/act_labor.lua`, `src/dfagent_harness/lua/units.lua`, `src/dfagent_harness/lua/units_lite.lua`, `src/dfagent_harness/lua/probe_unit.lua`, `src/dfagent_harness/observe.py`, `src/dfagent_harness/assembler.py`, `src/dfagent_harness/planner.py`, `src/dfagent_harness/daemon.py` (`TASK_DEFS`, `run_task`), `docs/ACTIONS.md`, `docs/PROTOCOL.md`, `docs/FARMING_PLAN.md` (section 11 labor rules), `docs/MILITARY.md` (Bug 1451), `docs/TRADING.md` (broker appointment UNVERIFIED), `tests/fixtures/runtime-enums-0.47.05-r8.json` (84 unit labors, 138 job skills).
+
+## 14. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 14.1 Snapshot: the Labor section
+
+The snapshot section is specified in full in §9.1; this
+subsection states its shape and cost, and does not repeat it.
+The per-tick snapshot gains a compact Labor block, next to the
+Units section, bounded the same way (counts, exceptions, diffs
+only, never the full citizen list). Four lines, in this shape:
+
+```
+Labor: 7 citizens, 1 idle.
+  Coverage: BREWER 1/1 (Olon), PLANT 1/1 (Ral) + backup 1 (Zulban),
+    COOK 0/1 GAP, MINE 2/2, CUTWOOD 1/1, CARPENTER 1/1, MASON 1/1, HAUL 2/2.
+  Gaps: no cook. Fix: enable COOK on Zulban (Adequate cook, idle,
+    holds no other skilled labor).
+  Suggested: enable COOK on Zulban; disable HAUL_FOOD on Olon
+    (brewer pulled into hauling).
+```
+
+What is in it, and what is not:
+
+- **Line 1, headcount.** How many citizens, how many idle.
+  One clause, never a list.
+- **Line 2, coverage.** The coverage table, not a dump: per
+  labor, how many hold it against the floor, capped at 8 labors,
+  with the holder named when there is one. A gap always carries
+  its fix (§9.1). The table is built from a fresh full units
+  collect, because the snapshot today carries no skill or labor
+  information at all beyond profession counts: the daemon's
+  poller uses `units_lite.lua`, which deliberately omits skills
+  and labors (§3.2). The labor section must do a fresh full
+  collect for its decisions, the same way the diary path already
+  does for fresh citizens. It never reads the lite collect and
+  pretends it knows.
+- **Line 3, gaps.** At most 3 gaps, each with its fix in game
+  terms. A gap without a fix is not printed.
+- **Line 4, suggestions.** At most 3 suggestions, each one line
+  with the reason in game terms. The rust watch is at most 3
+  entries and shares this line's budget. Nothing in the block
+  grows linearly with population (§9.1).
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("labor: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when labor state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+368 characters: about 122 tokens by the accountant's
+3-chars-per-token rate, 92 on the wire. At 50 dwarves, with
+more labors covered and more gaps, it is about 480 characters:
+about 160 tokens by the accountant, 120 on the wire. The cost
+grows by about 40 tokens from 7 dwarves to 50, because the
+section is capped: 8 labors maximum, 3 gaps, 3 suggestions, 3
+rust entries. It does not grow with population, with the number
+of labors in the game, or with the number of citizens. If a
+future change makes it grow with any of those, the change is
+refused until the section is capped again.
+
+### 14.2 Query route: GET /v1/labor (UNVERIFIED)
+
+The routes are specified in §9.2; this subsection states the
+presentation rule for them. GET /v1/labor returns the full view,
+on demand: the per-dwarf table (name, profession, top three
+skills with ratings, labors held, current job, idle), coverage
+per labor with the dwarves holding it, the rust watch list, and
+the recent labor changes from the journal. GET /v1/unit/<id>
+already returns the citizen record with skills and labors, and
+is where a single dwarf's detail lives. Neither labor route
+exists yet except /v1/unit/<id>; GET /v1/labor is part of the
+implementation phases in §10, and the snapshot section above is
+written against it as a design target, not against a live route.
+
+The snapshot carries the summary and the names; the route
+carries the detail. The agent asks the route when the snapshot
+names a gap it wants to understand, never as a matter of
+routine. Until the route exists, the same detail is behind
+GET /v1/unit/<id>, which does exist today.
+
+### 14.3 Briefing: what arrives just in time
+
+Labor has no standing briefing. Two events carry one, both from
+the existing briefing system (briefings.py), each a few hundred
+tokens at most, each fired once when the event starts:
+
+- **Critical gap opens.** Trigger: a labor the fort cannot run
+  without drops to zero holders (no cook, no brewer, no
+  planter, no miner). Cost: about 60 tokens by the accountant
+  (UNVERIFIED: the briefing text has not been measured against
+  the live briefing system). It covers which labor is missing
+  and what stops without it. It leaves the fix to the snapshot's
+  gap line, which already names the dwarf to enable.
+- **Migrant arrives.** Trigger: a migration wave lands. Cost:
+  about 70 tokens. It covers the new citizens' top skills in
+  one line each, capped at 3 migrants. It leaves the assignment
+  decision to §5 and §6.
+
+No other labor event briefs the model. A reassignment, a
+rotation, or a rust entry aging out are attention entries and
+opportunities entries, not briefings. A briefing is for
+something the model needs to understand right now, not for
+something it can read in the snapshot.
+
+### 14.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 labor entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Labor: no cook, Zulban idle (Adequate). Query /v1/labor for
+  the coverage."
+- "Brewer pulled into hauling. Query /v1/labor for the
+  assignments."
+- "Mason rust: Ral, 40 days. Query /v1/labor for the rust
+  watch."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A labor at its
+floor with its holder working is not an opportunity; it is the
+snapshot doing its job. The entry never names the action to take
+and never carries a cost estimate. The model decides.
+
+### 14.5 What the system deliberately does NOT push, and why
+
+- **The full citizen list.** The snapshot never pushes it, by
+  design: it grows linearly with population (§3.3). The
+  per-dwarf table is behind GET /v1/labor.
+- **The labor matrix.** The agent never reasons about the labor
+  matrix (§9). The harness does the reasoning and feeds the
+  agent a short, ranked, plain-words view. The matrix is
+  harness policy, versioned in this doc, changed only by
+  editing the doc and the code together.
+- **Skills and labors from the lite collect.** The lite collect
+  deliberately omits them (§3.2). The presentation never
+  invents labor state from a collect that does not carry it.
+  The labor section reads fresh, or it says nothing.
+- **Autolabor.** No autolabor-like system exists in Urist
+  (§3.4), and PROTOCOL.md claiming otherwise is doc drift
+  phase 1 fixes. The presentation never promises an autolabor
+  the harness does not have.
+- **The matching rule, the floors, or the hauler share.** The
+  agent never decides those (§9.3). They are harness policy.
+  The snapshot carries the outcome (coverage, gaps, fixes),
+  never the rulebook.

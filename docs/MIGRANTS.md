@@ -569,41 +569,178 @@ response to each, so the agent is not surprised by them.
   and equipment) and what it does not fix. Expulsion of an office
   holder is not possible peacefully.
 
-## 13. How the information reaches the AI
+## 13. Model presentation
 
-The wave summary is the product. Everything else is behind a query.
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
 
-- The snapshot carries one wave item while a wave is fresh (one
-  in-game day, matching the attention window): the season, the count,
-  the one-line composition ("2 planters, a brewer, a miner, 2
-  children, a dog"), the bed deficit, the new food and drink floors,
-  and the top three suggested assignments with a one-line why each.
-  That is the whole wave in the snapshot. Nothing more.
-- The per-wave summary, behind `GET /v1/waves` (new route; phase 1),
-  is one table per migrant: name, age, sex, top two skills with
-  ratings, coverage verdict, suggested labor with a why, wounds, and
-  children or animals attached. Plus the wave-level section: coverage
-  gaps the wave fills, coverage gaps still open after the wave, bed
-  deficit and build order, new floors, and noble candidates with the
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 13.1 Snapshot: the wave item
+
+The wave summary is the product. Everything else is behind a
+query. The snapshot carries one wave item while a wave is fresh
+(one in-game day, matching the attention window), in this shape:
+
+```
+Arrivals: 5 new (2 planters, a brewer, a miner, 2 children, a dog).
+Beds: 7 citizens, 4 beds, deficit 3. Food floor now 60, drink floor now 105.
+Assign: enable PLANT (Adequate planter, idle); enable BREWER (brewer, idle); enable MINE (miner, idle).
+```
+
+What is in it, and what is not:
+
+- **Line 1, composition.** The season, the count, and the
+  one-line composition ("2 planters, a brewer, a miner, 2
+  children, a dog"). That is the whole wave in one line. The
+  composition names roles, never the full roster.
+- **Line 2, floors.** The bed deficit, and the new food and
+  drink floors the wave sets. Numbers with their units and
+  their floors: a bed deficit of 3 means 3 beds to build, and
+  the floors say how much food and drink the fort now needs.
+- **Line 3, assignments.** The top three suggested assignments
+  with a one-line why each. Three maximum, each naming the
+  labor, the dwarf's standing (skill rating, idle), and nothing
+  else. The full table is behind the query route.
+- **Freshness.** The item stays in the snapshot for one in-game
+  day after the wave's tick, matching the attention window. A
+  baseline arrival (already present at the first snapshot)
+  stays for 7 in-game days. After that the wave leaves the
+  snapshot and lives in the journal, the diary, and the
+  per-season history file. The snapshot never carries a stale
+  wave.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("arrivals: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when arrival state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+248 characters: about 82 tokens by the accountant's
+3-chars-per-token rate, 62 on the wire. At 50 dwarves, with
+a larger wave and a larger bed deficit, it is about 360
+characters: about 120 tokens by the accountant, 90 on the wire.
+The cost grows by about 40 tokens from 7 dwarves to 50, because
+the section is capped: 1 composition line, 1 floors line, 3
+assignments maximum. It does not grow with population, with the
+size of the wave, or with the number of migrants in the fort.
+If a future change makes it grow with any of those, the change
+is refused until the section is capped again.
+
+### 13.2 Query route: GET /v1/waves (UNVERIFIED)
+
+GET /v1/waves returns the per-wave summary, read from the
+journal and the wave records, not from the live game, so asking
+about a past wave does not touch the game. This route does not
+exist yet; it is phase 1 in §14, and the snapshot section above
+is written against it as a design target, not against a live
+route.
+
+- One table per migrant: name, age, sex, top two skills with
+  ratings, coverage verdict, suggested labor with a why,
+  wounds, and children or animals attached.
+- The wave-level section: coverage gaps the wave fills,
+  coverage gaps still open after the wave, bed deficit and
+  build order, new floors, and noble candidates with the
   position and the room cost.
-- The query route answers questions, never dumps. Filters: wave
-  (season/year), dwarf (name or id), skill, and "gaps" (what the fort
-  still lacks after the wave). The route reads the journal and the
-  wave records, not the live game, so asking about a past wave does
-  not touch the game.
-- The diary gets a wave entry: who arrived, what they brought, and
-  what the fort did with them, as a story thread, not a roster. The
-  per-season history file (`HISTORY.md`, queued) carries the wave as
-  part of the season record, with open threads (a migrant still
-  untrained, a noble still unappointed) carried forward.
-- The briefing for a wave is a situation briefing, not a suggestion
-  list. It states what changed (population, floors, coverage), what
-  is urgent (beds, food), and what can wait (training, rooms). The
-  agent decides; the harness makes the state visible.
-- Counts, never raw state. The snapshot never carries the full skill
-  tables, the full labor lists, or the full unit records. The summary
-  is bounded: top three assignments in the snapshot, the full table
-  behind the route.
+- Filters: wave (season/year), dwarf (name or id), skill, and
+  "gaps" (what the fort still lacks after the wave). The route
+  answers questions, never dumps.
+
+The snapshot carries the summary; the route carries the detail.
+The agent asks the route when it needs to understand a wave
+before assigning it, never as a matter of routine. Until the
+route exists, the same detail is behind GET /v1/units (the
+migrants are citizens, with skills and labors) and the attention
+lines, which do exist today. The diary gets a wave entry: who
+arrived, what they brought, and what the fort did with them, as
+a story thread, not a roster. The per-season history file
+(HISTORY.md, queued) carries the wave as part of the season
+record, with open threads (a migrant still untrained, a noble
+still unappointed) carried forward.
+
+### 13.3 Briefing: what arrives just in time
+
+The briefing for a wave is a situation briefing, not a
+suggestion list. It states what changed (population, floors,
+coverage), what is urgent (beds, food), and what can wait
+(training, rooms). The agent decides; the harness makes the
+state visible. Trigger: the `citizen_new` events for a wave
+(the event taxonomy already has `citizen_new` wired into
+briefings.py and the diary feed). Cost: about 130 tokens by the
+accountant (UNVERIFIED: the briefing text has not been measured
+against the live briefing system). One gap the doc records:
+nothing yet groups several `citizen_new` events into one wave,
+so the briefing today would fire per migrant, not per wave.
+Grouping is phase 1; until it lands, the briefing fires once
+per wave as grouped, never once per migrant.
+
+No other migrant event briefs the model. A noble candidate
+being found, a housing allocation, or a training assignment are
+attention entries and opportunities entries, not briefings. A
+briefing is for something the model needs to understand right
+now, not for something it can read in the snapshot.
+
+### 13.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 migrant entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Arrivals: 5 new, bed deficit 3. Query /v1/waves for the
+  wave table."
+- "Planter gap filled by the wave. Query /v1/waves for the
+  coverage verdicts."
+- "Noble candidate in the wave (broker). Query /v1/waves for
+  the candidates."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A wave already
+assigned and housed is not an opportunity; it is the snapshot
+doing its job. The entry never names the action to take and
+never carries a cost estimate. The model decides.
+
+### 13.5 What the system deliberately does NOT push, and why
+
+- **The full skill tables.** The snapshot never carries the
+  full skill tables, the full labor lists, or the full unit
+  records. Counts, never raw state. The tables are behind
+  GET /v1/waves.
+- **Attributes.** The units collect does not read attributes
+  (strength, agility, toughness, and the rest), and no
+  attribute field exists in `units.lua` or `probe_unit.lua`
+  (§3). Skill assessment cannot use attributes until a collect
+  for them lands, and the snapshot never pretends it can.
+- **Noble appointments as automatic.** The programmatic
+  noble-appointment route does not exist: the Lua-write path
+  was verified live on 2026-11-26 to NOT register, and the UI
+  path drives the nobles screen with xdotool keystrokes, which
+  the harness rule forbids for game actions (§3). Until a
+  programmatic route lands, the harness can only recommend a
+  noble appointment, never make one. The presentation never
+  claims otherwise.
+- **The whole wave as a roster.** The snapshot carries the
+  composition and the top three assignments. The roster is
+  behind the route and in the diary as a story thread, not a
+  roster. A roster dump would grow with every migrant the fort
+  ever takes in.
+- **Assignments as orders.** The snapshot carries suggested
+  assignments with a why. The agent decides between the named
+  options; the harness never orders a dwarf into a labor.
+  The presentation gives the model what it needs to decide, not
+  a script to follow (HARNESS_ROLE.md).
 
 ## 14. Implementation phases
 

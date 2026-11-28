@@ -1016,3 +1016,167 @@ Harness sources, read from the repo on 2026-11-27:
   gap, wells and pumps.
 - `docs/SITE_SELECTION.md`: does not exist yet; farm plot
   scoring is queued work.
+
+## 19. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 19.1 Snapshot: the Farm section
+
+The per-tick snapshot gains a short Farm section, built from the
+fresh collect, in plain words. Three lines, in this shape:
+
+```
+Farm: 2 plots (plump helmet, pig tail). Seeds: plump helmet 41, pig tail 23, cave wheat 18.
+Planters: 2 enabled (Olon, Ral). Harvest: 19 plump helmet ready.
+```
+
+What is in it, and what is not:
+
+- **Line 1, plots and seeds.** How many farm plots exist and
+  what crop each holds, then the seed counts for the crops the
+  fort grows, capped at 4 crops. These are counts, not a list:
+  the fort's seed stockpile may hold a dozen seed kinds and the
+  snapshot never names all of them. When no plot exists, the
+  line says so and names the fix: "No farm plot. Seeds on hand:
+  plump helmet 41. Build one." A missing plot is an exception,
+  not a silence. (The suggestion in assembler.py already fires
+  in this case: build a plot, then run the farm task.)
+- **Line 2, planters.** How many citizens have the farming labor
+  enabled, named when there are 3 or fewer, counted when there
+  are more. The labor enum name the action expects for Farming
+  (Fields) is UNVERIFIED, so the line names citizens, never the
+  enum.
+- **Line 3, harvest.** What is ready to harvest now, in counts.
+  When nothing is ready, the line says so and names the next
+  expected harvest in words ("plump helmet ready in about 3
+  weeks", from growdur and the season clock), never as a bare
+  number.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("farm: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when farm state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+156 characters: about 52 tokens by the accountant's
+3-chars-per-token rate, 39 on the wire. At 50 dwarves, with
+more plots and more planters, it is about 340 characters: about
+113 tokens by the accountant, 85 on the wire. The cost grows by
+about 30 tokens from 7 dwarves to 50, because the section is
+capped: 4 seed counts maximum, 3 planter names maximum, 1
+harvest clause. It does not grow with population, with the
+number of plots, or with the number of seed kinds in stock. If
+a future change makes it grow with any of those, the change is
+refused until the section is capped again.
+
+### 19.2 Query route: GET /v1/farm (UNVERIFIED)
+
+GET /v1/farm returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §15, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- Per plot: id, position, size, soil, light, biome, crop set,
+  season, fertilized or not, and the PlantSeeds jobs queued
+  on it.
+- Per crop: seeds in stock, seeds in the ground, growdur, the
+  season it grows in, and what it becomes (food, drink, cloth,
+  oil).
+- Seed reserve: the reserve policy from §5, per crop, and
+  whether any crop is below its reserve.
+- Harvest: what is ready now, what is growing, and the expected
+  harvest dates from growdur and the season clock.
+- Fertilizer and irrigation state: potash on hand, plots
+  fertilized, and whether each plot is muddied, with the
+  verification limits the doc records (the map-block
+  designation struct has no mud flag, so mud cannot be
+  verified directly today).
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to choose a
+crop or a plot, never as a matter of routine. Until the route
+exists, the same detail is behind GET /v1/buildings (plots are
+buildings) and GET /v1/stocks (seeds are stocks), which do exist
+today.
+
+### 19.3 Briefing: what arrives just in time
+
+Farming has no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **First seeds, no plot.** Trigger: the fort holds seeds and
+  has no farm plot. Cost: about 60 tokens by the accountant.
+  It covers that seeds exist, which crop the fort has most of,
+  and that a plot is the fix. It leaves the plot placement to
+  the scored site system and the crop choice to §4.
+- **Harvest ready.** Trigger: a crop reaches harvest. Cost:
+  about 50 tokens. It covers what is ready and how much, and
+  that leaving it unharvested loses it. It leaves the harvest
+  labor assignment to §11.
+
+No other farming event briefs the model. A plot being built, a
+crop being set, or a planter being assigned are attention entries
+and opportunities entries, not briefings. A briefing is for
+something the model needs to understand right now, not for
+something it can read in the snapshot.
+
+### 19.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 farming entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Farm: seeds on hand, no plot. Query /v1/farm for the seed
+  counts."
+- "Plump helmet 19 ready to harvest. Query /v1/farm for the
+  plots."
+- "Pig tail seeds 0, reserve breached. Query /v1/farm for the
+  seed reserve."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A plot with a
+crop growing is not an opportunity; it is the snapshot doing
+its job. The entry never names the action to take and never
+carries a cost estimate. The model decides.
+
+### 19.5 What the system deliberately does NOT push, and why
+
+- **The full seed list.** The snapshot names 4 seed counts; the
+  full list is behind GET /v1/farm. A list of every seed kind
+  every tick is a dump, and the model cannot act on the 9th
+  seed kind anyway.
+- **Per-tile plot state.** Which tile of a plot is planted, and
+  when each tile was sown, is survey data, pulled by region
+  when the model needs it. Pushing it would grow the snapshot
+  with the map, which breaks the index.
+- **Fertilizer arithmetic.** The potash cost per plot
+  (floor(plot size / 4) + 1) and the fertilization maximum are
+  behind the query route. The snapshot says whether a plot is
+  fertilized. The arithmetic is there when the model asks.
+- **The whole job queue.** The snapshot says how many PlantSeeds
+  jobs are queued. The full queue, with job ids and positions,
+  is behind the route. A queue dump would grow with every job
+  the fort queues.
+- **Crop choice as a suggestion.** The snapshot never says "plant
+  plump helmet". Crop selection is §4, and the model asks for
+  the farm detail when it decides. The presentation gives the
+  model what it needs to decide, not a script to follow
+  (HARNESS_ROLE.md).

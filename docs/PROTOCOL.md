@@ -819,3 +819,77 @@ from — the wire protocol is unchanged). Verified on the fort Athelunol
 - **SSE** — Server-Sent Events, one-way text/event-stream push over HTTP.
 - **Verified action** — an action whose effect was re-read from game state
   after execution; success means "observed in the game".
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: the protocol is the wire, not a section
+
+The protocol (§3 Decision, §4 Agent-facing API) is handed to the
+model once at session start, not pushed per tick. The per-tick
+snapshot is the protocol's payload: the state, the suggestion,
+and the failure feedback, in the shape §4 specifies. There is no
+per-tick protocol section, because the protocol does not change
+tick to tick. The protocol version is carried with the snapshot
+so the model can tell when the shape changes.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, the
+protocol costs 0 tokens in the snapshot: there is no protocol
+section to render. The one-time cost of handing the protocol to
+the model at session start is the protocol text itself, measured
+once, not per tick; that size is UNVERIFIED against the
+accountant. It does not grow with population, because the
+protocol does not grow with the fort.
+
+### Query route: GET /v1/catalog (live) and the v1 API (§4)
+
+The agent-facing API (§4) is the query surface: GET /v1/catalog
+for what the model can do, GET /v1/snapshot for the state, the
+per-system detail routes for choosing, POST /v1/actions/ for
+acting, and the SSE push channel (§5 Events) for being pinged
+the moment something happens. The error model (§6) types every
+failure: a failure names what failed and why in plain words.
+
+### Briefing: the protocol carries briefings, it is not one
+
+Briefings arrive over the same wire, fired by events, each a few
+hundred tokens at most, fired once when the event starts. The
+protocol's job is to deliver the briefing text faithfully, with
+its trigger and its cost stated in the system doc that owns the
+event. The protocol never invents briefing text and never
+rewords it.
+
+### Opportunities: none from this layer
+
+The protocol does not suggest. The opportunities section carries
+at most 3 entries per tick from the system docs, each facts plus
+a query route. The protocol delivers them; it does not choose
+them.
+
+### What the system deliberately does NOT push, and why
+
+- **The transport internals.** The DFHack remote protocol (§2)
+  is transport, not model input. The model sees the v1 API. The
+  bytes on the wire are harness implementation.
+- **The full API per tick.** The API is handed once at session
+  start and queried through the catalog. Pushing it every tick
+  would be a dump of a document that does not change.
+- **Unverified capabilities.** An action or route the harness
+  cannot verify live is not in the catalog. The protocol
+  presents only what the harness can actually do. (Note the
+  drift LABOR.md §3.4 records: PROTOCOL.md lists `autolabor`
+  in the task list, but no autolabor-like system exists in
+  Urist. That claim must be removed from the task list; the
+  presentation never promises a capability the harness does
+  not have.)
+- **Raw error text.** Errors are typed (§6). Raw DFHack error
+  text is logged, never pushed.

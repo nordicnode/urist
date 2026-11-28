@@ -749,7 +749,7 @@ is silent, the entry says so and the phase that proves it is named.
 | Armor | Bins max | Off | Armor level above 0 | No wear filter; new vs worn separated by workshop link only |
 | Weapons | Bins max | Off | All weapons | Picks and trap components included |
 | Ammo | Bins max | Off | Ammunition | 400 bolts per bin; near the barracks |
-| Cloth | Bins max | Off | Cloth and thread | Near loom and clothier |
+| Cloth | Bins 0 | Off | Cloth and thread | Near loom and clothier. Bins 0: the clothier ignores cloth in bins, so the feed stockpile must hold cloth loose (CLOTHING.md cross-doc correction) |
 | Leather | Bins max | Off | Tanned leather | Near tanner and leather works |
 | Gems | Bins max | Off | Cut and uncut gems, raw glass | Near jeweler |
 | Animals | None | Off | Caged animals, empty cages and traps | No bins or barrels |
@@ -1029,3 +1029,151 @@ exclusion), planner.py (the single food-stockpile decision), daemon.py
 (placement cache, food stockpile box), ui.py (the unused keystroke
 stockpile path), docs/TRADING.md, docs/FARMING_PLAN.md, docs/MILITARY.md,
 and the coordinator log (stockpile #4 rebuild, farm re-test result).
+
+## 17. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 17.1 Snapshot: the Stockpiles section
+
+The snapshot section is specified in full in §12.2; this
+subsection states its shape and cost, and does not repeat it.
+The per-tick snapshot gains a compact Stockpiles block, built
+from the fresh collect, in plain words. Two lines, in this
+shape:
+
+```
+Stockpiles: food 87% full (12 meals unhauled), stone full (40 boulders on the floor).
+Seeds 64%, drink barrels 3 empty, refuse: 2 rotting.
+```
+
+What is in it, and what is not:
+
+- **Line 1, attention.** One line per role that needs attention,
+  capped at 3 roles: full stockpiles, empty critical stockpiles
+  (seed, food, drink barrels), and rotting backlogs. Quiet
+  stockpiles are one line of counts. Full stockpiles, empty
+  critical stockpiles, and rotting backlogs are attention entries,
+  ranked with the other problems, never buried in a list (§12.2).
+- **Line 2, counts.** Per-category fill fractions for the
+  categories that matter this tick, capped at 4 categories, plus
+  the loose-items count by category. A loose item with nowhere
+  to go is a missing stockpile, and the harness says so by name
+  (§12.1). The top stockpile need per tick is a named option
+  with a one-line why (§12.2).
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("stockpiles: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when stockpile state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+138 characters: about 46 tokens by the accountant's
+3-chars-per-token rate, 34 on the wire. At 50 dwarves, with
+more stockpiles and more categories, it is about 340
+characters: about 113 tokens by the accountant, 85 on the wire.
+The cost grows by about 40 tokens from 7 dwarves to 50, because
+the section is capped: 3 attention roles maximum, 4 category
+counts maximum. It does not grow with population, with the
+number of stockpiles, or with the number of items in them. If a
+future change makes it grow with any of those, the change is
+refused until the section is capped again.
+
+### 17.2 Query route: GET /v1/stockpiles (UNVERIFIED)
+
+The routes are specified in §12.3; this subsection states the
+presentation rule for them. GET /v1/stockpiles returns the full
+list (per-stockpile records as in §12.1, plus per-category
+rollups), filterable by category and by role.
+GET /v1/stockpile/<id> returns one stockpile in full: settings,
+links, contents summary by item type, fill history.
+GET /v1/items?state=worn|forbidden|dumped|loose|unhauled returns
+the item-management view. None of these routes exists yet; they
+are part of the implementation phases in §14, and the snapshot
+section above is written against them as design targets, not
+against live routes.
+
+The snapshot carries the summary and the ids; the routes carry
+the detail. The agent asks a route when it needs to choose a
+stockpile to expand, a link to fix, or an item to dispose of,
+never as a matter of routine. Until the routes exist, the same
+detail is behind GET /v1/stocks and GET /v1/buildings, which do
+exist today.
+
+### 17.3 Briefing: what arrives just in time
+
+Stockpiles have no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **Critical stockpile empty.** Trigger: the seed, food, or
+  drink-barrel stockpile hits zero. Cost: about 60 tokens by
+  the accountant (UNVERIFIED: the briefing text has not been
+  measured against the live briefing system). It covers which
+  stockpile is empty and what the fort loses without it. It
+  leaves the fix to §4 and §5.
+- **Miasma from rot.** Trigger: rotting items in a refuse pile
+  with no miasma-safe placement. Cost: about 55 tokens. It
+  covers what is rotting and where. It leaves the disposal to
+  §8.
+
+No other stockpile event briefs the model. A stockpile filling
+up, a new stockpile being built, or a link being set are
+attention entries and opportunities entries, not briefings. A
+briefing is for something the model needs to understand right
+now, not for something it can read in the snapshot.
+
+### 17.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 stockpile entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Stockpiles: food 87% full, harvest coming in. Query
+  /v1/stockpiles for the fill."
+- "Stone full, 40 boulders on the floor. Query /v1/stockpiles
+  for the loose items."
+- "Seed stockpile empty. Query /v1/stockpiles for the
+  categories."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A stockpile at
+a healthy fill is not an opportunity; it is the snapshot doing
+its job. The entry never names the action to take and never
+carries a cost estimate. The model decides.
+
+### 17.5 What the system deliberately does NOT push, and why
+
+- **A stockpile's raw settings struct.** The agent never sees
+  it (§12). It sees health, and it asks for detail. The
+  settings summary is one line per stockpile behind the route.
+- **Tile lists and link graphs.** No tile list, no link graph,
+  ever (§12). The snapshot names the stockpile and its fill;
+  the links are behind GET /v1/stockpile/<id>.
+- **Per-item contents.** Which item sits where is behind the
+  route, summarized by item type. The snapshot says how full a
+  pile is and how many items are unhauled. A contents dump
+  would grow with every item the fort owns.
+- **Fill history.** The fill history of a stockpile is behind
+  GET /v1/stockpile/<id>. The snapshot says the fill now. The
+  history is there when the model asks why a pile filled.
+- **Disposal as a suggestion.** The snapshot never says "dump
+  this" or "melt that". Disposal destroys value, and §12.4
+  reserves it to the agent's approval. The presentation gives
+  the model what it needs to decide, not a script to follow
+  (HARNESS_ROLE.md).

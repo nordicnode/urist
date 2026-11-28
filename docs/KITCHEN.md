@@ -609,7 +609,25 @@ entirely on the brewer's skill, not the stack size).
   Brewing on large stacks is more efficient per job, so the brewer works
   the largest brewable stacks first.
 
-## 13. How the information reaches the AI
+## 13. Model presentation
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+
 
 This is the part Mikey asked for explicitly: the information must be fed
 to the AI optimally. The rules are the same as the snapshot's rules
@@ -646,6 +664,20 @@ What is in it, and what is not:
   stack, or a number without its unit and its floor. A number without
   its floor is a number the agent cannot act on.
 
+**Token cost.** At 7 dwarves, the section as written above is
+449 characters: about 149 tokens by the accountant's
+3-chars-per-token rate, 112 on the wire. At 50 dwarves, with
+more cookable kinds and more barrels, it is about 420 characters:
+about 140 tokens by the accountant, 105 on the wire. The cost
+grows by about 45 tokens from 7 dwarves to 50, because the section
+is capped: cookable kinds named only when cookable now, blocked
+reasons capped at 3, 1 brew clause. It does not grow with
+population, with the number of ingredient stacks, or with the
+number of prepared meals. If a future change makes it grow with
+any of those, the change is refused until the section is capped
+again.
+
+
 ### 13.2 The query route
 
 GET /v1/kitchen returns the full detail: per-material cookable stacks
@@ -673,6 +705,76 @@ The suggestion names the exact tool and parameters, as everywhere else
 in the harness. When nothing is cookable and nothing is brewable, the
 kitchen section says so and names the fix (gather, butcher, farm, trade),
 instead of going silent.
+
+### 13.4 Briefing: what arrives just in time
+
+The kitchen has no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **Drink at the floor.** Trigger: drink hits the floor of 70
+  with brewable plants and empty barrels on hand. Cost: about 60
+  tokens by the accountant (UNVERIFIED: the briefing text has not
+  been measured against the live briefing system). It covers that
+  drink is at the floor and what brewing would close the gap. It
+  leaves the brew decision to §13.3, which already names the exact
+  tool and parameters.
+- **Food short, cookable on hand.** Trigger: food below the floor
+  with cookable stacks in stock. Cost: about 65 tokens. It covers
+  what is cookable now and the meal kind. It leaves the meal choice
+  to §5 and §13.3.
+
+No other kitchen event briefs the model. A brew finishing, a meal
+being cooked, or a barrel emptying are attention entries and
+opportunities entries, not briefings. A briefing is for something
+the model needs to understand right now, not for something it can
+read in the snapshot.
+
+### 13.5 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 kitchen entries, and
+the named options in §13.3 are how they arrive: each one line,
+facts plus a query route, never a suggestion, never a pause.
+Ignoring one costs nothing. Examples of what qualifies:
+
+- "Kitchen: lavish cookable from 4 kinds, stack value about 40.
+  Query /v1/kitchen for the candidate meals."
+- "Brew: 1 brewable plant, 3 empty barrels; 2 brews to the floor.
+  Query /v1/kitchen for the barrel ledger."
+- "Blocked: cannot cook quarry bush leaves (seed reserve 9).
+  Query /v1/kitchen for the never-cook list."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A kitchen with
+drink above the floor and nothing cookable is not an
+opportunity; it is the snapshot doing its job. The entry never
+names the action to take beyond the named option's tool and
+parameters, and never carries a cost estimate beyond the meal
+value the option already states. The model decides.
+
+### 13.6 What the system deliberately does NOT push, and why
+
+- **The full ingredient table.** The snapshot names what is
+  cookable now, with the exact stacks. The full table is behind
+  GET /v1/kitchen. A table of every stack every tick is a dump,
+  and the model cannot act on the 14th stack anyway.
+- **The per-material breakdown.** The breakdown of every
+  material in stock is behind the route. The snapshot says what
+  is cookable and what is blocked and why. The breakdown is
+  there when the model asks to choose.
+- **The permissions list.** The allow list the harness maintains
+  (§8) is behind the route. The snapshot says what is blocked
+  and why. The list is there when the model asks why a stack
+  is excluded.
+- **The meal-value arithmetic.** The value of a candidate meal is
+  behind the route, computed per meal (§5.3). The snapshot says
+  the stack value of what is cookable now. The arithmetic is
+  there when the model asks to compare two meals.
+- **A raw dump of the stocks section.** Never in the snapshot:
+  a raw dump of stocks, a list of every stack, or a number
+  without its unit and its floor. A number without its floor is
+  a number the agent cannot act on (§13.1).
+
 
 ## 14. Implementation phases
 

@@ -195,3 +195,60 @@ docs/
   main-menu.png         # main-menu screenshot (verification evidence)
   world-select.png      # generated world listed in Start Playing
 ```
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: nothing from this doc enters it
+
+This doc is the human-facing setup guide: versions, downloads,
+system packages, install from scratch, headless launch, DFHack
+remote access, world generation, and what was verified. It is
+read by the person setting up the harness, not by the playing
+model. Nothing from it enters the per-tick snapshot. The model
+plays the fort; it never sees how the fort was installed.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, this doc
+costs 0 tokens in the snapshot: there is nothing to render. The
+cost does not grow with population, because nothing is pushed at
+any population.
+
+### Query route: none
+
+There is no setup query route. Setup is done once, by a human,
+before play. The daemon's health route (GET /v1/health) says
+whether the stack is up; it is not a setup route.
+
+### Briefing: none
+
+Setup does not brief. A briefing is for something the model
+needs to understand right now during play; setup is over before
+play begins.
+
+### Opportunities: none
+
+Setup carries no opportunities entries. The opportunities
+section is for facts about the fort the model can act on; an
+install step is not one of them.
+
+### What the system deliberately does NOT push, and why
+
+- **Install details.** Versions, URLs, checksums, apt packages,
+  and launch commands are human concerns. The model never sees
+  them.
+- **The verified layout.** The directory layout and the
+  verified outputs are operator knowledge. The model sees the
+  fort through the API, not the filesystem.
+- **World-gen parameters.** The world was generated before play.
+  The seed and profile are recorded in the run log for
+  reproducibility (EMBARK.md), never presented to the model as
+  something to use or change.

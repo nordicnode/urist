@@ -291,3 +291,91 @@ Example dumps: `tests/fixtures/observe-athelunol.txt` (and `.json`).
     screenshots. The finder itself works (see the phase-1 log for its
     key bindings — `f` opens the *assistant* finder from the plain
     embark screen, lowercase `f` starts the search, **not** `F`).
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+This doc is the observation layer, so its product IS the
+presentation: the state document (§Schema) rendered as the
+per-tick snapshot text (§Text rendering). There is no separate
+system to present; this section states what the layer pushes,
+what it costs, and what it refuses.
+
+### Snapshot: the whole snapshot, in sections
+
+The per-tick snapshot is the observation layer rendered as text:
+header, attention, goals, status, materials, stocks, units,
+entities, buildings, jobs, placement, reports, areas, events,
+history, and the per-system sections each design doc specifies.
+Each section is counts, exceptions, and diffs only, built from
+the fresh collect, in plain words. Each section is hashed and
+compared with the Store's last snapshot for that section; an
+unchanged section prints its short form ("buildings: unchanged"),
+so the snapshot costs its full price only on ticks when state
+actually moves. The assembler drops secondary sections by
+priority when the total would exceed the target, and THREATS,
+ATTENTION, and FAILURE FEEDBACK are never cut.
+
+**Token cost.** At 7 dwarves the snapshot is about 4,700 tokens
+typical (the figure the presentation constraint states). At 50
+dwarves it is larger, but it does not grow linearly with
+population: the per-section caps (8 exceptions in Units, 3
+workshop clauses per system section, 3 opportunities) and the
+accountant's cut order hold it under the 30K target, with the
+60K warning and 100K compaction thresholds behind it. The exact
+cost at 50 dwarves is UNVERIFIED: no 50-dwarf fort has been
+assembled and measured live. The invariant is stated in
+assembler.py: no section of the per-tick snapshot may grow
+linearly with population. If a section does, the section is
+capped or cut, not the budget raised.
+
+### Query route: GET /v1/snapshot (live)
+
+GET /v1/snapshot returns the assembled snapshot text, read from
+the fresh collect. The full state document behind it is behind
+GET /v1/state. The agent asks for the snapshot once per decision
+tick and queries the detail routes when it needs to choose, never
+as a matter of routine. The schema (`schema_version: 1`) is
+versioned so the model can tell when the shape changes.
+
+### Briefing: none from this layer
+
+Observation does not brief. Briefings come from briefings.py,
+fired by events, each a few hundred tokens at most. The
+observation layer's job is to make the state true and current;
+the briefing layer's job is to say what just happened. An
+observation section never carries briefing text.
+
+### Opportunities: none from this layer
+
+Observation does not suggest. The opportunities section carries
+at most 3 entries per tick, each from a system doc, each facts
+plus a query route. The observation layer reports state; the
+systems decide what is actionable. An observation entry that
+suggested an action would be the layer choosing for the model.
+
+### What the system deliberately does NOT push, and why
+
+- **The full state document.** The state document is behind
+  GET /v1/state. The snapshot is the index. A full state dump
+  every tick would break the budgets this section states.
+- **Per-tile data.** Where each item, boulder, or tile sits is
+  survey data, pulled by region when the model needs it. The
+  snapshot never carries the map.
+- **Raw JSON.** The snapshot is plain words, never raw JSON.
+  Numbers carry units and floors. A number without its unit and
+  its floor is a number the agent cannot act on.
+- **Stale state.** The snapshot is built from the fresh collect,
+  never from the daemon's cached status (which shows stale
+  zeros). When a collect fails, the section says so ("Stocks:
+  unavailable (section failed to collect)"), never a stale
+  number presented as fresh.

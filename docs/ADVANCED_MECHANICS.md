@@ -585,3 +585,100 @@ attention item.
   or by the harness suggesting it when the fort needs it; the
   harness does the rest. The model never guesses coordinates or
   steps — the placement system and the composed task supply them.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+This doc is the advanced-mechanics library: wells, screw pumps,
+reservoirs, traps, strange moods, artifacts, engraving, floods,
+invasions, and burrows, each as a composed task or recipe the
+model names and the harness walks through step by step, with
+material checks at each step. The presentation of each mechanic
+to the model lives in its own design doc where one exists
+(MILITARY.md for invasions and burrows, MECHANISMS_AND_SIEGE.md
+for traps, FARMING_PLAN.md for irrigation). This section states
+the shared presentation rule for the library: mechanics reach
+the model as tasks and recipes, never as doc text.
+
+### Snapshot: the mechanic as a task, not a lecture
+
+No mechanic from this library enters the snapshot as prose. A
+mechanic reaches the model in two forms, both capped:
+
+- **A task.** The model names the goal ("build a well"), and the
+  harness walks it through the steps with material checks at
+  each one (have/need from the fresh collect). The snapshot
+  carries the task's current step and its material check, in one
+  line, the same way every composed task is presented.
+- **An attention entry.** A flood, an invasion, or a strange
+  mood is an event first: it fires the event system, lands in
+  attention, and may carry a briefing. The mechanic's detail is
+  behind the query route, never in the snapshot.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, this
+library costs 0 tokens in the snapshot on its own: its content
+is carried by the task lines and attention entries of the
+systems that use it, whose costs are stated in their own docs.
+A task line is one line at any population. The library adds no
+text of its own at any population.
+
+### Query route: the task catalog and GET /v1/tasks (live)
+
+The mechanics are reached through the task catalog: the model
+names the goal, the harness runs the recipe. GET /v1/tasks
+returns the composed tasks, live today. Each mechanic's detail
+(well depth, pump chain, reservoir capacity, trap layout, mood
+demands) is behind the mechanic's own route where one exists,
+and behind the task result where it does not. The agent asks
+when it needs to choose, never as a matter of routine.
+
+### Briefing: per mechanic, fired by its event
+
+The library has no standing briefing of its own. Each mechanic
+briefs through its event: a strange mood starting, a flood
+detected, an invasion arriving. The briefing states what changed,
+what is urgent, and what can wait, in a few hundred tokens at
+most, fired once when the event starts. The cost and trigger of
+each are stated in the mechanic's own doc. A briefing never
+carries the mechanic's full procedure: the procedure is the
+task, and the task is walked step by step.
+
+### Opportunities: at most 3, facts only, per system
+
+The library carries no opportunities of its own. The systems
+that use it name their entries (at most 3 per tick, facts plus a
+query route, never a suggestion, never a pause). A mechanic is
+an opportunity only when the fact is actionable and the snapshot
+alone does not already say it: "Well: none, water 3 z below"
+is an entry; "wells exist" is not.
+
+### What the system deliberately does NOT push, and why
+
+- **The library as text.** The doc is never pasted into the
+  snapshot or the prompt. The model is not expected to know
+  advanced DF mechanics; that is the library's whole point.
+  The mechanic arrives as a task, not a lecture.
+- **Unproven routes as available.** Every mechanic in this
+  library carries its proof state (§Standing rules for this
+  library). A route that is plausible and unproven (squad
+  creation, burrow creation, order construction) is never
+  presented as working. The task catalog lists only what the
+  harness can actually do.
+- **The whole procedure up front.** The harness walks the
+  model through the steps with material checks at each one.
+  Pushing the whole procedure at once would be a dump, and
+  the model cannot act on step 5 before step 1 is verified.
+- **Flood detection as a certainty.** Flood detection is spot
+  water where it should not be, wall it off, drain it. The
+  snapshot says water was spotted where it should not be. The
+  response is a task. The presentation never claims a flood is
+  contained before the wall is up.

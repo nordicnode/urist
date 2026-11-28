@@ -228,3 +228,71 @@ The driver never touches the main fort's DF (third_party/df_47_05,
   count, and a cursor/rect move that returns to its start (no
   embark — the live embark is proven by the driver run, not the
   unit test).
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: nothing from embark, except the starting state
+
+Embark is pre-game. Nothing from this doc enters the per-tick
+snapshot except the starting state it produces: the fort's
+position, its dwarves, its items, and its site, all of which the
+snapshot carries through the normal sections (Units, Stocks,
+Buildings, Areas). The embark profile, the finder criteria, the
+match grid, and the world-gen seed are not pushed. The model
+plays the fort it has, not the fort it might have embarked on.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, embark
+costs 0 tokens in the snapshot: there is no embark section to
+render. The starting state is carried by the normal sections,
+whose costs are stated in their own docs. Embark adds nothing
+on top at any population.
+
+### Query route: none live; the module is the route
+
+There is no embark query route, and there must not be one
+during play: embark is over once the fort loads. The embark
+module (`embark.py`) is the route, used before play: seeded
+world gen, the fixed finder profile, the deterministic pick rule
+(first match, topmost then leftmost), and the full flow through
+`embark_site()`, proven live. The world seed and profile are
+recorded in the run log and the scores.db row, so a run can be
+reproduced, never so the model can re-embark mid-run.
+
+### Briefing: none from this layer
+
+Embark does not brief. The first briefing a model gets is the
+first event after the fort loads. The embark itself is setup,
+not play, and the model is never briefed about setup.
+
+### Opportunities: none from this layer
+
+Embark is not an opportunity. The site criteria (§The M2 site
+criteria) are harness policy for choosing a start, not facts
+about the fort the model can act on once play begins.
+
+### What the system deliberately does NOT push, and why
+
+- **The match grid.** The finder match grid is setup data. The
+  model never sees it. Pushing it would be a dump of a
+  decision already made.
+- **The world seed as a suggestion.** The seed is recorded for
+  reproducibility. It is never presented as something the model
+  should use or change.
+- **Keystrokes.** Embark is keystrokes by necessity (§Why this
+  is keystrokes, not API): it is pre-game setup, quarantined,
+  the only exception to the no-keystrokes rule. The keystrokes
+  are never presented to the model as actions it can take.
+- **The site criteria as advice.** The M2 site criteria are
+  harness policy for choosing a start. Once the fort loads,
+  the model plays the site it has. The criteria are not advice
+  about where to dig.

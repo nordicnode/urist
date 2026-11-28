@@ -250,3 +250,90 @@ step 11), which scores the HARNESS, not the model. The scoring
 system scores the MODEL's play; the harness scorecard scores the
 harness's observation/action quality. Both are needed; they are not
 the same thing.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+This doc is the scoring specification: the composite, the
+dimensions, the milestone detection, and the leaderboard. The
+presentation of evaluation to the model lives in EVALUATION.md
+(Model presentation): no evaluation section in the snapshot, no
+briefing during a run, no opportunities, and the run-end report.
+This section states what this doc adds to that presentation and
+what it deliberately does not push.
+
+### Snapshot: no score section, by design
+
+Scoring pushes nothing into the per-tick snapshot. There is no
+"Score: 91.8" line, no live dimension read, and no milestone
+tally while a run is in progress. That is deliberate, and it is
+the anti-gaming rule: showing the model its live score would
+steer it toward the metric instead of the fort. The score is
+computed by the harness from live game state, the run log, and
+the store, never self-reported by the model, and it is never fed
+back into a running model. The one exception is the wealth
+dimension's raw input: GET /v1/wealth exists today and carries
+fortress value from lua/wealth.lua, because wealth is fort
+state, not a grade. The score built on top of it is not pushed.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, scoring
+costs 0 tokens in the snapshot: there is no score section to
+render. The cost does not grow with population, because nothing
+is pushed at any population. The run-end report's cost is stated
+in EVALUATION.md.
+
+### Query route: GET /v1/wealth (live); scores read after the run
+
+GET /v1/wealth carries the wealth dimension's raw input
+(fortress value as the sum of dfhack.items.getValue over in-play
+items, excluding trader-held goods, items on the ground, and
+abstract world artifacts). The scores themselves are read after
+the run ends, from scores.db via scripts/score_run.py: one row
+per scored run. There is no live scoring route, and there must
+not be one during a run. The milestone detection (§Milestone
+detection) is conservative by design: first farm, first trade,
+and first mood resolved are always False until those systems
+land and the events exist. The code must not claim them before
+then, and the presentation never shows a milestone the harness
+cannot detect.
+
+### Briefing: none from this layer
+
+Scoring does not brief. The run-end report is delivered after
+the run, outside the snapshot, to the human and to the log, not
+back into the model that just played.
+
+### Opportunities: none from this layer
+
+Scoring carries no opportunities entries. An entry such as
+"score 91.8, one milestone from 93.8" would be the harness
+grading the model in its own ear while it plays. The
+opportunities section is for facts about the fort the model can
+act on; a score is not one of them.
+
+### What the system deliberately does NOT push, and why
+
+- **The live composite or any live dimension.** Showing a
+  running score invites score-chasing. The score exists only
+  after the run.
+- **Milestone progress mid-run.** Telling the model it is one
+  milestone from a bonus is the same steering by another name.
+  Milestones are detected after the fact, from the run log.
+- **The leaderboard.** Past scores belong to the human choosing
+  a model, not to a model choosing its next action. The
+  leaderboard is read by people.
+- **Suggestion matching as a grade.** The suggestion-matching
+  dimension (§Suggestion matching) records whether the model
+  followed the suggestion. It is computed after the run. The
+  snapshot never says "you should have followed the
+  suggestion": the model may reject the suggestion, and the
+  snapshot says so.

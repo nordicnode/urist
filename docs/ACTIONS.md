@@ -319,3 +319,79 @@ reports it rather than hanging. Do not add retries around it.
   cleaning up after themselves (the build test deconstructs the wagon
   first as one-time setup — all embark wood is trapped inside it —
   and deconstructs the workshop afterwards).
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: no action section; the catalog carries it
+
+Actions reach the model through the catalog, not through the
+snapshot. There is no per-tick action section, because the action
+set does not change tick to tick. The catalog (GET /v1/catalog,
+live today) is self-describing and built from live-verified
+runtime enums, so the model sees what the harness can actually
+do, never a capability the harness does not have. The per-tick
+snapshot carries the suggestion (one action, with parameters and
+a one-line why) and the action results from the last tick; the
+catalog carries the full set.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, the action
+layer costs 0 tokens in the snapshot: there is no action section
+to render. The catalog is delivered once per session and on
+query, not per tick, so its per-tick cost is 0. The one-time size
+of the catalog text is UNVERIFIED: it has not been measured
+against the accountant. It does not grow with population,
+because the action set does not grow with the fort.
+
+### Query route: GET /v1/catalog (live), POST /v1/actions/ (live)
+
+GET /v1/catalog returns the action catalog: each action with its
+parameters, its preconditions, and its result shape. POST
+/v1/actions/ executes one action and returns its result, with
+the postcondition read-back where the action has one. The
+catalog is the route the model asks when it needs to know what
+it can do; the snapshot's suggestion names the action to
+consider, never the whole catalog.
+
+### Briefing: none from this layer
+
+Actions do not brief. A failed action is failure feedback in the
+snapshot (THREATS, ATTENTION, and FAILURE FEEDBACK are never
+cut), not a briefing. A briefing is for something the model
+needs to understand right now; a failed action is something the
+model already knows it tried.
+
+### Opportunities: none from this layer
+
+Actions are tools, not opportunities. The opportunities section
+carries facts about the fort the model can act on, each with a
+query route. An action listed as an opportunity would be the
+harness suggesting its own tool, which is the suggestion's job,
+once per tick, not the opportunities' job.
+
+### What the system deliberately does NOT push, and why
+
+- **The Lua internals.** The model never sees the Lua helpers,
+  the DFHack calls, or the raw struct writes. It sees the action
+  name, its parameters, and its result. The internals are
+  harness implementation, not something the model decides.
+- **The full catalog per tick.** The catalog is delivered once
+  per session and on query. Pushing it every tick would be a
+  dump of a document that does not change.
+- **Unverified actions.** An action the harness cannot verify
+  live is not in the catalog. The catalog is built from
+  live-verified runtime enums; a capability the harness does
+  not have is never presented as available.
+- **Raw error text.** Errors are typed (the error model in §Error
+  model): a failure names what failed and why in plain words,
+  with the precondition that was not met. Raw DFHack error text
+  is never pushed; it is logged, not presented.

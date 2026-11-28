@@ -87,3 +87,62 @@ interrupted by a crash, rather than reporting a pass.
 6. **Daemon restart persistence**: drain-offset no-replay is
    implemented but the replay check is still pending; the daemon
    does not reinstall the watcher into a relaunched DF.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: nothing from this doc enters it
+
+This doc is the acceptance record: the criteria, how each is
+measured, the shakedown results, and what remains before "100%
+working". It is verification bookkeeping, read by people and by
+the coordinator, not by the playing model. Nothing from it enters
+the per-tick snapshot. The model is never told its own acceptance
+criteria while it plays: that would be the harness grading the
+model in its own ear, the same steering the evaluation docs
+forbid.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, this doc
+costs 0 tokens in the snapshot: there is nothing to render. The
+cost does not grow with population, because nothing is pushed at
+any population.
+
+### Query route: none
+
+There is no acceptance query route. The criteria live in this
+doc and in repo AGENTS.md (uniform acceptance criteria). The
+coordinator reads them; the model does not query them.
+
+### Briefing: none
+
+Acceptance does not brief. A criterion being met or missed is a
+coordinator judgement after a run, not an event during one.
+
+### Opportunities: none
+
+Acceptance carries no opportunities entries. The opportunities
+section is for facts about the fort the model can act on; a
+criterion is not one of them.
+
+### What the system deliberately does NOT push, and why
+
+- **The criteria.** The model is never told what it is being
+  measured against while it plays. The criteria govern
+  verification, not play.
+- **The shakedown results.** Past results belong to the human
+  and the coordinator judging the harness, not to a model
+  choosing its next action.
+- **The "what remains" list.** The list of what remains before
+  "100% working" is a work queue for the coordinator. Pushing
+  it to the model would be the harness telling the model what
+  the harness cannot do yet, which is noise the model cannot
+  act on.

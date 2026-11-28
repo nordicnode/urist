@@ -189,3 +189,74 @@ race and the manual unpause), with 2 `pause_guard` rows logged.
   clean stop (log_event can fail silently, e.g. DB lock) —
   observability only.
 - `/v1/screen` is not implemented (ASCII profile not active).
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: the daemon owns the clock, not the text
+
+The daemon does not write snapshot text. It owns the loop and
+the clock (§How the daemon ticks) and assembles the snapshot
+from the fresh collect through the assembler. What reaches the
+model from the daemon is the snapshot itself, the suggestion,
+and the failure feedback when a tick or an action fails. The
+daemon's own state (poll intervals, RPC health, pause guard
+state, reload guards) never enters the snapshot. The model sees
+the fort, not the machinery.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, the daemon
+layer costs 0 tokens in the snapshot: it writes no section. Its
+cost is the snapshot it assembles, stated in OBSERVE.md. It does
+not grow with population, because the daemon adds no text of
+its own at any population.
+
+### Query route: GET /v1/status and GET /v1/health (live)
+
+GET /v1/health needs no auth and says whether the daemon is up.
+GET /v1/status returns the daemon's state, but after a restart
+its cache is stale: the live snapshot (GET /v1/snapshot) is the
+truth, not /v1/status. The agent asks the health route when it
+needs to know the daemon is alive; it never asks for the
+daemon's internals. The control routes (POST /v1/control/*) are
+for the operator and the driver, not for the playing model:
+agent tools never include pause/unpause.
+
+### Briefing: none from this layer
+
+The daemon does not brief. It delivers the briefings that
+briefings.py fires, on the events the event system raises. A
+daemon restart, a poller hiccup, or an RPC retry is logged, not
+briefed. The model is never told about machinery unless the
+machinery has failed and the run cannot continue, in which case
+the run ends with a hard error, not a briefing.
+
+### Opportunities: none from this layer
+
+The daemon does not suggest. It runs the snapshot's suggestion
+as a fallback at 6 idle ticks (the stall handling), and it
+sharpens the prompt at 3 idle ticks. Both are daemon behavior,
+not opportunities. The opportunities section carries facts
+about the fort, never facts about the daemon.
+
+### What the system deliberately does NOT push, and why
+
+- **Daemon internals.** Poll intervals, RPC retries, pause
+  guard state, and reload guards are operator concerns. The
+  model sees the fort. Pushing internals would be noise the
+  model cannot act on.
+- **Stale status.** After a restart, /v1/status is stale. The
+  presentation never presents a stale number as fresh. The
+  live snapshot is the truth.
+- **The clock as a number.** The daemon owns the clock; the
+  agent owns decisions. The snapshot carries the date and the
+  tick. The daemon never tells the model how many ticks it has
+  left to decide.

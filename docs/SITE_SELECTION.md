@@ -1060,3 +1060,113 @@ that is evidence about the factor, not disobedience.
   heavy-lifting, and the top-3-with-why is the freedom mechanism
   (the model chooses). The eval ablation (§9) is the measurement
   for both.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: the Placement section
+
+The per-tick snapshot gains a short Placement section, built
+from the fresh collect by the assembler's `_placement`, in plain
+words. Two lines, in this shape:
+
+```
+Placement: farm plot: (12, 14, -1) verified free, path 8 tiles. Still: (20, 11, -1) verified free, path 5 tiles.
+Blocked: depot: no wagon-accessible site (entrance blocked).
+```
+
+What is in it, and what is not:
+
+- **Line 1, top sites.** One top site per kind the model is
+  considering, capped at 3 kinds, each with its coordinates, its
+  verification (free and reachable), and its path length. The
+  harness does the scoring and hands the agent 2-3 named options
+  with a one-line why each; the snapshot carries the top site per
+  kind, and the full detail is behind /v1/sites. A site with no
+  path is not free, and the snapshot never names one as free.
+- **Line 2, blocked.** The top blocked candidate per kind the
+  model is considering, with the reason it is blocked. A blocked
+  site is information, not silence: the model needs to know why
+  the obvious spot does not work.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("placement: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when placement state actually moves. When no verified sites
+  exist, the section is omitted, not rendered empty.
+
+**Token cost.** At 7 dwarves, the section as written above is
+173 characters: about 57 tokens by the accountant's
+3-chars-per-token rate, 43 on the wire. At 50 dwarves, with
+more kinds under consideration, it is about 300 characters:
+about 100 tokens by the accountant, 75 on the wire. The cost
+grows by about 30 tokens from 7 dwarves to 50, because the
+section is capped: 3 kinds maximum, 1 blocked candidate per
+kind. It does not grow with population, with the number of
+sites on the map, or with the number of scored candidates. If a
+future change makes it grow with any of those, the change is
+refused until the section is capped again.
+
+### Query route: GET /v1/sites (live)
+
+GET /v1/sites returns the full detail, live today: the top 3
+sites per kind with a one-line why each, plus the top blocked
+candidates with their reasons. The snapshot carries the top site
+per kind; the route carries the full detail. The agent asks the
+route when it needs to choose between sites, never as a matter
+of routine.
+
+### Briefing: none from this layer
+
+Placement does not brief. A site being scored, verified, or
+blocked is snapshot state, not an event. A briefing is for
+something the model needs to understand right now; a placement
+option is something the model asks for when it decides to place
+something.
+
+### Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 placement entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Placement: farm plot site verified free, path 8 tiles. Query
+  /v1/sites for the options."
+- "Depot: no wagon-accessible site. Query /v1/sites for the
+  blocked reasons."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A verified site
+the model is not considering is not an opportunity; it is the
+snapshot doing its job. The entry never names the action to take
+and never carries a cost estimate. The model decides.
+
+### What the system deliberately does NOT push, and why
+
+- **Every scored candidate.** The snapshot names the top site
+  per kind; the full list is behind GET /v1/sites. A list of
+  every candidate every tick is a dump, and the model cannot
+  act on the 9th candidate anyway.
+- **The scoring arithmetic.** The factors (§4 The factors in
+  detail) and their weights are harness policy. The snapshot
+  carries the outcome (the site, the why, the path). The
+  arithmetic is there when the model asks why a site scored
+  the way it did.
+- **Unverified sites.** A site that cannot be verified is never
+  handed over as free. The section says so and falls back,
+  never quietly hands over an unverified site (§Design:
+  score_site).
+- **Placement as a suggestion.** The snapshot never says "put
+  it here". Placement is the scored site system, and the model
+  asks for a site when it decides to place something. The
+  presentation gives the model what it needs to decide, not a
+  script to follow (HARNESS_ROLE.md).

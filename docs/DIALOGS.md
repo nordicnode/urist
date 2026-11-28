@@ -213,3 +213,80 @@ this live case:
   / Aborted" deaths). With the daemon stopped and a single client,
   DF ran stably for 150+ windows. Live dialog work uses one client
   at a time.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: a blocking dialog is a failure, not a section
+
+Dialogs reach the model as failure feedback, never as a snapshot
+section. When a dialog blocks the game, the harness names the
+modal and returns it as a failure (the advance check, §The
+advance check): the model is told what is blocking, in plain
+words, and the run does not proceed past it. When a dialog is
+dismissed programmatically (the proven route, §The programmatic
+route), the model is told nothing: the dismissal is harness
+machinery, not game state. The meeting screen is the exception
+with a rule of its own: once trade exists, a liaison meeting is
+surfaced to the agent instead of auto-ended (§The meeting
+screen), because a fort with a depot can use the trade
+agreement. Until trade exists, the meeting is ended by the
+dipscript jump, because it freezes the clock and there is
+nothing to gain from it.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, the dialog
+layer costs 0 tokens in the snapshot: there is no dialog section
+to render. A blocking dialog costs one failure-feedback line
+when it happens, and nothing when it does not. The cost does not
+grow with population, because dialogs do not multiply with
+dwarves.
+
+### Query route: POST /v1/control/advance (live)
+
+POST /v1/control/advance dismisses a dismissable screen through
+`dfhack.screen.dismiss`, wired into the daemon and the M1 driver
+clock-advance. The route returns whether the advance worked and,
+when it did not, what blocks it (`blocked_by`). The model never
+calls this route directly: the daemon owns the advance check.
+The route exists for the driver and the operator, not for the
+playing model.
+
+### Briefing: none from this layer
+
+Dialogs do not brief. A game-committing modal (the trade screen
+is the proven case) is named and returned as a failure, never
+chosen for the player. A briefing is for something the model
+needs to understand right now; a modal is something the model
+must not decide, and the harness says so in one line.
+
+### Opportunities: none from this layer
+
+Dialogs are not opportunities. A dismissable screen is
+machinery; a blocking screen is a failure. Neither is a fact
+about the fort the model can act on.
+
+### What the system deliberately does NOT push, and why
+
+- **The dialog contents.** The model never sees a dialog's
+  text, options, or buttons. It sees the failure line naming
+  what blocks. Showing the options would invite the model to
+  choose on a screen the harness refuses to choose on.
+- **Keystrokes.** The harness never pushes a keystroke to the
+  model, and the model never sends one. The programmatic route
+  (DFHack Lua screen dismissal) is the only dismissal. Key
+  press is the absolute last resort, only after all
+  programmatic routes genuinely fail, and it is never
+  presented as a normal option.
+- **The allowlist.** The safety rules and allowlist (§Safety
+  rules / allowlist) are harness policy. The model sees the
+  outcome (dismissed, or blocked with a reason), never the
+  list.

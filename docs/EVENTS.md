@@ -359,3 +359,98 @@ malformed lines. It is safe to delete the log while DF is paused
   with fresh numbers). That is fine for a single long-lived daemon,
   but a restart replays history — phase 4 should persist the drain
   offset (or use the bus journal) so restarts resume, not replay.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+### Snapshot: the Events section
+
+The per-tick snapshot gains a short Events section, built from
+the fresh event feed, in plain words. Two lines, in this shape:
+
+```
+Events: caravan arrived (Umshadònul). 2 new arrivals.
+Attention: 1 hostile in range (15 tiles).
+```
+
+What is in it, and what is not:
+
+- **Line 1, events.** The events that fired this tick, named by
+  kind, capped at 3, each one clause. The event catalog (§Event
+  catalog) is the full list; the snapshot names only what fired.
+  Arrivals are listed in plain words, threats first, then new
+  arrivals (attention.py), and an arrival stays in attention
+  for one in-game day after its tick.
+- **Line 2, attention.** The attention items the events raised,
+  capped at 3, ranked with the other problems, never buried in
+  a list. A quiet tick costs one line: "Events: none."
+- **Diffs, not repeats.** When no event fired since the last
+  tick, the assembler prints the short form ("events: none"),
+  the same way the Buildings section already does. The section
+  costs its full price only on ticks when an event fires.
+
+**Token cost.** At 7 dwarves, the section as written above is
+95 characters: about 31 tokens by the accountant's
+3-chars-per-token rate, 23 on the wire. At 50 dwarves, with
+more arrivals in a wave, it is about 300 characters: about 100
+tokens by the accountant, 75 on the wire. The cost grows by
+about 35 tokens from 7 dwarves to 50, because the section is
+capped: 3 events maximum, 3 attention items maximum. It does
+not grow with population, with the number of events in the log,
+or with the size of a migration wave. If a future change makes
+it grow with any of those, the change is refused until the
+section is capped again.
+
+### Query route: GET /v1/events (live) and SSE
+
+GET /v1/events returns the event feed, with replay semantics
+(§SSE protocol + replay semantics). The SSE push channel pings
+the agent the moment something happens. The snapshot carries
+what fired this tick; the route carries the history. The agent
+asks the route when it needs to know what happened while it was
+away, never as a matter of routine.
+
+### Briefing: events drive briefings, they are not briefings
+
+An event firing is what triggers a briefing (briefings.py), but
+the event text is not the briefing text. The briefing states
+what changed, what is urgent, and what can wait, in a few
+hundred tokens at most, fired once when the event starts. The
+cost of each briefing is stated in the system doc that owns the
+event (TRADING.md for caravans, MILITARY.md for invasions,
+MIGRANTS.md for waves). The event layer's job is to detect and
+deliver; the briefing layer's job is to explain.
+
+### Opportunities: none from this layer
+
+Events do not suggest. An event raises an attention item, and
+the attention item may become an opportunities entry when the
+fact is actionable and the snapshot alone does not already say
+it. The event layer reports what happened; the system docs
+decide what is actionable. An event listed as an opportunity
+would be the layer choosing for the model.
+
+### What the system deliberately does NOT push, and why
+
+- **The full event log.** The log is behind GET /v1/events with
+  replay. The snapshot names what fired this tick. A log dump
+  every tick would grow with the fort's history.
+- **Raw event JSON.** The snapshot is plain words, never raw
+  JSON. An event's kind, subject, and tick are rendered in
+  words; the JSON is behind the route.
+- **Fixture-only events.** Events that have only ever fired in
+  fixtures, never live, are not presented as if they fired
+  (§What fired live vs fixture-only). The snapshot names only
+  what the live game produced.
+- **Duplicate events.** The detectors are edge-triggered with a
+  dedup key per unit id. The snapshot never names the same
+  arrival twice.

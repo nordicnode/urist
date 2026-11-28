@@ -1041,3 +1041,177 @@ Harness sources, read from the repo on 2026-11-27:
   TANNER; workshops Bowyers, Craftsdwarfs, Butchers, Tanners,
   Leatherworks, Farmers, Kitchen, Still; item types AMMO, QUIVER,
   WEAPON, MEAT, SKIN_TANNED.
+
+## 16. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 16.1 Snapshot: the Hunting section
+
+The per-tick snapshot gains a short Hunting section, built from
+the fresh collect, in plain words. Three lines, in this shape:
+
+```
+Hunting: 0 hunters. Bolts 0, quivers 0. Butcher's shop: none.
+Wildlife: 3 deer (nearest 18 tiles), 1 fox (nearest 42 tiles).
+```
+
+What is in it, and what is not:
+
+- **Line 1, hunters and kit.** How many citizens have the HUNT
+  labor enabled, how many bolts and quivers are in stock, and
+  whether a butcher's shop exists. The labor machinery is
+  verified live (`labor_toggle` with read-back), and HUNT,
+  BUTCHER, and TANNER are real enum names, so the line names
+  real state. The common case on a fort with no hunting yet is
+  the example above: three short absences, not silence. A
+  missing butcher's shop is an exception, not a blank.
+- **Line 2, wildlife.** What wild animals are out there, by
+  race, capped at 4 races, with the nearest distance per race.
+  The units observation sees wildlife live today (id, name,
+  race, position, kind, role, `dist_nearest_citizen`,
+  `wildlife_by_race`), so this line is built from a fresh
+  collect. What the collect cannot see is the animal's size,
+  danger, or health: the compact record carries no size and no
+  hostility flag. Race is the only signal, so the line names
+  races and distances, never a danger rating. Danger and yield
+  come from a game table keyed by race, built from the creature
+  raws (§7.3, §10.2), and that table is behind the query route,
+  not in the snapshot.
+- **Line 3, only when something is wrong.** A third line appears
+  only as an exception: a hunter with no bolts, a hunter
+  outside the walls with a hostile near, a butcher's shop with
+  a corpse rotting unbutchered. When nothing is wrong, there is
+  no third line. A quiet fort costs two lines.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("hunting: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when hunting state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+124 characters: about 41 tokens by the accountant's
+3-chars-per-token rate, 31 on the wire. At 50 dwarves, with
+more hunters and more wildlife races, it is about 300
+characters: about 100 tokens by the accountant, 75 on the wire.
+The cost grows by about 35 tokens from 7 dwarves to 50, because
+the section is capped: 4 wildlife races maximum, 1 hunter
+clause, 1 kit clause. It does not grow with population, with
+the number of wild animals on the map, or with the number of
+bolts in stock. If a future change makes it grow with any of
+those, the change is refused until the section is capped again.
+
+### 16.2 Query route: GET /v1/hunting (UNVERIFIED)
+
+GET /v1/hunting returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §13, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- Wildlife: every wild animal with id, race, position,
+  distance to the nearest citizen, and the danger and yield
+  from the race table (§7.3).
+- Hunters: each citizen with the HUNT labor, their marksdwarf
+  skill, their weapon, and their current job.
+- Equipment: bolts, quivers, bows, and crossbows in stock, by
+  material, with the have/need check for a hunt (§5).
+- Butchering: the butcher's shop state, corpses waiting, and
+  the meat, bones, and skins each corpse yields (§9).
+- Zones: the hunting zones from §6, with their bounds and
+  whether a hunter is inside one.
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to choose
+what to hunt or whether hunting is worth it (§4), never as a
+matter of routine. Until the route exists, the same detail is
+behind GET /v1/units (wildlife is in the units collect) and
+GET /v1/stocks (bolts and quivers are stocks), which do exist
+today.
+
+### 16.3 Briefing: what arrives just in time
+
+Hunting has no standing briefing. Two events carry one, both
+from the existing briefing system (briefings.py), each a few
+hundred tokens at most, each fired once when the event starts:
+
+- **Food short, game near.** Trigger: food below the floor and
+  huntable wildlife within range. Cost: about 70 tokens by the
+  accountant (UNVERIFIED: the briefing text has not been
+  measured against the live briefing system). It covers that
+  food is short, what game is near, and that hunting is one
+  way to close the gap. It leaves the worth-it judgement to
+  §4 and the equipment check to §5.
+- **Hunter in danger.** Trigger: a hunter outside the walls
+  with a hostile near. Cost: about 55 tokens. It covers the
+  hunter, the hostile, and the distance. It leaves the recall
+  decision to §10.
+
+No other hunting event briefs the model. A successful hunt, a
+butchering, or a bolt stock hitting zero are attention entries
+and opportunities entries, not briefings. A briefing is for
+something the model needs to understand right now, not for
+something it can read in the snapshot. Note the gap §3 records:
+a successful hunt is not recorded anywhere yet, and there is no
+hunting milestone or hunting event in the events system. Phase 5
+adds both; until then no briefing can fire on a hunt.
+
+### 16.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 hunting entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Hunting: 3 deer 18 tiles out, 0 hunters. Query /v1/hunting
+  for the wildlife."
+- "Bolts 0, bowyer's workshop idle. Query /v1/hunting for the
+  equipment."
+- "Corpse waiting at the butcher's shop. Query /v1/hunting for
+  the butchering."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A hunter
+already out hunting is not an opportunity; it is the snapshot
+doing its job. The entry never names the action to take and
+never carries a cost estimate. The model decides.
+
+### 16.5 What the system deliberately does NOT push, and why
+
+- **Every wild animal by name.** The snapshot names 4 race
+  counts with nearest distances; the full list is behind
+  GET /v1/hunting. A list of every animal every tick is a
+  dump, and the model cannot act on the 12th deer anyway.
+- **Danger ratings in the snapshot.** The collect carries no
+  size and no hostility flag, so the snapshot cannot rate
+  danger. The race table behind the query route is where
+  danger lives. Pushing a rating the collect cannot support
+  would be a guess.
+- **The whole ammunition ledger.** The snapshot says how many
+  bolts and quivers are in stock. The per-material breakdown
+  and the production queue are behind the route. A ledger dump
+  would grow with every bolt the fort makes.
+- **Hunting as a suggestion.** The snapshot never says "hunt
+  the deer". Whether hunting is worth it is §4, and the model
+  asks for the hunting detail when it decides. The presentation
+  gives the model what it needs to decide, not a script to
+  follow (HARNESS_ROLE.md).
+- **Butchering returns as a promise.** The snapshot says a
+  corpse is waiting. The meat, bones, and skins it yields are
+  behind the route, because the yield depends on the corpse
+  and the butcher's skill. The snapshot never states a yield
+  before the butchering happens.

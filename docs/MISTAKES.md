@@ -320,7 +320,29 @@ instrument that makes that rule checkable: a repeat count of 3 on a
 pattern the harness already surfaced is a failed acceptance, visible
 in the run's evidence, not a feeling.
 
-## 6. How it reaches the AI
+## 6. Model presentation
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+The rest of this section is the presentation design from the
+original draft, kept and renumbered: retrieval by relevance, never
+a dump. A lesson reaches the agent only when the current tick
+matches it, and only in the form the tick needs.
+
 
 Retrieval by relevance, never a dump. The ledger is never pasted into
 the snapshot. A lesson reaches the agent only when the current tick
@@ -347,6 +369,25 @@ times. It fails because Y. Do Z instead." The count, the cause, and
 the fix, nothing else. A stuck record counts as one of the two and
 always comes first. Full detail is behind the query routes, never in
 the snapshot.
+
+**Token cost.** At most 2 lessons per tick, in the snapshot after
+the suggestion, one line each, in this shape:
+
+```
+Lesson: tried queueing make_bed 3 times. It fails because no bed in stock. Check stocks first.
+Lesson: tried building with no free site 2 times. It fails because the site was occupied. Ask /v1/sites first.
+```
+
+At 7 dwarves, the two lines as written above are 205
+characters: about 68 tokens by the accountant's
+3-chars-per-token rate, 51 on the wire. At 50 dwarves the cost
+is the same: the cap is 2 lessons per tick regardless of
+population, and the lines do not grow with the number of dwarves,
+the number of lessons in the ledger, or the number of past runs.
+A stuck record counts as one of the two and always comes first.
+If a future change makes the section grow with any of those, the
+change is refused until the section is capped again.
+
 
 **The routes.**
 
@@ -376,6 +417,33 @@ the snapshot.
 is noise). Retired lessons are never surfaced unless the pattern
 recurs. The full ledger is never surfaced: the agent asks for it by
 query, the way it asks for any other state.
+
+**Opportunities: at most 3, facts only.** The opportunities
+section carries at most 3 lesson entries, each one line: facts
+plus a query route, never a suggestion, never a pause. Ignoring
+one costs nothing. A lesson entry fires only when the fact is
+actionable and the snapshot alone does not already say it, and it
+never appears when the same lesson is already in the snapshot's
+2-lesson slot: the snapshot slot and the opportunities entry are
+the same lesson in two places, never two copies. Examples of what
+qualifies:
+
+- "Lesson: bed queued 3 times with no bed in stock. Query
+  /v1/lessons for the record."
+- "Lesson: site occupied twice. Query /v1/sites for a free site."
+
+**What the system deliberately does NOT push, and why.** The
+full ledger is never surfaced: the agent asks for it by query,
+the way it asks for any other state. Candidates are never
+surfaced (one failure is noise). Retired lessons are never
+surfaced unless the pattern recurs. A lesson is never pasted
+into the snapshot outside the matching rule: the count, the
+cause, and the fix, one line each, at most 2 per tick, in the
+NEVER_CUT set with attention, header, status, and suggestion,
+so a lesson that matches is never shed to fit the token budget.
+The presentation gives the model what it needs to decide, not a
+script to follow (HARNESS_ROLE.md).
+
 
 ## 7. The learning loop
 

@@ -1193,3 +1193,139 @@ resuming afterwards.
 - docs/MISTAKES.md (being drafted in parallel, 2026-11-27):
   the mistake ledger, the mirror of the skill library. The
   two docs share the capture-route shape defined in §6.3.
+
+## 12. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+This doc is the presentation contract itself: §3 is the floor
+(what the harness must do for the model), §4 is the ceiling (what
+it must never do), and §5 is the freedom mechanisms. This section
+states how that contract is presented to the model, and what it
+costs. It does not repeat §3-§5; it states the wire format.
+
+### 12.1 Snapshot: the suggestion and the opportunities
+
+The per-tick snapshot carries two presentation elements, both
+from the fresh collect, in plain words. Two lines, in this
+shape:
+
+```
+Suggestion: brew 2 at the still (drink 97, floor 70, 3 empty barrels).
+Opportunities: 2. Stone: no mason's workshop. Farm: seeds on hand, no plot.
+```
+
+What is in it, and what is not:
+
+- **Line 1, suggestion.** One suggested action per tick, as a
+  default, not an instruction (§5). The suggestion names the
+  action, its parameters, and the one-line why in game terms.
+  The model is told it may reject the suggestion: the floor
+  requires it (§3 gaps: "the model is never told it may reject
+  the suggestion" is a gap this plan closes, and the snapshot
+  carries the rejection right with the suggestion). A
+  suggestion the model cannot reject is an order, and orders
+  are outside the ceiling.
+- **Line 2, opportunities.** At most 3 entries, each one line:
+  facts plus a query route, never a suggestion, never a pause.
+  Ignoring one costs nothing. The opportunities section is
+  itself a floor gap (§3: "the snapshot has no opportunities
+  section" is listed as missing today); when it lands, this is
+  its shape. Each system's doc names its own opportunity
+  entries; this section states the shared format only.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("suggestion: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when the suggestion or the opportunities actually move.
+
+**Token cost.** At 7 dwarves, the section as written above is
+146 characters: about 48 tokens by the accountant's
+3-chars-per-token rate, 36 on the wire. At 50 dwarves, with
+3 opportunities instead of 2, it is about 300 characters: about
+100 tokens by the accountant, 75 on the wire. The cost grows by
+about 30 tokens from 7 dwarves to 50, because the section is
+capped: 1 suggestion, 3 opportunities maximum. It does not grow
+with population, with the number of systems, or with the number
+of opportunities the harness could name. If a future change
+makes it grow with any of those, the change is refused until
+the section is capped again.
+
+### 12.2 Query route: the catalog and the detail routes
+
+The presentation contract is delivered to the model as the
+catalog (GET /v1/catalog, live today) and the per-system detail
+routes (GET /v1/stocks, /v1/units, /v1/jobs, /v1/buildings,
+/v1/sites, /v1/wiki, /v1/events, /v1/journal, live today; the
+per-system routes in each design doc, proposed). The catalog is
+self-describing: it is built from live-verified runtime enums,
+not from a hand-written list, so the model sees what the
+harness can actually do, never a capability the harness does
+not have. The snapshot carries the summary and the ids; the
+routes carry the detail. The agent asks a route when it needs
+to choose, never as a matter of routine.
+
+### 12.3 Briefing: what arrives just in time
+
+The contract has no standing briefing of its own. Briefings
+arrive per system, each from the existing briefing system
+(briefings.py), each a few hundred tokens at most, each fired
+once when its event starts. The shared rule (§5): a briefing is
+for something the model needs to understand right now, not for
+something it can read in the snapshot. A briefing never carries
+a suggestion the model must follow, never carries a strategy,
+and never punishes deviation. The briefing drift the doc records
+(the caravan briefing promising trading the agent cannot do) is
+the example of what this rule forbids: a briefing must say only
+what the harness can actually do.
+
+### 12.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 entries, each one
+line: facts plus a query route, never a suggestion, never a
+pause. Ignoring one costs nothing. The entries are named by
+each system's doc; this section states the shared rules:
+
+- An entry fires only when the fact is actionable and the
+  snapshot alone does not already say it.
+- An entry never names the action to take and never carries a
+  cost estimate. The model decides.
+- An entry never carries a strategy. The harness never chooses
+  the strategy (§4): the model gets what it needs to decide,
+  not a script to follow.
+
+### 12.5 What the system deliberately does NOT push, and why
+
+- **A strategy.** The harness never chooses the strategy (§4).
+  The snapshot carries a suggestion and at most 3
+  opportunities. A strategy would be the harness playing the
+  game for the model.
+- **A forced suggestion.** The suggestion is a default, not an
+  instruction. The model may reject it, and the snapshot says
+  so. A suggestion without the rejection right is an order.
+- **Hidden information.** The harness never hides information
+  (§4). If the model needs it to decide, it is in the snapshot
+  or behind a query route. What is not pushed is stated here,
+  per system, with the reason and the route that carries it.
+- **Deviation penalties.** The harness never punishes deviation
+  (§4). The scoring system records what happened; it does not
+  penalize ignoring a suggestion. The presentation never says
+  "you should have" or "you ignored".
+- **The whole state.** The snapshot is an index, never a dump.
+  Full state is queryable behind the routes. A dump would
+  overload the model and break the budgets this section states.

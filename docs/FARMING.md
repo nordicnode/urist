@@ -231,3 +231,82 @@ test, do not claim planting works end to end for the fixed action.
   bags inside the wagon (holder building type 32 = Wagon). Four
   more plump helmet seeds appeared later on the ground at
   (97,96,50) — dwarves ate helmets, producing seeds.
+
+## Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+This doc is the farming mechanics reference: the rules, what the
+harness verifies before planting, and what it cannot verify. The
+presentation of farming to the model lives in FARMING_PLAN.md
+§19 (Model presentation): the Farm snapshot section, the
+GET /v1/farm query route, the briefings, and the opportunities.
+This section states what this doc adds to that presentation and
+what it deliberately does not push.
+
+### Snapshot: the rules, not the numbers
+
+Nothing in this doc enters the snapshot directly. The snapshot's
+Farm section (FARMING_PLAN.md §19.1) carries plots, seeds,
+planters, and harvest, in counts. This doc's rules shape what
+that section may claim: a crop is named only when `set_farm_crop`
+verified the write by read-back; a season is named only when the
+crop grows in it; a plot is named only when its soil, light, and
+biome were read. What the harness cannot verify (§What the
+harness cannot verify) is never presented as known: the section
+names the gap instead of guessing.
+
+**Token cost.** At 7 dwarves and at 50 dwarves alike, this doc
+costs 0 tokens in the snapshot on its own: its content is
+carried by the Farm section in FARMING_PLAN.md, whose cost is
+stated there. The rules add no text of their own at any
+population.
+
+### Query route: GET /v1/farm (UNVERIFIED), via FARMING_PLAN.md
+
+The farm query route is specified in FARMING_PLAN.md §19.2. This
+doc's verification rules are what the route's answers must
+respect: per-plot crop, season, and fertilization state only as
+verified; mud state only as the route can verify it (the
+map-block designation struct has no mud flag, so mud cannot be
+verified directly today, and the route lists it as unverified,
+never guessed).
+
+### Briefing: none from this layer
+
+This doc does not brief. The farm briefings (first seeds with no
+plot; harvest ready) are specified in FARMING_PLAN.md §19.3 and
+fired by briefings.py. A rule is not a briefing: the model is
+never briefed about a farming rule, only about a farming event.
+
+### Opportunities: none from this layer
+
+This doc does not suggest. The farm opportunities (at most 3,
+facts plus a query route) are specified in FARMING_PLAN.md
+§19.4. A rule never becomes an opportunities entry.
+
+### What the system deliberately does NOT push, and why
+
+- **The refusal matrix as a dump.** The full refusal matrix
+  for `set_farm_crop` (wrong crop, wrong season, mixed light,
+  wrong biome, zero seeds) is behind the query route and the
+  action's precondition failure. The snapshot says a crop was
+  refused and why, in one line. The matrix is there when the
+  model asks why a planting failed.
+- **Unverifiable claims.** What the harness cannot verify (§What
+  the harness cannot verify) is never pushed as fact. The
+  presentation names the gap. A guess presented as a fact is
+  the error this doc exists to prevent.
+- **The investigation as advice.** The live investigation (§Live
+  investigation: why PlantSeeds jobs often do nothing) is a
+  record of what was learned, not advice to the model. The
+  model sees the farm state; the investigation is harness
+  history.

@@ -917,3 +917,174 @@ response, not luck).
 Fort state: `~/.config/df-agent-harness/world.db` snapshot, tick
 115166, 2026-11-27 (7 citizens, Carpenters #7 and Still #8 only,
 drink 97, food 23, wood 117, stone 0).
+
+## 15. Model presentation
+
+This section is required by the 2026-11-27 presentation constraint
+(GOAL.md, coordinator log 2026-11-27 ~17:47 PT): every new system
+must state how its information reaches the model, what it costs,
+and what it deliberately does not push. The snapshot stays an
+index: counts, exceptions, and diffs only, about 4,700 tokens
+typical, never a replacement for full state. Budgets hold (target
+30K, warning 60K, compaction 100K, hard cap 140K on a 200K
+window), enforced by the assembler's token accountant with its
+cut order. No system bolts its own dump onto the snapshot.
+
+Token costs below are computed from the exact section text with
+the accountant's own rates (3 chars per token for the cap, 4 chars
+per token on the wire). They are estimates until the coordinator
+verifies them against the live assembler before commit. The
+numbers are small because the section is an index: it names counts
+and exceptions, and the detail lives behind queries.
+
+### 15.1 Snapshot: the Military section
+
+The per-tick snapshot gains a short Military section, built from
+the fresh collect, in plain words. Three lines, in this shape:
+
+```
+Military: no squads. No armor, no weapons stockpiled. 0 barracks.
+Threat: none in range. Last hostile: none.
+```
+
+What is in it, and what is not:
+
+- **Line 1, readiness.** How many squads exist, whether armor
+  and weapons are stockpiled, and how many barracks exist. The
+  common case on a fort with no military yet is the example
+  above: three short absences, not silence. A missing squad is
+  an exception, not a blank: the line names what the fort lacks
+  first ("No squads. Nothing to arm one with: no forge, no
+  metal bars."). When squads exist, the line names each squad
+  (capped at 3), its size, and its state (training, idle,
+  stationed, fighting), and nothing else.
+- **Line 2, threat.** The nearest hostile, its distance in
+  tiles, and its kind, or "none in range" when there is none.
+  The threat tiers from the planner are the numbers the model
+  sees: near at 15 tiles, critical at 5 tiles, and at critical
+  the game holds paused until the threat moves away. The line
+  never names every creature on the map; it names the nearest
+  one that matters and counts the rest.
+- **Line 3, only when something is wrong.** A third line appears
+  only as an exception: a squad member wounded, a weapon trap
+  jammed at a choke point, a burrow with civilians outside it
+  during an alert. When nothing is wrong, there is no third
+  line. A quiet fort costs two lines.
+- **Diffs, not repeats.** When nothing in the section changed
+  since the last tick, the assembler prints the short form
+  ("military: unchanged"), the same way the Buildings section
+  already does. The section costs its full price only on ticks
+  when military state actually moves.
+
+**Token cost.** At 7 dwarves, the section as written above is
+108 characters: about 36 tokens by the accountant's
+3-chars-per-token rate, 27 on the wire. At 50 dwarves, with
+two squads of ten and a threat in range, it is about 330
+characters: about 110 tokens by the accountant, 82 on the wire.
+The cost grows by about 45 tokens from 7 dwarves to 50, because
+the section is capped: 3 squads maximum, 1 threat clause, 1
+exception line. It does not grow with population, with the
+number of hostiles on the map, or with the size of the armor
+stockpile. If a future change makes it grow with any of those,
+the change is refused until the section is capped again.
+
+### 15.2 Query route: GET /v1/military (UNVERIFIED)
+
+GET /v1/military returns the full detail, read from the fresh
+collect, not from a cache. This route does not exist yet; it is
+part of the implementation phases in §12, and the snapshot
+section above is written against it as a design target, not
+against a live route.
+
+- Per squad: id, name, alias, members with positions, uniform,
+  schedule, current alert, and orders (move, defend burrow,
+  patrol, train, kill).
+- Per member: dwarf, equipment state, wounds, training skill,
+  and whether they are in the barracks, on patrol, or fighting.
+- Barracks: the furniture carrying squad use (beds, armor stands,
+  weapon racks), their modes, and which squad each serves.
+- Burrows: each burrow, its tiles, which civilians are assigned,
+  and whether anyone is outside it during an alert.
+- Threats: every hostile in range with kind, distance, and
+  position, and the invasion history from the event system.
+
+The snapshot carries the summary and the ids; the route carries
+the detail. The agent asks the route when it needs to form,
+equip, or move a squad, never as a matter of routine. Until the
+route exists, the same detail is behind GET /v1/units (hostiles
+and citizens) and GET /v1/events (invasion events), which do
+exist today.
+
+### 15.3 Briefing: what arrives just in time
+
+Military has one standing briefing family, and it already exists
+in `briefings.py`: invasion, hostile, new_arrival, and
+cavern_creature briefings, served when the matching event fires.
+But the briefings as written promise things that do not exist:
+"muster the military", "seal the entrance", "let the military
+intercept them". The only response today is pause and wait
+(planner.py:337: "no military exists; shelter by pausing only if
+it closes in"). That briefing drift is a bug, and phase 1 of
+this plan fixes it: the briefings must say only what the harness
+can actually do, until the response machinery lands.
+
+- **Invasion.** Trigger: the INVASION handler fires a critical
+  event. Cost: about 120 tokens by the accountant (UNVERIFIED:
+  the briefing text has not been measured against the live
+  briefing system). It covers what the threat is, how far away
+  it is, and that the game holds paused at critical range. It
+  leaves the response to §7 once the response exists; until
+  then it says plainly that there is no military to muster.
+- **Hostile in range.** Trigger: a hostile inside the near tier
+  (15 tiles). Cost: about 80 tokens. It covers the kind and
+  distance, and whether civilians are in its path. It leaves
+  stationing and burrows to the query route.
+
+No other military event briefs the model. A squad finishing
+training, a uniform being completed, or a barracks being
+assigned are attention entries and opportunities entries, not
+briefings. A briefing is for something the model needs to
+understand right now, not for something it can read in the
+snapshot.
+
+### 15.4 Opportunities: at most 3, facts only
+
+The opportunities section carries at most 3 military entries,
+each one line: facts plus a query route, never a suggestion, never
+a pause. Ignoring one costs nothing. Examples of what qualifies:
+
+- "Military: no squads, 2 metal bars in stock. Query
+  /v1/military for readiness."
+- "Hostile 12 tiles out, civilians outside. Query /v1/military
+  for the threat list."
+- "Barracks: none assigned. Query /v1/military for the rooms."
+
+An opportunities entry fires only when the fact is actionable
+and the snapshot alone does not already say it. A squad training
+on schedule is not an opportunity; it is the snapshot doing its
+job. The entry never names the action to take and never carries
+a cost estimate. The model decides.
+
+### 15.5 What the system deliberately does NOT push, and why
+
+- **Every creature on the map.** The snapshot names the nearest
+  threat and counts the rest; the full list is behind
+  GET /v1/military. A list of every hostile every tick is a
+  dump, and the model cannot act on the 9th hostile anyway.
+- **Per-dwarf combat records.** Who hit whom, with what, and
+  when, is journal and report data. The snapshot says a squad
+  member is wounded. The record is there when the model asks
+  why.
+- **Squad creation as a suggestion.** The snapshot never says
+  "form a squad". Squad formation is §3, and the model asks
+  for the military detail when it decides. The presentation
+  gives the model what it needs to decide, not a script to
+  follow (HARNESS_ROLE.md).
+- **The whole order queue.** The snapshot says a squad is
+  stationed or patrolling. The full orders, with positions and
+  patrol routes, are behind the query route. An orders dump
+  would grow with every order the fort issues.
+- **Briefings that promise what does not exist.** Until squad
+  creation, uniforms, barracks, and burrows are proven live,
+  no briefing may tell the model to use them. The drift in
+  briefings.py is the example of what this rule forbids.

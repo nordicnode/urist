@@ -56,6 +56,26 @@ class TestWikiOffline(WikiFixtureMixin, unittest.TestCase):
         with self.assertRaises(ValueError):
             wiki.wiki_search("brewing", mode="bogus")
 
+    def test_hybrid_passes_persistent_model_cache(self):
+        # Regression: FastEmbed defaults its model cache to
+        # /tmp/fastembed_cache, which the VM wipes on every
+        # replacement; the next hybrid call then 503s because the
+        # daemon has no proxy vars to re-download the model
+        # (observed live 2026-11-27). The subprocess env must pin
+        # the cache to the home dir so it survives replacements.
+        from unittest import mock
+        fake = mock.Mock()
+        fake.returncode = 0
+        fake.stdout = json.dumps({"query": "brewing", "results": []})
+        with mock.patch("dfagent_harness.wiki.subprocess.run",
+                        return_value=fake) as run:
+            wiki.wiki_search("brewing", mode="hybrid", limit=1)
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(
+            env["FASTEMBED_CACHE_PATH"],
+            str(Path.home() / ".cache" / "fastembed"))
+        self.assertEqual(env["NO_PROXY"], "localhost,127.0.0.1")
+
     def test_prefetch_maps_event_kinds(self):
         # A strange mood pre-fetches the strange-mood page.
         results = wiki.prefetch_for_event("strange_mood")

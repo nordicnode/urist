@@ -53,6 +53,21 @@ NO_PROXY_ENV = {
     "no_proxy": "localhost,127.0.0.1",
 }
 
+# FastEmbed defaults its model cache to tempfile.gettempdir()
+# (/tmp/fastembed_cache), which the VM wipes on every replacement
+# and exec-service restart. After a wipe the next hybrid call has
+# to re-download the model from the HF Hub — and the daemon has no
+# proxy vars, so the download fails and hybrid 503s until a shell
+# with proxy env warms it (observed live 2026-11-27: hybrid 503,
+# then 200 after a manual dfq.py run warmed the cache). Pin the
+# cache to the home dir so it survives replacements; the model
+# (65 MB) is already there.
+FASTEMBED_CACHE = Path.home() / ".cache" / "fastembed"
+WIKI_ENV = {
+    **NO_PROXY_ENV,
+    "FASTEMBED_CACHE_PATH": str(FASTEMBED_CACHE),
+}
+
 
 def wiki_search(query: str, mode: str = "hybrid",
                 limit: int = 5) -> dict[str, Any]:
@@ -74,7 +89,7 @@ def wiki_search(query: str, mode: str = "hybrid",
     python = str(VENV_PYTHON) if mode in ("semantic", "hybrid") \
         else SYSTEM_PYTHON
     env = dict(os.environ)
-    env.update(NO_PROXY_ENV)
+    env.update(WIKI_ENV)
     proc = subprocess.run(
         [python, str(DFQ), mode, query, "--limit", str(limit),
          "--json"],
@@ -99,7 +114,7 @@ def wiki_page(slug: str, lines: int = 0) -> dict[str, Any]:
     if not DFQ.exists():
         raise RuntimeError(f"wiki query tool not found: {DFQ}")
     env = dict(os.environ)
-    env.update(NO_PROXY_ENV)
+    env.update(WIKI_ENV)
     args = [SYSTEM_PYTHON, str(DFQ), "page", slug]
     if lines:
         args += ["--lines", str(lines)]
